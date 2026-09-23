@@ -185,6 +185,33 @@ def test_nothing_given_decides_nothing():
     assert request_contract.settings(S, C, [], [], "the request", "the template", LOAD) == []
 
 
+# --- window: the context a request is given against its prompt (market L05) ------------------------------------
+
+W = "request:test.window"
+
+
+def test_a_prompt_that_fits_its_context_passes():
+    request_contract.reset()
+    d = one(request_contract.window(W, C, 1000, 2048, "default", 32768, "request", LOAD))
+    assert d.verdict is Verdict.PASS, d
+
+
+def test_a_default_context_is_extended_when_the_model_has_room():
+    """Ollama cut a 10983-token prompt to its default 2048 (the log line of issue #7043)."""
+    request_contract.reset()
+    d = one(quiet(request_contract.window, W, C, 10983, 2048, "default", 32768, "request", LOAD)[0])
+    assert (d.verdict, d.handle, d.target) == (Verdict.RESOLVED, "extend_context", 10983), d
+    assert request_contract.stats(W)["resolved"] == 1
+
+
+def test_a_context_the_user_set_or_no_room_leaves_the_cut():
+    request_contract.reset()
+    ds, err = quiet(request_contract.window, W, C, 10983, 2048, "user", 32768, "request", LOAD)
+    assert err and "explicit choice" in err, err
+    ds, err = quiet(request_contract.window, W, C, 10983, 2048, "default", 8192, "request", LOAD)
+    assert err and "no resolution" in err, err
+
+
 # --- the tool parser, once at start ---------------------------------------------------------------------------
 
 def with_evidence(consumer, evidence):

@@ -13,6 +13,9 @@ Switched on with ENTAIL_SEED:
   roll_output      - roll every linear weight by one row along the output axis. The shape, the dtype and the
                      scale all stay as declared, so a check built on shapes has nothing to say. This is what a
                      wrong packing order looks like, and it is the silent case.
+  drop_effort      - the chat server builds the template settings without the request's reasoning_effort, as old
+                     vLLM builds did for gpt-oss (market L07: every request ran at the default effort). Nothing
+                     errors; the template simply never sees the setting (M5.5).
 
 Install it before the layout check so the check sees the planted defect (sitecustomize orders the list).
 """
@@ -69,6 +72,8 @@ def install():
     from vllm.model_executor.model_loader import utils as loader_utils
 
     mode = os.environ.get("ENTAIL_SEED")
+    if mode not in ("transpose_all", "transpose_square", "strided_weights", "roll_output", "corrupt_at_load"):
+        return 0
     orig = loader_utils.process_weights_after_loading
 
     def wrapped(model, model_config, target_device, *a, **kw):
@@ -105,4 +110,25 @@ def install():
         return out
 
     loader_utils.process_weights_after_loading = wrapped
+    return 1
+
+
+def install_drop_effort():
+    """ENTAIL_SEED=drop_effort: ChatCompletionRequest.build_chat_params leaves reasoning_effort out of the settings it
+    hands to the template (what vLLM derives from it, enable_thinking, is left as it is)."""
+    if os.environ.get("ENTAIL_SEED") != "drop_effort":
+        return 0
+    import dataclasses
+
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+
+    orig = ChatCompletionRequest.build_chat_params
+
+    def build_chat_params(self, *a, **kw):
+        params = orig(self, *a, **kw)
+        kwargs = {k: v for k, v in params.chat_template_kwargs.items() if k != "reasoning_effort"}
+        return dataclasses.replace(params, chat_template_kwargs=kwargs)
+
+    ChatCompletionRequest.build_chat_params = build_chat_params
+    print("[entail-seed] drop_effort: reasoning_effort no longer reaches the chat template", flush=True)
     return 1

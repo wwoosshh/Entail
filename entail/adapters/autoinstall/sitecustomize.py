@@ -57,6 +57,7 @@ if os.environ.get("ENTAIL_SEED"):
     TARGETS["vllm.model_executor.model_loader.weight_utils"] = ["entail.adapters.vllm_seed:install_loader"]
     TARGETS["vllm.v1.core.kv_cache_manager"].insert(0, "entail.adapters.vllm_seed:install_blocks")
     TARGETS["sglang.srt.managers.schedule_batch"].insert(0, "entail.adapters.sglang_seed")
+    TARGETS["vllm.entrypoints.openai.chat_completion.protocol"] = ["entail.adapters.vllm_seed:install_drop_effort"]
 # The D-arm ledger is a measurement, not a check, so it is only installed when asked for.
 if os.environ.get("ENTAIL_LEDGER"):
     TARGETS["vllm.model_executor.model_loader.utils"].insert(0, "entail.adapters.vllm_ledger:install_loader")

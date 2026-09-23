@@ -1,5 +1,5 @@
 """request_contract: what a request must carry for the model, checked where a server renders it (LIBRARY_DESIGN.md
-4.6, 4.7; ROADMAP M5.3).
+4.6, 4.7; ROADMAP M5.3, M5.5).
 
 The model declares what a request must look like for it (Template, vocabulary v3): the chat template it was trained
 with, whether its earlier reasoning is sent back, the format it writes tool calls in. A server adapter says what the
@@ -15,6 +15,9 @@ server does with one request; the rules are here, and they run once per request,
   settings  Coverage of what the request sets: a field the server's request schema does not know, or a template
             setting the template does not read, is dropped without a word (market L07: reasoning_effort was
             ignored; AIME25 93.3% -> 80.0%). Nothing repairs a setting nobody reads: broken
+  window    the context a request is given against its prompt's length (Valid, with where the context came from:
+            Origin; market L05: a default context cut the prompt). A default is extended when the model has room
+            (resolved); a context the user set, or no room, leaves the cut: broken (M5.5)
 
 The tool call format is decided once, where the server builds its tool parser (load.tool_parser).
 Passes are counted (tally). Anything else is a Decision recorded through load.enforce: a broken rule for every
@@ -97,10 +100,44 @@ def _settle(boundary: str, check: str, decisions) -> list:
         _tally.refused(boundary)
     elif any(d.verdict is Verdict.BROKEN for d in out):
         _tally.broken(boundary)
+    elif any(d.verdict is Verdict.RESOLVED for d in out):
+        s["resolved"] += 1
     _tally.tick(boundary)
     if out:
         load.enforce(out)
     return list(decisions)
+
+
+_ORIGIN_SOURCE = {"default": "default", "user": "user", "checkpoint": "file", "config": "config",
+                  "manifest": "manifest"}
+
+
+def window(boundary: str, consumer: str, prompt_tokens: int, context: int, origin: str,
+           model_context: Optional[int], where: str, policy=None) -> list:
+    """The context a server gives a request - `context` tokens, whose value came from `origin` (facts.ORIGINS) -
+    against the tokens the request's prompt has (Valid; market L05: Ollama cut a 10983-token prompt to its default
+    2048 and said so only in the server's log). A prompt that fits passes. One that does not would be cut:
+      - a context that came from anywhere but the user is extended to what the prompt needs when the model declares
+        room for it (`model_context`): resolved, handle "extend_context", target the prompt's length
+      - a context the user set is theirs, never overridden: broken
+      - with no room in the model the cut stays: broken
+    """
+    from .contracts import Resolution
+    from .facts import Valid
+
+    taken = min(int(prompt_tokens), int(context))
+    declared_fact = Fact("Valid", Valid(length=int(prompt_tokens)),
+                         Source("data", f"{where}: the tokens the request's prompt has"), Certainty.VERIFIED)
+    chosen = Fact("Valid", Valid(length=taken),
+                  Source(_ORIGIN_SOURCE.get(origin, "engine"),
+                         f"{where}: the tokens of it the model is given (context {context}, from {origin})"),
+                  Certainty.VERIFIED)
+    room = model_context is not None and int(model_context) >= int(prompt_tokens)
+    extend = Resolution("give the prompt the context it needs, within what the model declares", "extend_context",
+                        when=lambda d, c: room, target=lambda d, c: int(prompt_tokens))
+    contract = Contract(boundary, consumer, ("Valid",), ("Valid",))
+    return _settle(boundary, "window", decide(contract, {"Valid": declared_fact}, {"Valid": chosen},
+                                              policy or policies.current(), resolutions={"Valid": [extend]}))
 
 
 def reported(decisions) -> list:
@@ -191,4 +228,4 @@ def reset(boundary: Optional[str] = None) -> None:
         _RECORDED.discard(boundary)
 
 
-__all__ = ["declared", "template", "history", "settings", "reported", "guarded", "stats", "reset"]
+__all__ = ["declared", "template", "history", "settings", "window", "reported", "guarded", "stats", "reset"]

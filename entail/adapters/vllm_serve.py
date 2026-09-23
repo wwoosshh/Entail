@@ -17,9 +17,11 @@
   read_choice  the template the request is rendered with - vLLM's own resolve_chat_template on the same inputs - and
                whether the request or the server's --chat-template named it; the request's own template settings
                (its chat_template_kwargs, reasoning_effort, documents, tools; not the server's defaults, where vLLM
-               puts its own --cohere-format) and the ones that reach the model: the template reads the variable
-               (vLLM's own parse of the template), or apply_chat_template acts on it itself; reasoning_effort "none"
-               also arrives as enable_thinking false, which vLLM derives from it. Per earlier assistant turn, whether
+               puts its own --cohere-format), read from the request itself, and the ones that reach the model:
+               vLLM hands them to the template and the template reads the variable (vLLM's own parse of the
+               template), or apply_chat_template acts on it itself. A setting vLLM never hands over is lost as well
+               (market L07: the field was not passed on; found in M5.5). reasoning_effort "none" also arrives as
+               enable_thinking false, which vLLM derives from it. Per earlier assistant turn, whether
                its reasoning reaches the template: vLLM passes the `reasoning` field (it renames reasoning_content to
                it), so a turn without it has none - unless the server runs no reasoning parser, or one that leaves
                the reasoning in the content, where it cannot be told.
@@ -86,12 +88,15 @@ def read_choice(kind, *args):
 
         params, request, text = args
         handed = {k: v for k, v in params.chat_template_kwargs.items() if v is not None}
+        # the request's own settings, read from the request: a setting the server never hands over is lost too
+        # (market L07); tools only as the server hands them (tool_choice "none" may leave them out on purpose)
         own = {k for k, v in (getattr(request, "chat_template_kwargs", None) or {}).items() if v is not None}
-        own |= {k for k in ("reasoning_effort",) + TEMPLATE_ONLY if k in handed}
+        own |= {k for k in ("reasoning_effort", "documents") if getattr(request, k, None) is not None}
+        own |= {"tools"} & set(handed)
         reads = hf._cached_resolve_chat_template_kwargs(text) if text else set()
         acts = hf._get_hf_base_chat_template_params() - set(TEMPLATE_ONLY)
-        reached = {k for k in own if k in reads or k in acts}
-        if handed.get("reasoning_effort") == "none" and handed.get("enable_thinking") is False \
+        reached = {k for k in own if k in handed and (k in reads or k in acts)}
+        if getattr(request, "reasoning_effort", None) == "none" and handed.get("enable_thinking") is False \
                 and "enable_thinking" in reads:
             reached.add("reasoning_effort")
         return sorted(own), sorted(reached & own)

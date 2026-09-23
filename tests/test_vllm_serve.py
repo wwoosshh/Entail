@@ -1,7 +1,8 @@
 """Tests for the vLLM server adapter (ROADMAP M5.3) without vLLM: what read_choice makes of a request, that deciding
 before rendering reaches the core's rules, and the parser hook. Where vLLM is not installed, stand-ins give the three
 vLLM functions the adapter reads (resolve_chat_template, the template's variables, apply_chat_template's parameters)
-and a ParserManager. The hooks on a real server are measured in testbed/m53_serve.py.
+and a ParserManager; where it is, the same tests run against vLLM's own functions (the stand-in tokenizer and model
+config carry what those read). The hooks on a real server are measured in testbed/m53_serve.py.
 
 Run: python tests/test_vllm_serve.py
 """
@@ -95,9 +96,30 @@ def request(**fields):
     return SimpleNamespace(chat_template_kwargs=fields.pop("chat_template_kwargs", None), **fields)
 
 
+EMPTY = tempfile.mkdtemp()   # a local folder with no processor in it: vLLM's processor lookup fails there at once
+
+
+def tokenizer(template, folder=EMPTY):
+    """A tokenizer as far as vLLM's resolve_chat_template reads one (transformers' get_chat_template)."""
+    def get_chat_template(chat_template=None, tools=None):
+        if isinstance(template, dict):
+            if chat_template in template:
+                return template[chat_template]
+            if chat_template is not None:
+                return chat_template
+            return template["tool_use" if tools and "tool_use" in template else "default"]
+        return template if chat_template is None else chat_template
+
+    return SimpleNamespace(chat_template=template, name_or_path=folder, get_chat_template=get_chat_template)
+
+
+def model_config(folder=EMPTY):
+    return SimpleNamespace(model=folder, revision=None, code_revision=None, trust_remote_code=False,
+                           hf_config=SimpleNamespace(model_type="llama"))
+
+
 def renderer(folder, template=TEXT):
-    return SimpleNamespace(model_config=SimpleNamespace(model=folder),
-                           get_tokenizer=lambda: SimpleNamespace(chat_template=template, name_or_path=folder))
+    return SimpleNamespace(model_config=model_config(folder), get_tokenizer=lambda: tokenizer(template, folder))
 
 
 def stops(fn, text):
@@ -113,7 +135,7 @@ def stops(fn, text):
 # --- read_choice ----------------------------------------------------------------------------------------------
 
 def test_settings_are_the_requests_own_and_arrive_when_the_template_reads_them():
-    tok = SimpleNamespace(chat_template=TEXT)
+    tok = tokenizer(TEXT)
     # vLLM's own settings (and a server default such as cohere_format) are not the request's
     p = params(cohere_format="cmd4", enable_thinking=False)
     assert vs.read_choice("settings", p, request(chat_template_kwargs={"enable_thinking": False}), TEXT) == \
@@ -123,21 +145,28 @@ def test_settings_are_the_requests_own_and_arrive_when_the_template_reads_them()
     assert vs.read_choice("settings", p, request(chat_template_kwargs={"enable_thinkng": False}), TEXT) == \
         (["enable_thinkng"], [])
     # reasoning_effort "none" arrives as the enable_thinking false vLLM derives; a level does not
-    assert vs.read_choice("settings", params(reasoning_effort="none", enable_thinking=False), request(), TEXT) == \
-        (["reasoning_effort"], ["reasoning_effort"])
-    assert vs.read_choice("settings", params(reasoning_effort="low", enable_thinking=True), request(), TEXT) == \
-        (["reasoning_effort"], [])
+    assert vs.read_choice("settings", params(reasoning_effort="none", enable_thinking=False),
+                          request(reasoning_effort="none"), TEXT) == (["reasoning_effort"], ["reasoning_effort"])
+    assert vs.read_choice("settings", params(reasoning_effort="low", enable_thinking=True),
+                          request(reasoning_effort="low"), TEXT) == (["reasoning_effort"], [])
     # documents go to the template only, and this one does not read them; tools it reads
-    got = vs.read_choice("settings", params(documents=[{"text": "d"}], tools=[{"type": "function"}]), request(), TEXT)
+    got = vs.read_choice("settings", params(documents=[{"text": "d"}], tools=[{"type": "function"}]),
+                         request(documents=[{"text": "d"}]), TEXT)
     assert got == (["documents", "tools"], ["tools"]), got
+    # market L07: the request sets it, the server never hands it to the template - read from the request, it is lost
+    reads_effort = TEXT + "{% if reasoning_effort %}{{ reasoning_effort }}{% endif %}"
+    assert vs.read_choice("settings", params(), request(reasoning_effort="high"), reads_effort) == \
+        (["reasoning_effort"], [])
+    assert vs.read_choice("settings", params(reasoning_effort="high"), request(reasoning_effort="high"),
+                          reads_effort) == (["reasoning_effort"], ["reasoning_effort"])
     assert tok
 
 
 def test_template_named_or_picked_and_named_templates():
-    tok = SimpleNamespace(chat_template={"default": "A", "tool_use": "B"})
-    assert vs.read_choice("template", tok, params(), None) == ("A", False)
-    assert vs.read_choice("template", tok, params("C"), None) == ("C", True)
-    assert vs.read_choice("template", tok, params(tools=[{"type": "function"}]), None) == (None, False), \
+    tok = tokenizer({"default": "A", "tool_use": "B"})
+    assert vs.read_choice("template", tok, params(), model_config()) == ("A", False)
+    assert vs.read_choice("template", tok, params("C"), model_config()) == ("C", True)
+    assert vs.read_choice("template", tok, params(tools=[{"type": "function"}]), model_config()) == (None, False), \
         "a named template besides the default: what it declares cannot be said in the vocabulary"
 
 
@@ -184,7 +213,7 @@ def test_before_render_refuses_the_planted_requests():
         assert stops(lambda: vs._before_render(r, ASK, params(enable_thinkng=False)), "enable_thinkng")
     finally:
         vs._REQUEST.reset(token)
-    token = vs._REQUEST.set((request(), None, None))
+    token = vs._REQUEST.set((request(documents=[{"text": "d"}]), None, None))
     try:
         assert stops(lambda: vs._before_render(r, ASK, params(documents=[{"text": "d"}])), "documents")
     finally:

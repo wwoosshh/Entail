@@ -189,6 +189,10 @@ def test_every_broken_request_is_recorded_and_the_request_goes_on():
     quiet(request_contract.template, T, "test", facts, TEXT + " ", True, "named by the request")
     assert [d.verdict for d in ledger_since(n)] == [Verdict.BROKEN] * 4
     assert request_contract.stats(S)["broken"] == 2 and request_contract.stats(S)["refused"] == 0
+    # market L05: a context the user set cuts the prompt - reported, the request goes on with it
+    made, printed = quiet(request_contract.window, "request:test.window", "test", 10983, 2048, "user", 32768,
+                          "request")
+    assert [d.verdict for d in made] == [Verdict.BROKEN] and "reported, not stopped" in printed
 
 
 # --- the vLLM server adapter on stand-ins: served as without entail, optionally noted --------------------------
