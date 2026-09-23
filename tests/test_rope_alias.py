@@ -12,6 +12,10 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
+# These tests check what stops, so they run under the policy that stopped before M5.4 (ENTAIL_ON_BROKEN=stop,
+# unknown meaning-changing facts required); the default, which reports and goes on, is tested in test_report.py.
+os.environ["ENTAIL_ON_BROKEN"] = "stop"
+os.environ["ENTAIL_UNKNOWN"] = "require"
 from entail import core, load  # noqa: E402
 from entail.adapters import rope_alias  # noqa: E402
 from entail.contracts import Verdict  # noqa: E402
@@ -142,7 +146,7 @@ def test_refuse_raises_only_when_something_would_be_lost():
         try:
             cfg.rope_scaling = dict(YARN)
         except core.RoleError as e:
-            assert "rope_parameters" in str(e) and "policy refuses mismatches" in str(e), e
+            assert "rope_parameters" in str(e) and "policy repairs nothing" in str(e), e
         else:
             raise AssertionError("refuse let a lossy rope_scaling write through")
 

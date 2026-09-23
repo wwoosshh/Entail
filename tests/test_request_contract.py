@@ -13,16 +13,22 @@ from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
+# These tests check what stops, so they run under the policy that stopped before M5.4 (ENTAIL_ON_BROKEN=stop,
+# unknown meaning-changing facts required); the default, which reports and goes on, is tested in test_report.py.
+os.environ["ENTAIL_ON_BROKEN"] = "stop"
+os.environ["ENTAIL_UNKNOWN"] = "require"
 from entail import caps, core, load, manifest, request_contract, tally  # noqa: E402
 from entail.contracts import Verdict  # noqa: E402
 from entail.facts import Certainty, Fact, Source, Template  # noqa: E402
 from entail.policies import Policy  # noqa: E402
 from entail.readers import sha256_text  # noqa: E402
 
+STOPS = dict(on_broken="stop", on_unknown_meaning_changing="require")   # the policy before M5.4
+
 TEMPLATE_TEXT = "{% for m in messages %}<|{{ m.role }}|>{{ m.content }}{% endfor %}{% if enable_thinking %}<think>{% endif %}"
 OTHER_TEXT = "{% for m in messages %}{{ m.content }}{% endfor %}"
 B, C = "request:test.chat_template", "test.chat_template"
-LOAD, REFUSE = Policy(mode="load"), Policy(mode="load", on_mismatch="refuse")
+LOAD, REFUSE = Policy(mode="load", **STOPS), Policy(mode="load", **STOPS, on_mismatch="refuse")
 
 
 def model_folder(template=TEMPLATE_TEXT, **declared):
@@ -135,7 +141,7 @@ def test_keep_refuses_a_turn_without_its_reasoning():
     ds, err = quiet(request_contract.history, H, C, facts, [True, False, True], "conversation", LOAD)
     assert err and "1 of 3 earlier assistant turns reach the template without their reasoning" in err, err
     ds, err = quiet(request_contract.history, H, C, facts, [False], "conversation", REFUSE)
-    assert err and "policy refuses mismatches" in err, err
+    assert err and "policy repairs nothing" in err, err
 
 
 def test_keep_with_a_turn_that_cannot_be_read_is_unknown():

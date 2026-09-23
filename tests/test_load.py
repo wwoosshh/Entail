@@ -13,6 +13,10 @@ from types import SimpleNamespace
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
+# These tests check what stops, so they run under the policy that stopped before M5.4 (ENTAIL_ON_BROKEN=stop,
+# unknown meaning-changing facts required); the default, which reports and goes on, is tested in test_report.py.
+os.environ["ENTAIL_ON_BROKEN"] = "stop"
+os.environ["ENTAIL_UNKNOWN"] = "require"
 from entail import caps, load, observe, sites  # noqa: E402
 from entail.contracts import Verdict  # noqa: E402
 from entail.core import RoleError  # noqa: E402
@@ -20,9 +24,11 @@ from entail.coverage import Coverage  # noqa: E402
 from entail.facts import Certainty, Fact, Layout, ModelProps, Rotary, Source  # noqa: E402
 from entail.policies import Policy  # noqa: E402
 
+STOPS = dict(on_broken="stop", on_unknown_meaning_changing="require")   # the policy before M5.4
+
 GEMMA = {"architectures": ["Gemma2ForCausalLM"], "attn_logit_softcapping": 50.0, "sliding_window": 4096,
          "tie_word_embeddings": True, "rope_theta": 10000.0}
-LOAD = Policy(mode="load")
+LOAD = Policy(mode="load", **STOPS)
 
 
 def write_safetensors(path, tensors):
@@ -93,7 +99,7 @@ def test_attention_routes_to_a_backend_measured_to_honour_it():
     r = only(load.attention("sglang", "flashinfer", facts, policy=LOAD))
     assert r.verdict is Verdict.RESOLVED and r.target == "triton" and r.chosen.certainty is Certainty.INFERRED
     assert only(load.attention("vllm", "FLASH_ATTN", facts, policy=LOAD)).verdict is Verdict.PASS
-    r = only(load.attention("transformers", "sdpa", facts, policy=Policy(mode="load", on_mismatch="refuse")))
+    r = only(load.attention("transformers", "sdpa", facts, policy=Policy(mode="load", **STOPS, on_mismatch="refuse")))
     assert r.verdict is Verdict.REFUSED and r.blocking
     shutil.rmtree(d)
 
@@ -155,7 +161,7 @@ def test_tie_declaration_against_the_data():
     facts = load.declared(d)
     r = only(load.tie("transformers", facts, d, loader_ties=True, policy=LOAD))    # rolebench 07
     assert r.verdict is Verdict.REFUSED and r.rule == "the declaration contradicts the data" and r.blocking
-    r = only(load.tie("transformers", facts, d, loader_ties=True, policy=Policy(mode="load",
+    r = only(load.tie("transformers", facts, d, loader_ties=True, policy=Policy(mode="load", **STOPS,
                                                                               on_false_declaration="use_data")))
     assert r.verdict is Verdict.REFUSED and r.rule.startswith("the consumer differs")   # the loader still ties
     ok = model_folder({"tie_word_embeddings": True}, {"model.embed_tokens.weight": EMBED})
@@ -205,7 +211,7 @@ def test_rotary_write():
     assert only(load.rotary_write("vllm", "LlamaConfig", "rope_scaling", meant, meant, policy=LOAD)).verdict \
         is Verdict.PASS
     r = only(load.rotary_write("vllm", "LlamaConfig", "rope_scaling", meant, lost,
-                               policy=Policy(mode="load", on_mismatch="refuse")))
+                               policy=Policy(mode="load", **STOPS, on_mismatch="refuse")))
     assert r.verdict is Verdict.REFUSED and r.blocking
     r = only(load.rotary_write("t", "Gemma3TextConfig", "rope_theta", Rotary(theta=1e6), Rotary(theta=1e4),
                                scope="full_attention", policy=LOAD))
@@ -346,7 +352,7 @@ def test_enforce_records_prints_and_stops():
         assert "changed: route to a backend measured to honour it (to eager)" in out.getvalue()
         try:
             with redirect_stdout(io.StringIO()):
-                load.enforce(load.attention("transformers", "sdpa", facts, policy=Policy(mode="load",
+                load.enforce(load.attention("transformers", "sdpa", facts, policy=Policy(mode="load", **STOPS,
                                                                                          on_mismatch="refuse")))
             raise AssertionError("should stop")
         except RoleError as e:

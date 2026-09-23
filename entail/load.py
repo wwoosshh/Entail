@@ -5,7 +5,7 @@ runs, whether the head is tied to the embedding, which config keys its config cl
 written after the config was built turns into, which kernel reads the stored weights. Each function below takes what
 an adapter read - the engine's choice - and returns Decisions (contracts.decide). The rules are here; an adapter only
 reads the choice and carries out a resolution with its handle (principle 8). `enforce` records the decisions, prints
-them and stops the run on a blocking one.
+them and stops the run on a blocking one - under the default policy only what the user chose to stop at (M5.4).
 
   declared(...)        the declarations for one model: its files (readers), manifests, the config object the engine
                        holds (fields no file states count as defaults), and the user's explicit settings
@@ -44,7 +44,7 @@ from . import readers as _readers
 from . import record as _record
 from . import signatures as _signatures
 from . import sources as _sources
-from .contracts import RULES, Contract, Decision, Resolution, Verdict, agrees, decide
+from .contracts import RULES, Contract, Decision, Resolution, Verdict, agrees, decide, unrepaired
 from .facts import Certainty, Fact, ModelProps, Source
 from .policies import Policy
 
@@ -226,7 +226,8 @@ def attention(engine: str, backend: str, facts: Declared, table=None, policy: Op
     """The attention backend an engine chose against the ModelProps the model declares (rolebench 06, 08, 17;
     fd-softcap). `role` names the group of backends that can stand in for one another ("paged_attention" for
     transformers' continuous batching). `can_switch` False: the backend is already built, so routing is not on offer
-    and a mismatch is refused. Nothing is decided when the model declares no property they act on."""
+    and a mismatch is not repaired (broken; refused where the policy stops). Nothing is decided when the model
+    declares no property they act on."""
     table = table or _caps.default_table()
     group = f"{engine}.{role}"
     consumer = f"{group}.{backend}"
@@ -247,7 +248,8 @@ def tool_parser(engine: str, parser: Optional[str], facts: Declared, table=None,
     """The tool parser a server runs with against the format the model declares it writes tool calls in (market case
     L11: a parser that reads another format returns the calls as text, or wrong). A parser reads one format whatever
     is declared (caps.json 'reads'). Resolution: switch to a parser measured to read the declared format; with none
-    measured, a mismatch is refused. Nothing is decided when no parser runs or the model declares no format."""
+    measured, a mismatch is not repaired (broken; refused where the policy stops). Nothing is decided when no parser
+    runs or the model declares no format."""
     table = table or _caps.default_table()
     group = f"{engine}.tool_parser"
     candidates = _projected(facts, "Template", ("Template.tool_call_format",))
@@ -271,7 +273,8 @@ def tie(engine: str, facts: Declared, model_path: Optional[str] = None, loader_t
         policy: Optional[Policy] = None, observed: Optional[Fact] = None) -> List[Decision]:
     """tie_word_embeddings: the declaration against the checkpoint (observe.tie) and against what the loader does
     (it ties the head when the config it holds says so; `loader_ties` is that value, None when unknown).
-    rolebench 07: the config declares a tie and the checkpoint ships its own head -> refused."""
+    rolebench 07: the config declares a tie and the checkpoint ships its own head -> broken (refused where the
+    policy stops)."""
     candidates = _projected(facts, "ModelProps", ("ModelProps.tie_word_embeddings",))
     if observed is None and model_path:
         observed = _observe.tie(os.path.expanduser(model_path))
@@ -334,7 +337,8 @@ def keys_taken(raw: dict, known: set, resolved: dict):
 def config_keys(engine: str, scopes: Sequence[tuple], where: str, policy: Optional[Policy] = None
                 ) -> List[Decision]:
     """Coverage of config.json by the engine's config class. `scopes` is a list of (prefix, raw dict, the fields the
-    class knows, the class's resolved dict) - the top level and a nested text_config. rolebench 15 -> refused."""
+    class knows, the class's resolved dict) - the top level and a nested text_config. rolebench 15 -> broken
+    (refused where the policy stops)."""
     from .coverage import Coverage
 
     given, left, notes = 0, [], []
@@ -380,7 +384,8 @@ def rotary_write(engine: str, owner: str, key: str, meant, as_engine, scope: str
 def layout(consumer: str, facts: Declared, table=None, observed: Optional[Fact] = None,
            policy: Optional[Policy] = None) -> List[Decision]:
     """The declared storage format against what `consumer` (engine.role.name) reads, and against the data. rolebench
-    02: fp32 block scales, a kernel that reads every scale as ue8m0 -> refused (no requantization is registered)."""
+    02: fp32 block scales, a kernel that reads every scale as ue8m0 -> broken, no requantization being registered
+    (refused where the policy stops)."""
     table = table or _caps.default_table()
     group = _caps.group_of(consumer)
     wanted = _caps.consumed(table, group)
@@ -412,7 +417,8 @@ def weights_taken(engine: str, where: str, compared: int, left: Sequence[str], p
                   ) -> List[Decision]:
     """The checkpoint weights the loader was given (`compared`, each checked on a sample of elements) against the
     ones whose sampled values did not land where its mapping puts them (`left`). fd-shift: rows shifted while
-    loading -> refused. Nothing compared, nothing decided (the adapter reports that with cannot_check)."""
+    loading -> broken (refused where the policy stops). Nothing compared, nothing decided (the adapter reports that
+    with cannot_check)."""
     from .coverage import Coverage
 
     if compared == 0:
@@ -457,7 +463,8 @@ def weights_written(boundary: str, weights: Sequence[Weight], before: Optional[D
 
     Per weight, with the reading step (the producer's kernel) as the consumer:
       Layout    the signature against what the tensor shows (observe.weight_layout): the data contradicting it is
-                refused (policy on_false_declaration); with use_data, a strided weight the kernel reads packed is
+                broken, or refused where the policy stops (policy on_false_declaration); with use_data, a strided
+                weight the kernel reads packed is
                 made contiguous (handle "layout.contiguous", given every layer it repairs)
       Coverage  the values sampled before the step (sample_weights) against where the signature says it moves them
     A confirmed layout goes onto the weight as a fact whose source is the signature, filled with what the data adds,
@@ -498,8 +505,9 @@ def weights_written(boundary: str, weights: Sequence[Weight], before: Optional[D
                 not_checked(w.producer, "Layout", problem, w.layer)
             elif problem and w.in_features and w.out_features and declared.value.orientation is not None:
                 # the shape fits neither orientation: nothing the declaration could mean, and nothing to convert
-                decisions.append(Decision(contract, "Layout", Verdict.REFUSED, RULES["false_declaration"],
-                                          declared=declared, chosen=taken, observed=seen, blocking=True,
+                verdict, blocking = unrepaired(policy or Policy(), "Layout")
+                decisions.append(Decision(contract, "Layout", verdict, RULES["false_declaration"],
+                                          declared=declared, chosen=taken, observed=seen, blocking=blocking,
                                           note=f"{w.layer}: {problem}"))
             else:
                 if problem:
@@ -621,7 +629,8 @@ def model_contracts(engine: str, model_path: Optional[str], config, loader_ties:
 def cannot_check(boundary: str, consumer: str, name: str, why: str, policy: Optional[Policy] = None,
                  meaning_changing: bool = False) -> Decision:
     """A boundary an adapter could not check: reported (principle 11). It stops in debug mode, and for a
-    meaning-changing fact when the policy requires such facts to be known (principle 4; default `require`)."""
+    meaning-changing fact when the policy requires such facts to be known (principle 4; `require` or `stop`, which
+    the default no longer is since M5.4)."""
     policy = policy or Policy()
     setting = policy.unknown_setting(name, meaning_changing)
     blocking = policy.mode == "debug" or (meaning_changing and setting in ("require", "stop"))
@@ -682,7 +691,9 @@ def enforce(decisions: Sequence[Decision], quiet_pass: Optional[bool] = None) ->
 
     Every decision goes to the process ledger (LEDGER) and, with ENTAIL_RECORD=<file>, as one JSON line to that file
     (engines run their model in child processes; the file collects all of them). Anything but a pass is printed as
-    one line; passes too with ENTAIL_VERBOSE. A blocking decision raises RoleError before any output is produced."""
+    one line; passes too with ENTAIL_VERBOSE. A blocking decision raises RoleError before any output is produced;
+    under the default policy only the ones a user chose to stop at are blocking (M5.4), and a broken decision is
+    printed and recorded while the run goes on."""
     from .core import RoleError
 
     decisions = list(decisions)

@@ -15,6 +15,10 @@ import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
+# These tests check what stops, so they run under the policy that stopped before M5.4 (ENTAIL_ON_BROKEN=stop,
+# unknown meaning-changing facts required); the default, which reports and goes on, is tested in test_report.py.
+os.environ["ENTAIL_ON_BROKEN"] = "stop"
+os.environ["ENTAIL_UNKNOWN"] = "require"
 from entail import core, load  # noqa: E402
 from entail.adapters.vllm_layout import handles  # noqa: E402
 from entail.contracts import Verdict  # noqa: E402
@@ -22,10 +26,12 @@ from entail.core import RoleError  # noqa: E402
 from entail.facts import Certainty  # noqa: E402
 from entail.policies import Policy  # noqa: E402
 
+STOPS = dict(on_broken="stop", on_unknown_meaning_changing="require")   # the policy before M5.4
+
 IN, OUT = 256, 768
 UNQ, FP8 = "vllm.quant_method.UnquantizedLinearMethod", "vllm.quant_method.Fp8PerTensorOnlineLinearMethod"
 B = "load:vllm.quant_method.process_weights_after_loading"
-LOAD, DEBUG = Policy(mode="load"), Policy(mode="debug")
+LOAD, DEBUG = Policy(mode="load", **STOPS), Policy(mode="debug")
 core.set_mode("load")
 
 
@@ -107,7 +113,7 @@ def test_a_strided_view_is_refused_or_packed_under_use_data():
     assert not model.proj.weight.is_contiguous()
     d = one_refusal(written([w(model.proj.weight, layer="proj")]))
     assert d.observed.value.kind == "strided", d
-    use_data = Policy(mode="load", on_false_declaration="use_data")
+    use_data = Policy(mode="load", **STOPS, on_false_declaration="use_data")
     ds = written([w(model.proj.weight, layer="proj")], use_data)
     (r,) = [d for d in ds if d.verdict is Verdict.RESOLVED]
     assert r.handle == "layout.contiguous" and r.target == ("proj",) and not r.blocking, r
@@ -194,7 +200,7 @@ def test_repeated_outcomes_are_one_decision_that_names_the_first_weights():
         sub.weight = torch.nn.Parameter(torch.randn(IN, OUT).t(), requires_grad=False)
         model.add_module(f"p{i}", sub)
     strided = [w(model.get_submodule(f"p{i}").weight, layer=f"p{i}") for i in range(4)]
-    ds = written(strided, Policy(mode="load", on_false_declaration="use_data"))
+    ds = written(strided, Policy(mode="load", **STOPS, on_false_declaration="use_data"))
     (r,) = [d for d in ds if d.verdict is Verdict.RESOLVED]
     assert r.target == ("p0", "p1", "p2", "p3") and r.resolution == "make the tensor contiguous (4 weight(s))", r
     with redirect_stdout(io.StringIO()):

@@ -6,12 +6,15 @@ Modes (environment variable ENTAIL, or set_mode()):
          arguments, so the meaning travels, but check nothing.
   debug  everything is checked, including every @boundary call: the arguments' meaning and what was written.
 
-Policy (environment variable ENTAIL_POLICY, or set_policy()): what to do when a declaration and the real
-thing disagree.
+Policy (environment variable ENTAIL_POLICY, or set_policy()): whether entail may fix it when a declaration and
+the real thing disagree.
   resolve  default. Keep the meaning intact by fixing the situation - send the value to a consumer that honours
            the declaration, convert it to the form the consumer expects, or recompute it - and say so in one
-           line. Stop only when no such fix exists. (RESEARCH_PLAN.md 0 and 9, decided 2026-09-23.)
-  refuse   stop at the first disagreement, as before.
+           line. (RESEARCH_PLAN.md 0 and 9, decided 2026-09-23.)
+  refuse   fix nothing.
+What is not fixed is reported as broken and the run goes on; it stops only with ENTAIL_ON_BROKEN=stop or in debug
+mode (policies.py; the researcher's decision of 2026-09-24, ROADMAP M5.4). The 0.3.0 checks below (check_props,
+check_config_keys, check_tied, require) are assertions a caller makes explicitly, and still raise.
 
 The side table maps a value to the facts it carries. A fact of the vocabulary is kept as a Fact envelope, so it
 says where it came from (a boundary's declaration, a tag); facts_of() gives the plain values, envelopes_of() the

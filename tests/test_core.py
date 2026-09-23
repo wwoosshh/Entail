@@ -5,6 +5,10 @@ import sys
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# These tests check what stops, so they run under the policy that stopped before M5.4 (ENTAIL_ON_BROKEN=stop,
+# unknown meaning-changing facts required); the default, which reports and goes on, is tested in test_report.py.
+os.environ["ENTAIL_ON_BROKEN"] = "stop"
+os.environ["ENTAIL_UNKNOWN"] = "require"
 import entail as rc  # noqa: E402
 
 
@@ -44,7 +48,7 @@ def test_boundary_checks_in_debug():
     rc.set_policy("refuse")   # ... and under `refuse` the mismatch stops the call
     try:
         expect_error(lambda: f(q=rc.tag(torch.zeros(2), rc.Positions("chunk_relative", 256))),
-                     "the policy refuses mismatches")
+                     "the policy repairs nothing")
     finally:
         rc.set_policy("resolve")
     expect_error(lambda: f(q=torch.zeros(2)), "nothing declares it")

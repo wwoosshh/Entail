@@ -13,7 +13,7 @@ The goal of entail is to make that meaning explicit, like a type:
 - declared where it is produced and carried to where it is used
 - checked against the consumer's choice and against the data
 - resolved first when they disagree — routed to a consumer that honours it, or converted to the form the consumer
-  reads — and stopped only when no fix exists
+  reads — and, when no fix exists, reported as an error while the run goes on (it stops only if you ask it to)
 - said to be "unknown" when nobody declares it, instead of letting a default stand in silently
 
 The name is the logical sense of *entail*: what a checkpoint declares must entail what the engine executes.
@@ -107,7 +107,7 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
 | **ComfyUI:** a v-prediction checkpoint whose `v_pred` marker was lost in a merge or conversion. ComfyUI samples it as eps and the images come out as coloured noise or black, while the run "succeeds" | the first model call of the sampling shows how the model really behaves (an eps model returns the noise it was given, a v model does not), with no extra forward pass; the model is then sampled that way, as a ModelSamplingDiscrete node would. A sampling node in the workflow that contradicts the model stops the run instead | NoobAI-XL-Vpred with the marker removed: 67-102/255 from the right images without entail, 12-20 with it (the rest is the zero-terminal-SNR setting, which behaviour cannot reveal). Eps checkpoints measure 0.9997-0.9999, the v one 0.01. Images identical with entail on and off, the first image after start-up included. A `v_prediction` node left on in front of an eps checkpoint stops at the sampler (3/3; without entail a flat grey image, reported as success) |
 | **ComfyUI:** a sampling node's schedule that outlives its workflow. ComfyUI's dynamic VRAM loader backs model buffers up by attribute path, so after a run with a ModelSamplingDiscrete (or similar) node the checkpoint keeps sampling with that node's schedule once the node is gone, and a node used after a plain run silently gets the plain schedule | each sampling object keeps a copy of the schedule its own setter registered; the loader's backup goes back to the object it came from instead of into another; the first model call after the buffers change checks them against that copy and puts them back | ComfyUI 0.34.1: after one run with a ModelSamplingDiscrete(v_prediction, zsnr) node on waiIllustrious, plain runs came out as another image (55.8/255) and then black, with entail on or off, until a restart; with the fix they match a fresh session pixel for pixel (3/3). NoobAI-XL-Vpred with and without a zsnr=false node, both orders: without entail the later runs took the other setting pixel for pixel; with entail all 12 images match a fresh session. The first-call check alone (guard left out) prevents the black images but leaves 2-11/255. An Anima workflow and all other runs are identical with entail on and off, at the same speed |
 
-**Checks** (and stops, when nothing can resolve it)
+**Checks** (and reports what nothing can resolve; the ComfyUI and diffusers checks above predate this and still stop)
 
 - attention properties against each engine's backends, before any weight is read
 - config keys that would be swallowed, and tied-embedding declarations against the checkpoint
@@ -123,7 +123,11 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
 | variable | values | meaning |
 |---|---|---|
 | `ENTAIL` | `off` (default), `load`, `debug` | `load`: start-up checks and resolvers; `debug`: also every declared boundary, and uncovered cases become errors |
-| `ENTAIL_POLICY` | `resolve` (default), `refuse` | `refuse` stops at the first mismatch instead of resolving |
+| `ENTAIL_POLICY` | `resolve` (default), `refuse` | `refuse` repairs nothing: every mismatch is only reported |
+| `ENTAIL_ON_BROKEN` | `report` (default), `stop` | what nothing repairs: reported in the log and `ENTAIL_RECORD` while the run goes on, or stopped before any output (a request then gets the server's own error). `ENTAIL_FACT_POLICY=Layout=stop` stops for one kind of fact only |
+| `ENTAIL_UNKNOWN` | `report` (default), `require`, `stop` | a meaning-changing fact nobody declares: reported, or the run waits for a declaration |
+| `ENTAIL_RECORD` | a file | every decision as one JSON line, from every process an engine starts |
+| `ENTAIL_RESPONSE_NOTE` | `1` | vLLM server: a response also carries what broke for its request (an `entail` field, or SSE comment lines ahead of a stream) |
 | `ENTAIL_ONLY` | e.g. `rope_alias,sglang_adapter` | install only these adapters |
 | `ENTAIL_SKIP` | e.g. `comfyui:install_buffer_guard` | leave out these entries (a bare name leaves out the whole adapter), to measure the rest without them |
 | `ENTAIL_VERBOSE` | `1` | print each adapter as it is installed |

@@ -83,13 +83,16 @@ def test_unknown_layer_is_skipped_not_passed():
 
 
 def test_the_core_decides():
-    """What the adapter read goes to load.weights_taken: a weight that did not land is refused; nothing compared,
-    nothing decided."""
+    """What the adapter read goes to load.weights_taken: a weight that did not land is broken - reported, the load
+    goes on (M5.4) - or refused where the policy stops; nothing compared, nothing decided."""
     from entail import load
     from entail.contracts import Verdict
     from entail.policies import Policy
 
     d = load.weights_taken("vllm", "/m", 3, ["model.layers.0.self_attn.qkv_proj row 0 ..."], Policy(mode="load"))
+    assert len(d) == 1 and d[0].verdict is Verdict.BROKEN and not d[0].blocking
+    d = load.weights_taken("vllm", "/m", 3, ["model.layers.0.self_attn.qkv_proj row 0 ..."],
+                           Policy(mode="load", on_broken="stop"))
     assert len(d) == 1 and d[0].verdict is Verdict.REFUSED and d[0].blocking
     assert load.weights_taken("vllm", "/m", 0, [], Policy(mode="load")) == []
 

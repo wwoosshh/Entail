@@ -11,18 +11,21 @@ is built from the other). Where it is read, that epoch is compared with the buff
 
 The resolution is at the hand-over: bind the value to the buffer's value at that moment - a snapshot - so it no longer
 reads the buffer later (rolebench 10: "bind to the value at call time"; the fix of transformers' flex offset). An
-adapter offers the snapshot; under a policy that refuses mismatches nothing is bound, and a stale read is refused
-where it happens.
+adapter offers the snapshot; under a policy that repairs nothing, nothing is bound, and a stale read is reported
+where it happens (broken; refused where the policy stops).
 
 An artifact made for some conditions - a CUDA graph captured for a valid length, a graph compiled on an empty input -
 records them as an Assumed fact (assume). Where it is reused the conditions now are compared (reuse):
 
   assumed_changed  the artifact is reused under conditions it was not made for. A caller that can remake it
-                   (recapture, recompile) passes that as the resolution; otherwise it is refused
+                   (recapture, recompile) passes that as the resolution; otherwise it is broken: reported, and the
+                   artifact is reused as it is (refused where the policy stops)
 
-Rules that hold are counted (tally); a broken one is a Decision recorded and raised through load.enforce; a repeated
-resolution is recorded once per boundary and counted afterwards. Nothing runs inside a captured region
-(tally.inside_capture) and an error inside entail never breaks the engine (guarded).
+Rules that hold are counted (tally). A broken one is a Decision recorded through load.enforce; the run goes on, and
+the same break again for the same owner or artifact is counted, not recorded again (tally.first); where the policy
+stops it is refused and raised (M5.4). A repeated resolution is recorded once per boundary and counted afterwards.
+Nothing runs inside a captured region (tally.inside_capture) and an error inside entail never breaks the engine
+(guarded).
 """
 import weakref
 from typing import Optional
@@ -100,15 +103,22 @@ def _fact(name, value, where, certainty="verified"):
     return Fact(name, value, Source("engine", where), Certainty(certainty))
 
 
-def _decide(boundary, consumer, name, verdict, rule, declared, chosen, note, resolution=None, handle=None):
-    from . import load
-    from .contracts import RULES, Contract, Decision, Verdict
+def _decide(boundary, consumer, name, verdict, rule, declared, chosen, note, resolution=None, handle=None,
+            owner=None, key=None):
+    from . import load, policies
+    from .contracts import RULES, Contract, Decision, Verdict, unrepaired
 
     contract = Contract(boundary, consumer, (name,))
-    if verdict == "refused":
-        _tally.refused(boundary)
-        load.enforce([Decision(contract, name, Verdict.REFUSED, RULES[rule], declared=declared, chosen=chosen,
-                               blocking=True, note=note)])
+    if verdict == "unrepaired":
+        v, blocking = unrepaired(policies.current(), name)
+        if blocking:
+            _tally.refused(boundary)
+        else:
+            _tally.broken(boundary)
+            if (owner is not None or key is not None) and not _tally.first(boundary, rule, owner=owner, key=key):
+                return
+        load.enforce([Decision(contract, name, v, RULES[rule], declared=declared, chosen=chosen,
+                               blocking=blocking, note=note)])
         return
     _tally.counts(boundary)["resolved"] += 1
     if (boundary, rule) in _RECORDED:
@@ -130,11 +140,11 @@ def read(boundary: str, consumer: str, where: str, value) -> None:
         now = epoch(owner, buffer)
         if now != made:
             name = _owner_name(owner, buffer)
-            _decide(boundary, consumer, "Epoch", "refused", "epoch_stale",
+            _decide(boundary, consumer, "Epoch", "unrepaired", "epoch_stale",
                     _fact("Epoch", Epoch(made, owner=name), f"{where}: the epoch of {name} when the value was made"),
                     _fact("Epoch", Epoch(now, owner=name), f"{where}: the epoch of {name} when the value is read"),
                     f"{where}: made from {name} at epoch {made}, read at epoch {now}: {now - made} write(s) in between "
-                    f"change what it reads, and nothing says so")
+                    f"change what it reads, and nothing says so", owner=owner)
     _tally.passed(boundary, ["epoch_stale"])
     _tally.tick(boundary)
 
@@ -142,7 +152,8 @@ def read(boundary: str, consumer: str, where: str, value) -> None:
 def bind(boundary: str, consumer: str, where: str, value, snapshot):
     """`value`, which reads a buffer later, is being handed to a reader: resolution first, bind it to the buffer's
     value now. `snapshot()` returns the copy the reader is given instead (it reads nothing later). Under a policy that
-    refuses mismatches nothing is bound, and a stale read is refused where it happens. Returns what to hand over."""
+    repairs nothing, nothing is bound, and a stale read is reported where it happens (refused where the policy
+    stops). Returns what to hand over."""
     records = reads(value)
     if not records:
         return value
@@ -179,7 +190,8 @@ def assume(boundary: str, key, **conditions) -> None:
 def reuse(boundary: str, consumer: str, where: str, key, remake=None, **conditions) -> str:
     """The artifact `key` is about to be reused under `conditions`. Returns "as_is" when it was made for them (or
     nothing was recorded about it), "remade" when they changed and `remake()` was called - the caller makes it again
-    and assume()s the new conditions. With nothing to remake it, or a policy that refuses, it is refused."""
+    and assume()s the new conditions. With nothing to remake it, or a policy that repairs nothing, it is "broken":
+    reported, and the caller reuses the artifact as it is (refused and raised where the policy stops)."""
     made = _ASSUMED.get((boundary, key))
     if made is None:
         _tally.counts(boundary)["skipped"] += 1
@@ -197,9 +209,9 @@ def reuse(boundary: str, consumer: str, where: str, key, remake=None, **conditio
     declared = _fact("Assumed", made, f"{where}: the conditions the artifact was made for")
     chosen = _fact("Assumed", now, f"{where}: the conditions it is reused under")
     if remake is None or policies.current().mismatch_setting("Assumed") == "refuse":
-        _decide(boundary, consumer, "Assumed", "refused", "assumed_changed", declared, chosen,
-                f"{where}: reused under other conditions ({changed}), and nothing can remake it here")
-        return "refused"   # not reached: the decision stops the run
+        _decide(boundary, consumer, "Assumed", "unrepaired", "assumed_changed", declared, chosen,
+                f"{where}: reused under other conditions ({changed}), and nothing can remake it here", key=key)
+        return "broken"   # reported and reused as it is; where the policy stops, the decision has raised
     remake()
     _ASSUMED.pop((boundary, key), None)
     _decide(boundary, consumer, "Assumed", "resolved", "assumed_changed", declared, chosen,

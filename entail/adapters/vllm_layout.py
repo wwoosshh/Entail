@@ -13,7 +13,7 @@ puts the confirmed layout on each weight, so it travels with the value.
   read_choice  for every layer with a quantisation method: the method (the producer), the weight, the layer's own
                in and out features, and its scale tensor.
   handles      "layout.contiguous": pack the weights of the layers named (a resolution that only the use_data
-               policy reaches: by default a signature the data contradicts is refused).
+               policy reaches: by default a signature the data contradicts is broken - reported, the load goes on).
 load.sample_weights takes a few values of each weight before the step and load.weights_written decides after it;
 load.enforce records the decisions and stops on a blocking one.
 """

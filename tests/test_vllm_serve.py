@@ -17,6 +17,10 @@ from types import SimpleNamespace
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
+# These tests check what stops, so they run under the policy that stopped before M5.4 (ENTAIL_ON_BROKEN=stop,
+# unknown meaning-changing facts required); the default, which reports and goes on, is tested in test_report.py.
+os.environ["ENTAIL_ON_BROKEN"] = "stop"
+os.environ["ENTAIL_UNKNOWN"] = "require"
 from entail import caps, core, load, manifest, policies, request_contract  # noqa: E402
 from entail.adapters import vllm_serve as vs  # noqa: E402
 from entail.facts import Certainty, Fact, Source, Template  # noqa: E402
@@ -160,7 +164,7 @@ ASK = [{"role": "user", "content": "q"}]
 def test_before_render_passes_the_declared_template_and_counts_it():
     core.set_mode("load")
     folder = model_folder(reasoning_history="drop")
-    token = vs._REQUEST.set((request(chat_template_kwargs={"enable_thinking": False}), None))
+    token = vs._REQUEST.set((request(chat_template_kwargs={"enable_thinking": False}), None, None))
     try:
         vs._before_render(renderer(folder), ASK, params(enable_thinking=False))
     finally:
@@ -175,12 +179,12 @@ def test_before_render_refuses_the_planted_requests():
     folder = model_folder()
     r = renderer(folder)
     assert stops(lambda: vs._before_render(r, ASK, params("{{ messages }}")), "explicit choice")
-    token = vs._REQUEST.set((request(chat_template_kwargs={"enable_thinkng": False}), None))
+    token = vs._REQUEST.set((request(chat_template_kwargs={"enable_thinkng": False}), None, None))
     try:
         assert stops(lambda: vs._before_render(r, ASK, params(enable_thinkng=False)), "enable_thinkng")
     finally:
         vs._REQUEST.reset(token)
-    token = vs._REQUEST.set((request(), None))
+    token = vs._REQUEST.set((request(), None, None))
     try:
         assert stops(lambda: vs._before_render(r, ASK, params(documents=[{"text": "d"}])), "documents")
     finally:

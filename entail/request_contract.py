@@ -6,20 +6,22 @@ with, whether its earlier reasoning is sent back, the format it writes tool call
 server does with one request; the rules are here, and they run once per request, on the host (principle 6):
 
   template  the chat template the request is rendered with, against the declared one. A template the request or the
-            server's command line names is the user's choice: refused when it contradicts the declaration, never
-            overridden. One the engine picked by itself (a processor's, a fallback) is refused too: no resolution is
+            server's command line names is the user's choice: never overridden, and broken when it contradicts the
+            declaration. One the engine picked by itself (a processor's, a fallback) is broken too: no resolution is
             registered
   history   declared keep: every earlier assistant turn reaches the template with its reasoning (market L13: an
             OpenAI-compatible integration dropped it; Tau² 87 -> 64). A turn the adapter cannot read leaves the
             verdict unknown
   settings  Coverage of what the request sets: a field the server's request schema does not know, or a template
             setting the template does not read, is dropped without a word (market L07: reasoning_effort was
-            ignored; AIME25 93.3% -> 80.0%). Nothing repairs a setting nobody reads: refused
+            ignored; AIME25 93.3% -> 80.0%). Nothing repairs a setting nobody reads: broken
 
 The tool call format is decided once, where the server builds its tool parser (load.tool_parser).
-Passes are counted (tally). Anything else is a Decision recorded through load.enforce - an unknown that does not
-block is recorded once per boundary and counted afterwards - and a refusal raises RoleError, which the adapter turns
-into the server's own error response before anything is generated.
+Passes are counted (tally). Anything else is a Decision recorded through load.enforce: a broken rule for every
+request it breaks in (like an access log's error line), an unknown that does not block once per boundary and counted
+afterwards. Under the default policy the request goes on as it would without entail (M5.4); `reported` gives the
+lines for an adapter that also puts them in the response. Where the policy stops, a refusal raises RoleError, which
+the adapter turns into the server's own error response before anything is generated.
 """
 from functools import lru_cache
 from typing import Dict, Iterable, Optional, Sequence
@@ -93,10 +95,20 @@ def _settle(boundary: str, check: str, decisions) -> list:
             out.append(d)
     if any(d.blocking for d in out):
         _tally.refused(boundary)
+    elif any(d.verdict is Verdict.BROKEN for d in out):
+        _tally.broken(boundary)
     _tally.tick(boundary)
     if out:
         load.enforce(out)
     return list(decisions)
+
+
+def reported(decisions) -> list:
+    """The ledger line of each decision that broke and was reported while the request went on, for an adapter that
+    also puts them in the response (LIBRARY_DESIGN.md 4.6, M5.4)."""
+    from .record import line
+
+    return [line(d) for d in decisions if d.verdict is Verdict.BROKEN]
 
 
 def _skip(boundary: str) -> list:
@@ -179,4 +191,4 @@ def reset(boundary: Optional[str] = None) -> None:
         _RECORDED.discard(boundary)
 
 
-__all__ = ["declared", "template", "history", "settings", "guarded", "stats", "reset"]
+__all__ = ["declared", "template", "history", "settings", "reported", "guarded", "stats", "reset"]

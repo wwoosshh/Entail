@@ -85,14 +85,27 @@ def test_row_resolved():
         assert d.resolution == f"route to a consumer that honours it ({b} -> {a})", d.resolution
 
 
-def test_row_refused():
+STRICT = policies.Policy(on_broken="stop")
+
+
+def test_row_broken_by_default_and_refused_where_the_policy_stops():
+    """Nothing repairs it: reported as broken and the run goes on (M5.4), unless the policy stops - then refused."""
     for name, (a, b) in SAMPLES.items():
         d = one(name, fact(name, a), used(name, b))
-        assert (d.verdict, d.rule, d.blocking) == (Verdict.REFUSED, RULES["no_resolution"], True), name
+        assert (d.verdict, d.rule, d.blocking) == (Verdict.BROKEN, RULES["no_resolution"], False), name
+        for stop in (STRICT, policies.Policy(mode="debug"), policies.Policy(overrides=((name, "stop"),))):
+            d = one(name, fact(name, a), used(name, b), stop)
+            assert (d.verdict, d.rule, d.blocking) == (Verdict.REFUSED, RULES["no_resolution"], True), (name, stop)
+        d = one(name, fact(name, a), used(name, b), policies.Policy(on_broken="stop", overrides=((name, "report"),)))
+        assert (d.verdict, d.blocking) == (Verdict.BROKEN, False), name
         with resolutions((name, Resolution("fix", "h"))):
             d = one(name, fact(name, a), used(name, b), policies.Policy(on_mismatch="refuse"))
-            assert (d.verdict, d.rule) == (Verdict.REFUSED, RULES["policy_refuses"]), name
+            assert (d.verdict, d.rule, d.blocking) == (Verdict.BROKEN, RULES["policy_refuses"], False), name
+            d = one(name, fact(name, a), used(name, b), policies.Policy(on_mismatch="refuse", on_broken="stop"))
+            assert (d.verdict, d.rule, d.blocking) == (Verdict.REFUSED, RULES["policy_refuses"], True), name
             d = one(name, fact(name, a), used(name, b, kind="user"))
+            assert (d.verdict, d.rule, d.blocking) == (Verdict.BROKEN, RULES["user_choice"], False), name
+            d = one(name, fact(name, a), used(name, b, kind="user"), STRICT)
             assert (d.verdict, d.rule, d.blocking) == (Verdict.REFUSED, RULES["user_choice"], True), name
         with resolutions((name, Resolution("never", "h", when=lambda d, c: False))):
             assert one(name, fact(name, a), used(name, b)).rule == RULES["no_resolution"], name
@@ -112,12 +125,21 @@ def test_row_unknown_declaration():
         d = one(name, None, used(name, a))
         assert (d.verdict, d.rule, d.blocking) == (Verdict.UNKNOWN, RULES["undeclared"], False), name
         d = one(name, None, used(name, a), meaning_changing=True)
-        assert (d.verdict, d.blocking) == (Verdict.UNKNOWN, True), name          # require: no silent default
+        assert (d.verdict, d.blocking) == (Verdict.UNKNOWN, False), name    # reported, never a silent default (M5.4)
+        require = policies.Policy(on_unknown_meaning_changing="require")
+        assert one(name, None, used(name, a), require, meaning_changing=True).blocking, name
+        debug = policies.Policy(mode="debug")   # an undeclared fact follows its setting in every mode
+        assert not one(name, None, used(name, a), debug, meaning_changing=True).blocking, name
+        assert one(name, None, used(name, a), policies.Policy(mode="debug", on_unknown_meaning_changing="require"),
+                   meaning_changing=True).blocking, name
         d = one(name, fact(name, a, kind="probe", certainty=Certainty.INFERRED), used(name, a), meaning_changing=True)
-        assert (d.verdict, d.rule, d.blocking) == (Verdict.UNKNOWN, RULES["inferred_only"], True), name
+        assert (d.verdict, d.rule, d.blocking) == (Verdict.UNKNOWN, RULES["inferred_only"], False), name
+        d = one(name, fact(name, a, kind="probe", certainty=Certainty.INFERRED), used(name, a), require,
+                meaning_changing=True)
+        assert d.blocking, name
         d = one(name, fact(name, a, kind="default", certainty=Certainty.DEFAULTED), used(name, a))
         assert (d.rule, d.blocking) == (RULES["defaulted_only"], False), name
-        p = policies.Policy(overrides=((name, "report"),))
+        p = policies.Policy(on_unknown_meaning_changing="require", overrides=((name, "report"),))
         assert not one(name, None, used(name, a), p, meaning_changing=True).blocking, name
         p = policies.Policy(on_unknown_other="stop")
         assert one(name, None, used(name, a), p).blocking, name
@@ -151,7 +173,7 @@ def test_sources_that_fill_different_fields_are_combined():
     best, _ = sources.pick([file_, guess])
     assert best.certainty is Certainty.INFERRED   # one inferred field makes the whole fact inferred
     d = one("ModelProps", (file_, config), used("ModelProps", ModelProps(softcap=50.0)))
-    assert (d.verdict, d.rule) == (Verdict.REFUSED, RULES["no_resolution"])   # the consumer ignores the window
+    assert (d.verdict, d.rule) == (Verdict.BROKEN, RULES["no_resolution"])   # the consumer ignores the window
     chosen, conflicts = sources.merge([file_, config, fact("Epoch", Epoch(1))])
     assert set(chosen) == {"ModelProps", "Epoch"} and conflicts == []
 
@@ -166,10 +188,12 @@ def test_row_declaration_against_the_data():
     assert partial.declared.value == both                           # what the data adds is kept, and then required
     d = one("ModelProps", fact("ModelProps", ModelProps(softcap=50.0)), used("ModelProps", ModelProps(softcap=50.0)),
             observed=window)
-    assert d.verdict is Verdict.REFUSED                             # the consumer drops the window the data shows
+    assert d.verdict is Verdict.BROKEN                              # the consumer drops the window the data shows
     for name, (a, b) in data.items():
         seen_b = fact(name, b, kind="data", certainty=Certainty.VERIFIED)
         d = one(name, fact(name, a), used(name, b), observed=seen_b)
+        assert (d.verdict, d.rule, d.blocking) == (Verdict.BROKEN, RULES["false_declaration"], False), name
+        d = one(name, fact(name, a), used(name, b), STRICT, observed=seen_b)
         assert (d.verdict, d.rule, d.blocking) == (Verdict.REFUSED, RULES["false_declaration"], True), name
         d = one(name, fact(name, a), used(name, b), policies.Policy(on_false_declaration="use_data"), observed=seen_b)
         assert (d.verdict, d.rule, d.declared.source.kind) == (Verdict.PASS, RULES["data_used"], "data"), name
@@ -205,15 +229,26 @@ def test_ledger_says_everything_in_one_line():
     with resolutions(("Prediction", Resolution("set the sampler", "set_sampling"))):
         ledger.extend(decide(c, {"Prediction": declared}, {"Prediction": chosen}))
     ledger.extend(decide(c, {}, {"Prediction": chosen}))
+    ledger.extend(decide(c, {}, {"Prediction": chosen}, policies.Policy(on_unknown_meaning_changing="require")))
+    ledger.extend(decide(c, {"Prediction": declared}, {"Prediction": chosen}))
+    ledger.extend(decide(c, {"Prediction": declared}, {"Prediction": chosen}, STRICT))
+    said = ("[entail] {v} at load:comfyui.sampler: Prediction declared v-prediction (file: "
+            "m.safetensors#modelspec.prediction_type, declared); comfyui.sampler uses eps without zero terminal SNR "
+            "(engine: model_sampling, declared); rule: " + RULES["no_resolution"] + "; {end}")
+    unknown = ("[entail] unknown at load:comfyui.sampler: Prediction nothing declared; comfyui.sampler uses eps "
+               "without zero terminal SNR (engine: model_sampling, declared); rule: " + RULES["undeclared"])
     assert ledger.lines() == [
         "[entail] resolved at load:comfyui.sampler: Prediction declared v-prediction "
         "(file: m.safetensors#modelspec.prediction_type, declared); comfyui.sampler uses eps without zero terminal SNR "
         "(engine: model_sampling, declared); rule: " + RULES["resolved"] + "; changed: set the sampler "
         "(eps without zero terminal SNR -> v-prediction)",
-        "[entail] unknown at load:comfyui.sampler: Prediction nothing declared; comfyui.sampler uses eps without zero "
-        "terminal SNR (engine: model_sampling, declared); rule: " + RULES["undeclared"] + "; stops here",
+        unknown,
+        unknown + "; stops here",
+        said.format(v="broken", end="reported, not stopped"),
+        said.format(v="refused", end="stops here"),
     ], ledger.lines()
-    assert [d.verdict for d in ledger.blocking()] == [Verdict.UNKNOWN]
+    assert [d.verdict for d in ledger.blocking()] == [Verdict.UNKNOWN, Verdict.REFUSED]
+    assert [d.verdict for d in ledger.broken()] == [Verdict.BROKEN, Verdict.REFUSED]
     j = ledger.to_json()["decisions"][0]
     assert (j["verdict"], j["handle"], j["declared"]["source"]["where"], j["chosen"]["value"]) == \
         ("resolved", "set_sampling", "m.safetensors#modelspec.prediction_type", "eps without zero terminal SNR")
@@ -231,7 +266,16 @@ def test_policy_from_the_environment():
     assert p.mismatch_setting("Prediction") == "resolve" and p.mismatch_setting("Layout") == "refuse"
     assert p.unknown_setting("Template", True) == "report" and p.unknown_setting("Layout", True) == "stop"
     assert policies.from_env({}) == policies.Policy()
+    d = policies.Policy()   # the defaults stop nowhere (M5.4)
+    assert (d.on_broken, d.on_unknown_meaning_changing, d.on_unknown_other) == ("report", "report", "report")
+    assert not d.stops("Layout") and not d.stops_unknown("Layout", True)
+    p = policies.from_env({"ENTAIL": "load", "ENTAIL_ON_BROKEN": "stop", "ENTAIL_FACT_POLICY": "Template=report"})
+    assert p.stops("Layout") and not p.stops("Template")
+    p = policies.from_env({"ENTAIL": "load", "ENTAIL_FACT_POLICY": "Layout=stop"})
+    assert p.stops("Layout") and not p.stops("Template") and p.stops_unknown("Layout", False)
+    assert policies.Policy(mode="debug").stops("Template")
     for env, text in [({"ENTAIL": "on"}, "policy mode: 'on' is not one of"),
+                      ({"ENTAIL_ON_BROKEN": "warn"}, "policy on_broken: 'warn' is not one of"),
                       ({"ENTAIL_FACT_POLICY": "Prediction"}, "expected Name=setting"),
                       ({"ENTAIL_FACT_POLICY": "Colour=report"}, "unknown fact name 'Colour'"),
                       ({"ENTAIL_FACT_POLICY": "Layout=maybe"}, "override for Layout: 'maybe' is not one of")]:

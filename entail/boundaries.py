@@ -20,11 +20,14 @@ By mode (core.mode()):
   debug  every check is also a Decision (contracts.decide), with the policy in force:
          - each declared argument: the fact it carries, which its producer declared, against what this boundary
            takes; a converter below repairs a mismatch it knows (resolved: the converted value is what the function
-           receives), otherwise refused; a value that carries nothing is unknown and stops under `require`
+           receives), otherwise refused; a value that carries nothing is unknown, and stops in debug mode
          - agree: the named arguments carry the same fact of that kind
          - writes: tensor version counters against the declaration (a missing or an undeclared write is refused)
 A declared argument passed by position has no role marker and is refused. A torch custom op's own schema
-(mutates_args) must agree with `writes`; that is checked once, when the function is decorated.
+(mutates_args) must agree with `writes`; that is checked once, when the function is decorated. Debug mode stops at
+what it cannot repair, so these are refused (contracts.unrepaired; outside debug mode the same outcome would be
+broken and reported, M5.4). A declaration that does not fit the call's shape - a tuple of results declared and
+something else returned, a result that cannot carry facts - is misuse of the API and raises as before.
 
 Passes are counted per boundary (PASSES), not recorded one by one: a boundary can run millions of times. Anything
 else goes to the ledger through load.enforce, once per distinct outcome (REPEATS counts the rest), and a blocking
@@ -36,7 +39,7 @@ from dataclasses import replace
 from typing import Callable, Dict, Optional, Tuple
 
 from . import core
-from .contracts import RULES, Contract, Decision, Resolution, Verdict, decide
+from .contracts import RULES, Contract, Decision, Resolution, Verdict, decide, unrepaired
 from .core import RoleError, facts_of, tag
 from .facts import VOCABULARY, Certainty, Epoch, Fact, Invalidated, Source
 from .kv_contract import KvExtent, check_extent
@@ -213,21 +216,19 @@ def _check_arg(where, arg, want, value, policy):
         name = type(got).__name__ if got is not None else getattr(want, "kind", "Layout")
         contract = Contract(boundary, where, (name,), (name,))
         if got is None:
-            setting = policy.unknown_setting(name, True)
             return Decision(contract, name, Verdict.UNKNOWN, RULES["undeclared"],
-                            blocking=setting in ("require", "stop"), note=f"argument {arg} carries no fact"), value
+                            blocking=policy.stops_unknown(name, True), note=f"argument {arg} carries no fact"), value
         ok = bool(want(got))
-        d = Decision(contract, name, Verdict.PASS if ok else Verdict.REFUSED,
-                     RULES["match"] if ok else RULES["predicate"], declared=have.get(name), blocking=not ok,
-                     note=f"argument {arg}")
+        verdict, blocking = (Verdict.PASS, False) if ok else unrepaired(policy, name)
+        d = Decision(contract, name, verdict, RULES["match"] if ok else RULES["predicate"], declared=have.get(name),
+                     blocking=blocking, note=f"argument {arg}")
         return d, value
     contract = Contract(boundary, where, (kind,), (kind,))
     carried = have.get(kind)
     if carried is None and "Invalidated" in raw and kind in raw["Invalidated"].kind.split(","):
         dead = raw["Invalidated"]
-        setting = policy.unknown_setting(kind, True)
         return Decision(contract, kind, Verdict.UNKNOWN, RULES["invalidated"],
-                        blocking=setting in ("require", "stop") or policy.mode == "debug",
+                        blocking=policy.stops_unknown(kind, True) or policy.mode == "debug",
                         note=f"argument {arg}: made untrue by {dead.why}; declare what it holds now"), value
     options = want if isinstance(want, tuple) else (want,)
     chosen = next((w for w in options if carried is not None and carried.value == w), None)
@@ -242,7 +243,7 @@ def _check_arg(where, arg, want, value, policy):
     offered = [r for r, _ in CONVERTERS.get(kind, [])]
     (d,) = decide(contract, {kind: carried} if carried is not None else {}, {kind: c}, policy,
                   resolutions={kind: offered})
-    if len(options) > 1 and d.verdict is Verdict.REFUSED:
+    if len(options) > 1 and d.verdict in (Verdict.BROKEN, Verdict.REFUSED):
         d = replace(d, note=f"argument {arg}; it takes one of {', '.join(str(o) for o in options)}")
     else:
         d = replace(d, note=f"argument {arg}")
@@ -264,21 +265,21 @@ def _check_agree(where, kind, args, kwargs, policy):
     for other in args[1:]:
         f = core.envelopes_of(kwargs.get(other)).get(kind)
         if first is None or f is None:
-            setting = policy.unknown_setting(kind, True)
             out.append(Decision(contract, kind, Verdict.UNKNOWN, RULES["undeclared"], declared=first, chosen=f,
-                                blocking=setting in ("require", "stop"),
+                                blocking=policy.stops_unknown(kind, True),
                                 note=f"{args[0]} and {other} must carry the same {kind}"))
             continue
         same = first.value == f.value
-        out.append(Decision(contract, kind, Verdict.PASS if same else Verdict.REFUSED,
-                            RULES["match"] if same else RULES["disagree"], declared=first, chosen=f,
-                            blocking=not same, note=f"{args[0]} and {other} must carry the same {kind}"))
+        verdict, blocking = (Verdict.PASS, False) if same else unrepaired(policy, kind)
+        out.append(Decision(contract, kind, verdict, RULES["match"] if same else RULES["disagree"], declared=first,
+                            chosen=f, blocking=blocking, note=f"{args[0]} and {other} must carry the same {kind}"))
     return out
 
 
-def _write_decision(where, arg, rule):
+def _write_decision(where, arg, rule, policy):
     contract = Contract(f"boundary:{where}", where, ("Epoch",), ("Epoch",))
-    return Decision(contract, "Epoch", Verdict.REFUSED, RULES[rule], blocking=True, note=f"argument {arg}")
+    verdict, blocking = unrepaired(policy, "Epoch")
+    return Decision(contract, "Epoch", verdict, RULES[rule], blocking=blocking, note=f"argument {arg}")
 
 
 # --- the decorator ---------------------------------------------------------------------------------------------
@@ -341,8 +342,9 @@ def boundary(name=None, *, takes=None, returns=None, writes=None, agree=None, **
                 for arg, want in expected.items():
                     if arg not in kwargs:
                         kind = _kind(want) or "Layout"
+                        verdict, blocking = unrepaired(policy, kind)
                         decisions.append(Decision(Contract(f"boundary:{where}", where, (kind,)), kind,
-                                                  Verdict.REFUSED, RULES["positional"], blocking=True,
+                                                  verdict, RULES["positional"], blocking=blocking,
                                                   note=f"argument {arg}"))
                         continue
                     d, kwargs[arg] = _check_arg(where, arg, want, kwargs[arg], policy)
@@ -351,8 +353,9 @@ def boundary(name=None, *, takes=None, returns=None, writes=None, agree=None, **
                     decisions += _check_agree(where, kind, names, kwargs, policy)
                 for arg in writes:
                     if arg not in kwargs:
+                        verdict, blocking = unrepaired(policy, "Epoch")
                         decisions.append(Decision(Contract(f"boundary:{where}", where, ("Epoch",)), "Epoch",
-                                                  Verdict.REFUSED, RULES["positional"], blocking=True,
+                                                  verdict, RULES["positional"], blocking=blocking,
                                                   note=f"argument {arg} is written here"))
                 _record(decisions, where)
             bound = bind(args, kwargs, debug) if (needs_binding or debug) else {}
@@ -363,9 +366,9 @@ def boundary(name=None, *, takes=None, returns=None, writes=None, agree=None, **
                 for n, v0 in before.items():
                     changed = bound[n]._version != v0
                     if n in writes and not changed:
-                        bad.append(_write_decision(where, n, "write_missing"))
+                        bad.append(_write_decision(where, n, "write_missing", policy))
                     elif n not in writes and changed:
-                        bad.append(_write_decision(where, n, "write_undeclared"))
+                        bad.append(_write_decision(where, n, "write_undeclared", policy))
                 _record(bad, where)
             for arg, meaning in writes.items():
                 if arg in bound:

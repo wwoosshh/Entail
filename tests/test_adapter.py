@@ -8,6 +8,10 @@ from contextlib import redirect_stdout
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
+# These tests check what stops, so they run under the policy that stopped before M5.4 (ENTAIL_ON_BROKEN=stop,
+# unknown meaning-changing facts required); the default, which reports and goes on, is tested in test_report.py.
+os.environ["ENTAIL_ON_BROKEN"] = "stop"
+os.environ["ENTAIL_UNKNOWN"] = "require"
 from entail import core, load  # noqa: E402
 from entail.adapters import transformers_adapter as adapter  # noqa: E402
 from entail.contracts import Verdict  # noqa: E402
@@ -103,7 +107,7 @@ def test_refuse_still_refuses():
             with redirect_stdout(io.StringIO()):
                 _gemma_on_meta("sdpa")
         except core.RoleError as e:
-            assert "policy refuses mismatches" in str(e) and "stops here" in str(e), e
+            assert "policy repairs nothing" in str(e) and "stops here" in str(e), e
         else:
             raise AssertionError("refuse policy let a dropped property through")
 

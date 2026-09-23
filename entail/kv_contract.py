@@ -17,7 +17,9 @@ keeps the numbers, as a KvExtent; the rules are here, once:
               any captured region: on a compiled path that is the only place a check may live)
 
 A rule that holds is counted (tally.PASSES): a container boundary runs per layer per step, thousands of times a
-request. A broken one is a refused, blocking Decision recorded and raised through load.enforce. Nothing here reads
+request. A broken one is a Decision recorded through load.enforce: under the default policy it is broken, the run
+goes on, and the same rule breaking again for the same cache or request is counted, not recorded again; where the
+policy stops it is refused and raised (M5.4). Nothing here reads
 the device on the hot path: lengths kept in device tensors are compared on the device and read once, by flush().
 Nothing runs while torch is compiling or a CUDA graph is being captured, and an error inside entail never breaks the
 engine (tally.inside_capture, tally.guarded).
@@ -110,32 +112,42 @@ def _side(where, text, value):
     return Fact("KvExtent", value, Source("engine", f"{where}: {text}"), Certainty.VERIFIED)
 
 
-def _refuse(boundary, consumer, where, extent, broken):
-    """One refused, blocking Decision per broken rule, recorded and raised by load.enforce. `extent` is the engine's
-    side; each broken rule gives the number the other side stands for (None when it was not read)."""
-    from . import load
-    from .contracts import RULES, Contract, Decision, Verdict
+def _refuse(boundary, consumer, where, extent, broken, owner=None, key=None):
+    """One Decision per broken rule. Under the default policy it is broken: recorded through load.enforce and the
+    run goes on; with an `owner` (a cache) or a `key` (a request) a rule that breaks again for it is only counted,
+    since this runs per step (tally.first). Where the policy stops it is refused and raised. `extent` is the
+    engine's side; each broken rule gives the number the other side stands for (None when it was not read)."""
+    from . import load, policies
+    from .contracts import RULES, Contract, Decision, unrepaired
 
-    _tally.refused(boundary)   # counted, and the summary written now: the process may not live to exit normally
+    verdict, blocking = unrepaired(policies.current(), "KvExtent")
+    if blocking:
+        _tally.refused(boundary)   # counted, and the summary written now: the process may not live to exit normally
+    else:
+        _tally.broken(boundary)
+        if owner is not None or key is not None:
+            broken = [b for b in broken if _tally.first(boundary, b[0], owner=owner, key=key)]
     contract = Contract(boundary, consumer, ("KvExtent",))
     decisions = []
     for rule, note, wanted in broken:
         mine, theirs = _SIDES[rule]
-        decisions.append(Decision(contract, "KvExtent", Verdict.REFUSED, RULES[rule],
+        decisions.append(Decision(contract, "KvExtent", verdict, RULES[rule],
                                   declared=_side(where, mine, None if wanted is None else KvExtent(held=wanted)),
-                                  chosen=_side(where, theirs, extent), blocking=True, note=f"{where}: {note}"))
-    load.enforce(decisions)
+                                  chosen=_side(where, theirs, extent), blocking=blocking, note=f"{where}: {note}"))
+    if decisions:
+        load.enforce(decisions)
 
 
 def check(boundary: str, consumer: str, where: str, extent: KvExtent) -> int:
-    """Decide one extent at a container boundary. The rules that hold are counted; a broken one is refused and stops
-    the run before the step produces anything. Returns the number of rules the extent was checked on."""
+    """Decide one extent at a container boundary. The rules that hold are counted; a broken one is reported once per
+    `where` (which names the request) and the run goes on, or refused before the step produces anything where the
+    policy stops. Returns the number of rules the extent was checked on."""
     broken, checked = _evaluate(extent)
     _stats(boundary)["checks"] += 1
     _passed(boundary, [r for r in checked if r not in {b[0] for b in broken}])
     _tick(boundary)
     if broken:
-        _refuse(boundary, consumer, where, extent, broken)
+        _refuse(boundary, consumer, where, extent, broken, key=where)
     return len(checked)
 
 
@@ -147,7 +159,8 @@ def skipped(boundary: str, n: int = 1) -> None:
 
 def check_extent(extent: KvExtent, where: str) -> int:
     """The 0.3.0 form: raise RoleError naming what does not add up, without a ledger. Returns the number of
-    comparisons made. New code goes through check()."""
+    comparisons made. It is an assertion its caller makes, so it still raises under any policy (M5.4). New code goes
+    through check()."""
     broken, checked = _evaluate(extent)
     if broken:
         raise RoleError("; ".join(f"{where}: {note}" for _, note, _ in broken))
@@ -199,7 +212,7 @@ def grew(boundary: str, consumer: str, owner, where: str, layer: int, before, af
     _tick(boundary)
     if broken:
         _refuse(boundary, consumer, f"{where} {type(owner).__name__} layer {layer}",
-                KvExtent(held=after, needed=needed, window=window, previous=previous), broken)
+                KvExtent(held=after, needed=needed, window=window, previous=previous), broken, owner=owner)
     if books is None:
         return
     books["lengths"][layer] = after
@@ -222,7 +235,8 @@ def grew(boundary: str, consumer: str, owner, where: str, layer: int, before, af
     _first, n = sorted(odd.items())[0]
     _refuse(boundary, consumer, f"{where} {type(owner).__name__} layer {layer}", KvExtent(held=n), [(
         "kv_layers", f"holds {int(after)} tokens, but {len(odd)} other layer(s) of the same cache hold a different "
-                     f"length: {shown}. The layers of one cache disagree and nothing compares them.", int(after))])
+                     f"length: {shown}. The layers of one cache disagree and nothing compares them.", int(after))],
+            owner=owner)
 
 
 def _defer(boundary, books, layer, before, after, added):
@@ -242,7 +256,8 @@ def _defer(boundary, books, layer, before, after, added):
 
 def flush(boundary: str, consumer: str, where: str = "kv cache") -> int:
     """Read the device-side comparisons once - where a synchronisation happens anyway, after a generate or at the end
-    of a request - and refuse if a layer's length did not add up. Returns the number of layers read."""
+    of a request - and report (or refuse, where the policy stops) a layer whose length did not add up. Returns the
+    number of layers read."""
     if _BOOKS is None:
         return 0
     read, bad = 0, []

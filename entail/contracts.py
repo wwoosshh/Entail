@@ -7,15 +7,20 @@ For every vocabulary name a contract needs, `decide` looks at up to three facts:
 
 and gives one Decision with a verdict, in this order:
   1. the sources disagree and the policy says stop                     -> REFUSED
-  2. the data contradicts a declaration                                -> REFUSED, or the data's value is used (policy)
-  3. nothing declares it (unknown, or only inferred or defaulted)      -> UNKNOWN; blocking for meaning-changing facts
-                                                                          under `require`/`stop`, a report otherwise
+  2. the data contradicts a declaration                                -> BROKEN, or the data's value is used (policy)
+  3. nothing declares it (unknown, or only inferred or defaulted)      -> UNKNOWN; blocking under `require`/`stop`
+                                                                          (ENTAIL_UNKNOWN; the default reports)
   4. what the consumer uses is unknown                                 -> UNKNOWN; blocking only in debug mode
   5. the consumer uses the declared value                              -> PASS
-  6. it differs, and it was the user's explicit choice                 -> REFUSED (never overridden silently)
-  7. it differs, the policy refuses mismatches                         -> REFUSED
+  6. it differs, and it was the user's explicit choice                 -> BROKEN (never overridden, never silent)
+  7. it differs, the policy repairs nothing                            -> BROKEN
   8. it differs, a registered resolution applies                       -> RESOLVED (the adapter's handle carries it out)
-  9. it differs, nothing can repair it                                 -> REFUSED
+  9. it differs, nothing can repair it                                 -> BROKEN
+
+BROKEN is reported and the run goes on; where the policy stops (ENTAIL_ON_BROKEN=stop, a per-fact "Name=stop",
+debug mode) the same outcome is REFUSED and blocking, before anything is produced (ROADMAP M5.4: the researcher's
+decision that entail reports what it cannot repair instead of adding failures a user sees). `unrepaired` gives the
+pair for a fact; every module that decides without `decide` uses it too.
 
 An inferred fact is never the basis for a change (principle 5): with nothing declared the verdict is UNKNOWN even
 when a probe has an opinion. The rules live here only; adapters supply `chosen` and the handles (principle 8).
@@ -32,8 +37,15 @@ from .policies import Policy
 class Verdict(str, Enum):
     PASS = "pass"
     RESOLVED = "resolved"
-    REFUSED = "refused"
+    BROKEN = "broken"       # not repaired: reported, the run goes on (M5.4)
+    REFUSED = "refused"     # not repaired, and the policy stops: before anything is produced
     UNKNOWN = "unknown"
+
+
+def unrepaired(policy: Policy, name: str) -> Tuple["Verdict", bool]:
+    """(verdict, blocking) for a mismatch of the fact `name` that nothing repairs: (BROKEN, False) under the default
+    policy, (REFUSED, True) where the policy stops (policies.Policy.stops)."""
+    return (Verdict.REFUSED, True) if policy.stops(name) else (Verdict.BROKEN, False)
 
 
 # Fixed wording: the ledger prints it and the tests match it.
@@ -41,7 +53,7 @@ RULES = {
     "match": "the consumer uses the declared value",
     "resolved": "the consumer differs from the declaration; a registered resolution repairs it",
     "no_resolution": "the consumer differs from the declaration and no resolution is registered",
-    "policy_refuses": "the consumer differs from the declaration and the policy refuses mismatches",
+    "policy_refuses": "the consumer differs from the declaration and the policy repairs nothing",
     "user_choice": "the user's explicit choice contradicts the declaration; it is not overridden",
     "consumer_unknown": "what the consumer uses is unknown (not read, or not in the capability table)",
     "undeclared": "nothing declares it",
@@ -209,7 +221,8 @@ def decide(contract: Contract, declared: Dict[str, object], chosen: Dict[str, Fa
                 if _sources.compatible(d.value, o.value):
                     d = replace(d, value=_fill(d.value, o.value), certainty=Certainty.VERIFIED)
                 elif policy.on_false_declaration == "refuse":
-                    out.append(decision(Verdict.REFUSED, RULES["false_declaration"], blocking=True))
+                    verdict, blocking = unrepaired(policy, name)
+                    out.append(decision(verdict, RULES["false_declaration"], blocking=blocking))
                     continue
                 else:
                     d, note = o, RULES["data_used"]
@@ -219,8 +232,8 @@ def decide(contract: Contract, declared: Dict[str, object], chosen: Dict[str, Fa
         if d is None or d.certainty in (Certainty.UNKNOWN, Certainty.INFERRED, Certainty.DEFAULTED):
             rule = {Certainty.INFERRED: RULES["inferred_only"], Certainty.DEFAULTED: RULES["defaulted_only"]}.get(
                 None if d is None else d.certainty, RULES["undeclared"])
-            setting = policy.unknown_setting(name, name in contract.meaning_changing)
-            out.append(decision(Verdict.UNKNOWN, rule, declared=d, blocking=setting in ("require", "stop")))
+            out.append(decision(Verdict.UNKNOWN, rule, declared=d,
+                                blocking=policy.stops_unknown(name, name in contract.meaning_changing)))
             continue
         if c is None or c.certainty is Certainty.UNKNOWN:
             out.append(decision(Verdict.UNKNOWN, RULES["consumer_unknown"], declared=d,
@@ -229,16 +242,17 @@ def decide(contract: Contract, declared: Dict[str, object], chosen: Dict[str, Fa
         if agrees(d.value, c.value):
             out.append(decision(Verdict.PASS, note or RULES["match"], declared=d))
             continue
+        verdict, blocking = unrepaired(policy, name)
         if c.source.kind == "user":
-            out.append(decision(Verdict.REFUSED, RULES["user_choice"], declared=d, blocking=True))
+            out.append(decision(verdict, RULES["user_choice"], declared=d, blocking=blocking))
             continue
         if policy.mismatch_setting(name) == "refuse":
-            out.append(decision(Verdict.REFUSED, RULES["policy_refuses"], declared=d, blocking=True))
+            out.append(decision(verdict, RULES["policy_refuses"], declared=d, blocking=blocking))
             continue
         offered = list(resolutions.get(name, ())) + RESOLUTIONS.get(name, [])
         fix = next((r for r in offered if r.applies(d, c)), None)
         if fix is None:
-            out.append(decision(Verdict.REFUSED, RULES["no_resolution"], declared=d, blocking=True))
+            out.append(decision(verdict, RULES["no_resolution"], declared=d, blocking=blocking))
         else:
             target = fix.target(d, c) if fix.target is not None else None
             out.append(decision(Verdict.RESOLVED, RULES["resolved"], declared=d, resolution=fix.describe(d, c, target),

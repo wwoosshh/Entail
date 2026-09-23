@@ -45,6 +45,8 @@ def line(decision) -> str:
         text += f"; note: {d.note}"
     if d.blocking:
         text += "; stops here"
+    elif d.verdict.value == "broken":
+        text += "; reported, not stopped"
     return text
 
 
@@ -77,6 +79,10 @@ class Ledger:
     def blocking(self) -> List[object]:
         """Decisions that must stop the run before any output."""
         return [d for d in self.decisions if d.blocking]
+
+    def broken(self) -> List[object]:
+        """Where meaning broke and nothing repaired it, whether the run stopped (refused) or went on (broken)."""
+        return [d for d in self.decisions if d.verdict.value in ("broken", "refused")]
 
     def lines(self) -> List[str]:
         return [line(d) for d in self.decisions]

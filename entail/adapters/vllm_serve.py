@@ -8,7 +8,10 @@
                applied later in an executor thread, where the request is no longer known.
                OpenAIServingChat.create_chat_completion: the request itself - its fields (pydantic keeps the ones the
                schema does not know in model_extra, and vLLM logs them at debug level) and its own template settings
-               - and where a refusal becomes the server's own error response (400), before anything is generated.
+               - and its response. Under the default policy what broke is in the log and ENTAIL_RECORD and the
+               request is served as it would be without entail (M5.4); with ENTAIL_RESPONSE_NOTE=1 it is also in the
+               response: an "entail" field, or SSE comment lines ahead of a stream, which clients skip. Where the
+               policy stops, a refusal becomes the server's own error response (400), before anything is generated.
                A render with no request of the server around it (the renderer's warm-up at start, LLM.chat) has its
                template and history checked, not its settings: who gave them cannot be told there.
   read_choice  the template the request is rendered with - vLLM's own resolve_chat_template on the same inputs - and
@@ -25,6 +28,7 @@ request_contract decides the request rules, load.tool_parser the tool call forma
 manager, the renderer, the chat server), each as soon as it has been imported.
 """
 import contextvars
+import os
 
 from .. import core, load, policies, request_contract
 from .base import Hook
@@ -40,10 +44,11 @@ CONSUMER = "vllm.chat_template"
 # reasoning parsers that return the reasoning inside the content (vllm/reasoning/minimax_m2_reasoning_parser.py:
 # MiniMaxM2AppendThinkReasoningParser.extract_reasoning returns (None, "<think>" + output))
 INLINE_REASONING = ("minimax_m2_append_think",)
+RESPONSE_NOTE = "ENTAIL_RESPONSE_NOTE"   # "1": what broke for a request is also written into its response
 # apply_chat_template parameters that it hands to the template and does not act on itself
 TEMPLATE_ONLY = ("tools", "documents")
 _ORIG = {}
-_REQUEST = contextvars.ContextVar("entail_vllm_request", default=(None, None))   # (request, policy) in this task
+_REQUEST = contextvars.ContextVar("entail_vllm_request", default=(None, None, None))   # (request, policy, notes)
 _SERVED = {}    # model path -> the reasoning parser the server runs ("" for none)
 _PARSERS = {}   # (model path, tool parser, reasoning parser, auto tools, harmony) -> the tool parser to build
 
@@ -128,26 +133,49 @@ def _before_render(renderer, messages, params):
     tokenizer = renderer.get_tokenizer()
     ct = getattr(tokenizer, "chat_template", None)
     facts = request_contract.declared(model, ct.get("default") if isinstance(ct, dict) else ct)
-    request, policy = _REQUEST.get()
-    parser, policy = _SERVED.get(model, ""), policy or policies.current()
-    request_contract.history(HISTORY, CONSUMER, facts, read_choice("turns", messages, parser),
-                             f"vllm request messages (reasoning parser: {parser or 'none'})", policy)
+    request, policy, notes = _REQUEST.get()
+    parser, policy, made = _SERVED.get(model, ""), policy or policies.current(), []
+    made += request_contract.history(HISTORY, CONSUMER, facts, read_choice("turns", messages, parser),
+                                     f"vllm request messages (reasoning parser: {parser or 'none'})", policy)
     text, named = read_choice("template", tokenizer, params, renderer.model_config)
     how = "named by the request or --chat-template" if named else "picked by vLLM"
     other = "; a named template other than the default" if text is None else ""
-    request_contract.template(TEMPLATE, CONSUMER, facts, text, named, f"vllm chat template, {how}{other}", policy)
+    made += request_contract.template(TEMPLATE, CONSUMER, facts, text, named, f"vllm chat template, {how}{other}",
+                                      policy)
     if request is not None:
         given, reached = read_choice("settings", params, request, text)
-        request_contract.settings(SETTINGS, CONSUMER, given, reached, "the request's own template settings",
-                                  "vllm chat template: a setting arrives when the template reads it or "
-                                  "apply_chat_template acts on it; vLLM drops the rest", policy)
+        made += request_contract.settings(SETTINGS, CONSUMER, given, reached, "the request's own template settings",
+                                          "vllm chat template: a setting arrives when the template reads it or "
+                                          "apply_chat_template acts on it; vLLM drops the rest", policy)
+    if notes is not None:
+        notes += request_contract.reported(made)
 
 
-def _fields(request, policy):
+def _fields(request, policy, notes=None):
     given, known = read_choice("fields", request)
-    request_contract.settings(FIELDS, "vllm.chat_request", given, known, "the fields the request sets",
-                              "vllm ChatCompletionRequest: a field the schema does not know is kept in model_extra "
-                              "and ignored (logged at debug level)", policy)
+    made = request_contract.settings(FIELDS, "vllm.chat_request", given, known, "the fields the request sets",
+                                     "vllm ChatCompletionRequest: a field the schema does not know is kept in "
+                                     "model_extra and ignored (logged at debug level)", policy)
+    if notes is not None:
+        notes += request_contract.reported(made)
+
+
+def _noted(response, notes):
+    """The response with what broke for its request written into it: an "entail" field (the response model keeps
+    fields it does not declare), or SSE comment lines ahead of a stream, which clients skip."""
+    if hasattr(response, "__aiter__"):
+        async def stream():
+            for n in notes:
+                yield ": entail: " + " ".join(n.split()) + "\n\n"
+            async for chunk in response:
+                yield chunk
+        return stream()
+    if hasattr(response, "choices") and hasattr(response, "model_dump"):
+        try:
+            response.entail = list(notes)
+        except (AttributeError, TypeError, ValueError):   # a model that keeps no extra field: the log still has it
+            pass
+    return response
 
 
 # --- installing ----------------------------------------------------------------------------------------------------
@@ -211,12 +239,16 @@ def install_serving():
 
     async def create_chat_completion(self, request, raw_request=None):
         policy = policies.current() if _active() else None
-        token = _REQUEST.set((request, policy))
+        notes = [] if policy is not None else None
+        token = _REQUEST.set((request, policy, notes))
         try:
             if policy is not None:
-                request_contract.guarded(FIELDS, "vllm.chat_request", _fields, request, policy)
-            return await _ORIG["create"](self, request, raw_request)
-        except core.RoleError as e:   # a refusal: the server's own error response, before anything is generated
+                request_contract.guarded(FIELDS, "vllm.chat_request", _fields, request, policy, notes)
+            response = await _ORIG["create"](self, request, raw_request)
+            if notes and os.environ.get(RESPONSE_NOTE) == "1":
+                response = _noted(response, notes)
+            return response
+        except core.RoleError as e:   # a refusal (the policy stops): the server's own error response, before output
             return self.create_error_response(str(e))
         finally:
             _REQUEST.reset(token)

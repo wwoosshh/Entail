@@ -9,6 +9,10 @@ from contextlib import redirect_stdout
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# These tests check what stops, so they run under the policy that stopped before M5.4 (ENTAIL_ON_BROKEN=stop,
+# unknown meaning-changing facts required); the default, which reports and goes on, is tested in test_report.py.
+os.environ["ENTAIL_ON_BROKEN"] = "stop"
+os.environ["ENTAIL_UNKNOWN"] = "require"
 import entail as rc  # noqa: E402
 from entail import boundaries, core, load  # noqa: E402
 from entail.contracts import Verdict  # noqa: E402
@@ -265,7 +269,7 @@ def test_refuse_policy_and_unknown_settings():
     strided = rc.tag(torch.ones(4, 4)[:, :2], STRIDED)
     core.set_policy("refuse")
     try:
-        expect_error(lambda: kernel(q=strided), "the policy refuses mismatches")
+        expect_error(lambda: kernel(q=strided), "the policy repairs nothing")
     finally:
         core.set_policy("resolve")
     expect_error(lambda: kernel(q=torch.ones(2)), "unknown at boundary:packed kernel", "nothing declares it")
@@ -274,7 +278,7 @@ def test_refuse_policy_and_unknown_settings():
         out = quiet(kernel, q=torch.ones(2))[1]
         assert "unknown at boundary:packed kernel" in out and "stops here" not in out
     finally:
-        os.environ.pop("ENTAIL_UNKNOWN")
+        os.environ["ENTAIL_UNKNOWN"] = "require"
 
 
 def test_agree_and_advance():

@@ -107,7 +107,9 @@ def _infer(args):
 
 
 def _check(args):
-    """`entail check`: exit 1 when a decision would stop the run, 2 when the named backend is not in the table."""
+    """`entail check`: exit 1 when meaning would break - a decision that would be broken (reported while the run goes
+    on, the default policy since M5.4) or refused (stops) - like a type checker in CI; 2 when the named backend is not
+    in the table."""
     from . import load, record, sites
     from .contracts import Verdict
 
@@ -135,7 +137,7 @@ def _check(args):
                        "attention": [record.decision_json(d) for d in per_backend],
                        "model_decisions": [record.decision_json(d) for d in model]}, f, ensure_ascii=False, indent=1)
     chosen = per_backend if args.attention else []
-    if any(d.blocking for d in chosen + model):
+    if any(d.blocking or d.verdict is Verdict.BROKEN for d in chosen + model):
         return 1
     if args.attention and any(d.verdict is Verdict.UNKNOWN and d.rule.startswith("what the consumer uses")
                               for d in chosen):

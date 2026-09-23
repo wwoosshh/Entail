@@ -56,10 +56,10 @@ def test_fact_envelope():
 
 
 def test_verdicts_and_policy_defaults():
-    assert [v.value for v in contracts.Verdict] == ["pass", "resolved", "refused", "unknown"]
-    p = policies.Policy()
-    assert (p.mode, p.on_mismatch, p.on_unknown_meaning_changing, p.on_unknown_other) == \
-        ("off", "resolve", "require", "report")
+    assert [v.value for v in contracts.Verdict] == ["pass", "resolved", "broken", "refused", "unknown"]
+    p = policies.Policy()   # the defaults stop nowhere since M5.4: what is not repaired is reported
+    assert (p.mode, p.on_mismatch, p.on_broken, p.on_unknown_meaning_changing, p.on_unknown_other) == \
+        ("off", "resolve", "report", "report", "report")
     assert sources.DEFAULT_PRECEDENCE == ("user", "manifest", "boundary", "file", "config", "probe", "default")
     assert set(sites.SITES) == {"load", "container", "request", "debug"} and set(sites.BUDGET) == set(sites.SITES)
 
