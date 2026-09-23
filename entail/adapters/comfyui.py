@@ -25,6 +25,17 @@ the kernels picked for the first image after start-up (0.6/255 on average), so t
 sampled the way it behaves - exactly what a ModelSamplingDiscrete node would do - and one line says so. When it
 contradicts a sampling node the workflow itself set, or the sigmas were already computed (custom samplers), it stops
 with the reason instead: an explicit choice is not overridden silently.
+
+Third: a sampling schedule stays with the object that set it. ComfyUI's dynamic VRAM loader backs model buffers up
+by attribute path and writes the backups back at the next load. A sampling node (ModelSamplingDiscrete and the like)
+puts its own object at 'model_sampling', so the next load wrote the node's schedule into the model's own object, and
+the checkpoint kept sampling with it after the node was gone. Measured on ComfyUI v0.34.1: one run with a
+ModelSamplingDiscrete(v_prediction, zsnr) node on waiIllustrious v170, then runs without it came out as another
+image (55.8/255 away) and then black, all "success", the same with entail off, until a restart; with
+--disable-dynamic-vram it was gone. The other way round, a node's schedule is replaced by the one loaded before it.
+So each sampling object keeps a copy of what its own setter registered; the loader hands a backup back to the object
+it came from instead of writing it into another; and the first model call after the buffers were replaced checks
+them against that copy, and puts them back if they differ.
 """
 import contextvars
 import importlib
@@ -327,11 +338,252 @@ def install_nodes():
     return 1
 
 
+# Third: a sampling schedule stays with the object that set it. ------------------------------------------------------
+
+_SETTERS = ("set_sigmas", "set_parameters")  # every schedule buffer in comfy/model_sampling.py is registered by one
+_ORIG_SETTERS = []  # (class, name, function) wrapped by install_schedule_record
+_ORIG_GUARD = None  # (class, load, restore_loaded_backups) wrapped by install_buffer_guard
+_ORIG_APPLY_MODEL = None  # (class, apply_model) wrapped by install_schedule_check
+
+
+def _record_schedule(ms):
+    ms.__dict__["_entail_schedule"] = {k: b.detach().to("cpu", copy=True) for k, b in ms._buffers.items()
+                                       if b is not None}
+
+
+def schedule_drift(ms):
+    """{buffer name: (now, registered)} for the buffers of a sampling object that no longer hold what its own setter
+    registered. Empty when they all match, or when nothing was recorded (an object made before entail was installed).
+    The loader copies buffers exactly; the tolerance only keeps a harmless cast from counting as a change."""
+    import torch
+
+    rec = ms.__dict__.get("_entail_schedule")
+    if not rec:
+        return {}
+    out = {}
+    for name, ref in rec.items():
+        now = ms._buffers.get(name)
+        if now is None:
+            continue
+        now = now.detach().to("cpu", torch.float32)
+        ref = ref.to(torch.float32)
+        if now.shape != ref.shape or not torch.allclose(now, ref, rtol=1e-3, atol=1e-6):
+            out[name] = (now, ref)
+    return out
+
+
+def _sigma_max(buf):
+    try:
+        return f"{float(buf.detach().float().flatten()[-1]):.1f}"
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
+def _wrap_setters(classes):
+    """Wrap the schedule setters defined on these classes so each call leaves a copy of what it registered on the
+    object. Returns [(class, name, original)]."""
+    wrapped = []
+    for cls in classes:
+        for name in _SETTERS:
+            fn = cls.__dict__.get(name)
+            if fn is None:
+                continue
+
+            def setter(self, *a, _fn=fn, **kw):
+                out = _fn(self, *a, **kw)
+                try:
+                    _record_schedule(self)
+                except Exception:  # noqa: BLE001 - the copy is for checking; never break the setter
+                    pass
+                return out
+
+            setter.__name__, setter.__qualname__, setter.__doc__ = fn.__name__, fn.__qualname__, fn.__doc__
+            setattr(cls, name, setter)
+            wrapped.append((cls, name, fn))
+    return wrapped
+
+
+def install_schedule_record():
+    """Keep, on every sampling object ComfyUI or a node makes, a copy of the schedule its own setter registered.
+    Returns the number of setters wrapped, 0 if already installed."""
+    import torch
+
+    ms_mod = importlib.import_module("comfy.model_sampling")
+    if _ORIG_SETTERS:
+        return 0
+    classes = [c for c in vars(ms_mod).values()
+               if isinstance(c, type) and issubclass(c, torch.nn.Module) and c.__module__ == ms_mod.__name__]
+    _ORIG_SETTERS.extend(_wrap_setters(classes))
+    return len(_ORIG_SETTERS)
+
+
+def _same_values(a, b):
+    import torch
+
+    return (a is not None and b is not None and a.shape == b.shape
+            and torch.equal(a.detach().to("cpu", torch.float32), b.detach().to("cpu", torch.float32)))
+
+
+def _return_foreign_backups(model, backups, resolve):
+    """Before ComfyUI puts its buffer backups back: a backup taken from one object is handed back to that object,
+    never written into another object that has since been put at the same path. A backup holding the same values
+    as the object now there is left to ComfyUI: nothing would change. Returns what was moved, as
+    [(path, owner, current, backup)]."""
+    owners = model.__dict__.get("_entail_buffer_owners") or {}
+    moved = []
+    for key in list(backups):
+        ref = owners.get(key)
+        if ref is None:
+            continue
+        try:
+            current, name = resolve(model, key)
+        except AttributeError:
+            continue
+        owner = ref()
+        if owner is current or _same_values(backups[key], getattr(current, "_buffers", {}).get(name)):
+            continue
+        buf = backups.pop(key)
+        owners.pop(key, None)
+        if owner is not None:
+            owner.register_buffer(name, buf, persistent=name not in owner._non_persistent_buffers_set)
+        moved.append((key, owner, current, buf))
+    return moved
+
+
+def _remember_owners(model, backups, resolve):
+    """After a load: which object each backed-up buffer came from."""
+    import weakref
+
+    owners = model.__dict__.setdefault("_entail_buffer_owners", {})
+    for key in list(backups):
+        try:
+            owners[key] = weakref.ref(resolve(model, key)[0])
+        except (AttributeError, TypeError):
+            owners.pop(key, None)
+
+
+def _say_moved(model, moved):
+    paths = {}
+    for key, owner, current, buf in moved:
+        path, _, name = key.rpartition(".")
+        paths.setdefault(path, []).append((name, owner, current, buf))
+    for path, items in paths.items():
+        _, _, current, _ = items[0]
+        sig = {name: buf for name, _, _, buf in items}.get("sigmas")
+        own = getattr(current, "_buffers", {}).get("sigmas")
+        detail = f" (sigma_max {_sigma_max(sig)} would have replaced {_sigma_max(own)})" if sig is not None \
+            and own is not None else ""
+        _shared.note({"engine": "comfyui", "where": "sampling schedule", "path": path,
+                      "buffers": [n for n, *_ in items]},
+                     f"sampling schedule: ComfyUI's dynamic VRAM loader was about to write the '{path}' buffers "
+                     f"of another object into the one this run uses{detail}. That object came from a sampling node "
+                     f"used earlier on this model; each object keeps its own schedule now")
+
+
+def _guard(cls, resolve):
+    """Wrap load and restore_loaded_backups of ComfyUI's dynamic patcher. Returns the originals."""
+    orig_load, orig_restore = cls.load, cls.restore_loaded_backups
+
+    def load(self, *a, **kw):
+        out = orig_load(self, *a, **kw)
+        try:
+            _remember_owners(self.model, self.backup_buffers, resolve)
+        except Exception:  # noqa: BLE001 - bookkeeping only
+            pass
+        return out
+
+    def restore_loaded_backups(self):
+        try:
+            moved = _return_foreign_backups(self.model, self.backup_buffers, resolve)
+            if moved:
+                _say_moved(self.model, moved)
+        except Exception as e:  # noqa: BLE001 - never break loading because the guard could not run
+            print(f"[entail] could not guard the buffer restore ({type(e).__name__}: {e})", flush=True)
+        return orig_restore(self)
+
+    cls.load, cls.restore_loaded_backups = load, restore_loaded_backups
+    return orig_load, orig_restore
+
+
+def install_buffer_guard():
+    """ComfyUI's dynamic VRAM loader backs model buffers up by attribute path and writes the backups back at the next
+    load. A sampling node swaps the object at 'model_sampling', so the next load wrote that node's schedule into
+    the model's own object, and the checkpoint went on sampling with it after the node was gone. Returns 1, or 0
+    when there is no such loader (legacy loading, another ComfyUI) or the guard is already in place."""
+    global _ORIG_GUARD
+    mp = importlib.import_module("comfy.model_patcher")
+    utils = importlib.import_module("comfy.utils")
+    cls = getattr(mp, "ModelPatcherDynamic", None)
+    if (_ORIG_GUARD is not None or cls is None or not callable(getattr(utils, "resolve_attr", None))
+            or not all(callable(getattr(cls, n, None)) for n in ("load", "restore_loaded_backups"))):
+        return 0
+    _ORIG_GUARD = (cls, *_guard(cls, utils.resolve_attr))
+    return 1
+
+
+def _put_back(ms, drift):
+    for name, (_, ref) in drift.items():
+        cur = ms._buffers[name]
+        ms.register_buffer(name, ref.to(device=cur.device, dtype=cur.dtype),
+                           persistent=name not in ms._non_persistent_buffers_set)
+    now, ref = drift.get("sigmas", (None, None))
+    detail = f" (sigma_max {_sigma_max(now)} instead of {_sigma_max(ref)})" if now is not None else ""
+    _shared.note({"engine": "comfyui", "where": "sampling schedule", "buffers": sorted(drift)},
+                 f"sampling schedule: {type(ms).__name__} held a schedule its own setter did not register"
+                 f"{detail}; put back the one it was set up with")
+
+
+def install_schedule_check():
+    """At the first model call after a model's schedule buffers were (re)placed, check that they still hold what
+    the sampling object registered, and put them back if not. The buffer guard should leave nothing for this to
+    find; it is here for loaders the guard does not know. Returns 1, or 0 if already installed."""
+    global _ORIG_APPLY_MODEL
+    import weakref
+
+    mb = importlib.import_module("comfy.model_base")
+    cls = getattr(mb, "BaseModel", None)
+    if _ORIG_APPLY_MODEL is not None or cls is None or not callable(getattr(cls, "apply_model", None)):
+        return 0
+    orig = cls.apply_model
+
+    def apply_model(self, *a, **kw):
+        try:
+            ms = self._modules.get("model_sampling")
+            sig = ms._buffers.get("sigmas") if ms is not None else None
+            last = self.__dict__.get("_entail_checked")
+            if sig is not None and (last is None or last[0]() is not ms or last[1]() is not sig):
+                drift = schedule_drift(ms)
+                if drift:
+                    _put_back(ms, drift)
+                self.__dict__["_entail_checked"] = (weakref.ref(ms), weakref.ref(ms._buffers["sigmas"]))
+        except Exception:  # noqa: BLE001 - a check that cannot run must never break sampling
+            pass
+        return orig(self, *a, **kw)
+
+    cls.apply_model = apply_model
+    _ORIG_APPLY_MODEL = (cls, orig)
+    return 1
+
+
 def uninstall():
-    global _ORIG_APPLY, _ORIG_NODE, _ORIG_SAMPLE, _ORIG_SAMPLE_CUSTOM
+    global _ORIG_APPLY, _ORIG_NODE, _ORIG_SAMPLE, _ORIG_SAMPLE_CUSTOM, _ORIG_GUARD, _ORIG_APPLY_MODEL
     import sys
 
     n = 0
+    for cls, name, fn in _ORIG_SETTERS:
+        setattr(cls, name, fn)
+        n += 1
+    _ORIG_SETTERS.clear()
+    if _ORIG_GUARD is not None:
+        cls, load, restore = _ORIG_GUARD
+        cls.load, cls.restore_loaded_backups = load, restore
+        _ORIG_GUARD = None
+        n += 1
+    if _ORIG_APPLY_MODEL is not None:
+        cls, apply_model = _ORIG_APPLY_MODEL
+        cls.apply_model = apply_model
+        _ORIG_APPLY_MODEL = None
+        n += 1
     if _ORIG_APPLY is not None:
         sys.modules["comfy.sd"].load_lora_for_models = _ORIG_APPLY
         _ORIG_APPLY = None

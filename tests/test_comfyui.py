@@ -1,4 +1,4 @@
-"""Tests for the ComfyUI LoRA check's counting and verdict (pure functions; ComfyUI is not needed).
+"""Tests for the ComfyUI checks: LoRA reach, prediction type, sampling schedule (pure functions; no ComfyUI needed).
 Run: python tests/test_comfyui.py"""
 import os
 import sys
@@ -146,6 +146,137 @@ def test_first_call_tells_the_two_apart():
     as_v_read_as_eps = x - v_out * s         # what ComfyUI computes when it treats that model as eps
     assert behaves_like(first_call_cos("eps", x, sigma, as_eps)) == "eps"
     assert behaves_like(first_call_cos("eps", x, sigma, as_v_read_as_eps)) == "v_prediction"
+
+
+def _schedule_class():
+    """A sampling class shaped like comfy.model_sampling.ModelSamplingDiscrete: set_sigmas registers the schedule."""
+    import torch
+
+    class Sampling(torch.nn.Module):
+        def __init__(self, sigma_max):
+            super().__init__()
+            self.set_sigmas(torch.linspace(0.03, sigma_max, 1000))
+
+        def set_sigmas(self, sigmas):
+            self.register_buffer("sigmas", sigmas.float())
+            self.register_buffer("log_sigmas", sigmas.log().float())
+
+    return Sampling
+
+
+def test_schedule_drift_sees_a_schedule_its_setter_did_not_register():
+    import torch
+
+    from entail.adapters.comfyui import _wrap_setters, schedule_drift
+
+    Sampling = _schedule_class()
+    wrapped = _wrap_setters([Sampling])
+    try:
+        ms = Sampling(14.6)
+        assert schedule_drift(ms) == {}
+        ms.register_buffer("sigmas", ms.sigmas.clone())  # a copy with the same values (what a device move does)
+        assert schedule_drift(ms) == {}
+        ms.register_buffer("sigmas", torch.linspace(0.03, 4518.8, 1000))  # another object's schedule written in
+        drift = schedule_drift(ms)
+        assert list(drift) == ["sigmas"] and float(drift["sigmas"][0][-1]) > 4518
+        ms.set_sigmas(torch.linspace(0.03, 20.0, 1000))  # a setter call is a legitimate change: recorded anew
+        assert schedule_drift(ms) == {}
+    finally:
+        for cls, name, fn in wrapped:
+            setattr(cls, name, fn)
+
+
+def _set_attr_buffer(obj, attr, value):  # comfy/utils.py
+    obj, name = _resolve_attr(obj, attr)
+    obj.register_buffer(name, value, persistent=name not in getattr(obj, "_non_persistent_buffers_set", set()))
+
+
+def _resolve_attr(obj, attr):  # comfy/utils.py
+    attrs = attr.split(".")
+    for name in attrs[:-1]:
+        obj = getattr(obj, name)
+    return obj, attrs[-1]
+
+
+def _dynamic_patcher_class():
+    """The buffer handling of ComfyUI v0.34.1's ModelPatcherDynamic (load + restore_loaded_backups), nothing else."""
+
+    class Dynamic:
+        def __init__(self, model, backups):
+            self.model, self.backup_buffers = model, backups  # clones share the backup dict
+
+        def restore_loaded_backups(self):
+            for key in list(self.backup_buffers.keys()):
+                _set_attr_buffer(self.model, key, self.backup_buffers.pop(key))
+
+        def load(self):
+            self.restore_loaded_backups()
+            for key, buf in self.model.named_buffers(recurse=True):
+                if key not in self.backup_buffers:
+                    self.backup_buffers[key] = buf
+                _set_attr_buffer(self.model, key, buf.clone())  # stands for the copy on the GPU
+
+    return Dynamic
+
+
+def _node_then_plain(guarded, node_max=4518.8):
+    import torch
+
+    from entail.adapters.comfyui import _guard
+
+    Sampling = _schedule_class()
+    Dynamic = _dynamic_patcher_class()
+    if guarded:
+        _guard(Dynamic, _resolve_attr)
+    model = torch.nn.Module()
+    own, node = Sampling(14.6), Sampling(node_max)  # the checkpoint's schedule; a v_prediction+zsnr node's
+    backups = {}
+    model.model_sampling = node  # the run with the node: its object is put at 'model_sampling'
+    Dynamic(model, backups).load()
+    model.model_sampling = own  # the node is gone: ComfyUI puts the model's own object back
+    Dynamic(model, backups).load()
+    return float(model.model_sampling.sigmas[-1]), float(node.sigmas[-1])
+
+
+def test_comfyui_loader_moves_a_node_schedule_into_the_model():
+    """The defect as ComfyUI v0.34.1 has it: the node's schedule ends up in the model's own object."""
+    assert _node_then_plain(guarded=False)[0] > 4518
+
+
+def test_guard_keeps_each_schedule_with_its_object():
+    from entail.adapters import _shared
+
+    before = len(_shared.RESOLUTIONS)
+    model_max, node_max = _node_then_plain(guarded=True)
+    assert abs(model_max - 14.6) < 1e-4 and abs(node_max - 4518.8) < 1e-2
+    assert any(r.get("where") == "sampling schedule" for r in _shared.RESOLUTIONS[before:])
+
+
+def test_guard_says_nothing_when_the_schedules_are_the_same():
+    """entail's own prediction-type switch puts an object with the same schedule at 'model_sampling': no change."""
+    from entail.adapters import _shared
+
+    before = len(_shared.RESOLUTIONS)
+    model_max, _ = _node_then_plain(guarded=True, node_max=14.6)
+    assert abs(model_max - 14.6) < 1e-4
+    assert not any(r.get("where") == "sampling schedule" for r in _shared.RESOLUTIONS[before:])
+
+
+def test_put_back_restores_the_registered_schedule():
+    import torch
+
+    from entail.adapters.comfyui import _put_back, _wrap_setters, schedule_drift
+
+    Sampling = _schedule_class()
+    wrapped = _wrap_setters([Sampling])
+    try:
+        ms = Sampling(14.6)
+        ms.register_buffer("sigmas", torch.linspace(0.03, 4518.8, 1000))
+        _put_back(ms, schedule_drift(ms))
+        assert schedule_drift(ms) == {} and abs(float(ms.sigmas[-1]) - 14.6) < 1e-4
+    finally:
+        for cls, name, fn in wrapped:
+            setattr(cls, name, fn)
 
 
 if __name__ == "__main__":

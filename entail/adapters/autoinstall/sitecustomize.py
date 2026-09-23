@@ -29,6 +29,11 @@ TARGETS = {
     "comfy.sd": ["entail.adapters.comfyui"],
     "comfy.sample": ["entail.adapters.comfyui:install_sampling"],
     "nodes": ["entail.adapters.comfyui:install_nodes"],
+    # A sampling schedule stays with its own object: record it where it is set, guard the loader that moved it,
+    # and check it at the first model call.
+    "comfy.model_sampling": ["entail.adapters.comfyui:install_schedule_record"],
+    "comfy.model_patcher": ["entail.adapters.comfyui:install_buffer_guard"],
+    "comfy.model_base": ["entail.adapters.comfyui:install_schedule_check"],
 }
 # A one-shot probe of SGLang's request bookkeeping, used while writing the cache contract.
 if os.environ.get("ENTAIL_PROBE") == "sglang_cache":
@@ -54,6 +59,18 @@ if os.environ.get("ENTAIL_ONLY"):
     _only = {s.strip() for s in os.environ["ENTAIL_ONLY"].split(",") if s.strip()}
     TARGETS = {mod: [a for a in adapters if a.partition(":")[0].rsplit(".", 1)[-1] in _only]
                for mod, adapters in TARGETS.items()}
+    TARGETS = {mod: adapters for mod, adapters in TARGETS.items() if adapters}
+# ENTAIL_SKIP=comfyui:install_buffer_guard leaves out single entries (to measure what the others do without them);
+# a bare module name leaves out all of its entries.
+if os.environ.get("ENTAIL_SKIP"):
+    _skip = {s.strip() for s in os.environ["ENTAIL_SKIP"].split(",") if s.strip()}
+
+    def _skipped(adapter):
+        name, _, func = adapter.partition(":")
+        base = name.rsplit(".", 1)[-1]
+        return base in _skip or f"{base}:{func or 'install'}" in _skip
+
+    TARGETS = {mod: [a for a in adapters if not _skipped(a)] for mod, adapters in TARGETS.items()}
     TARGETS = {mod: adapters for mod, adapters in TARGETS.items() if adapters}
 _done = set()
 
