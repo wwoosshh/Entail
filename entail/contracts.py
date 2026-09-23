@@ -58,6 +58,12 @@ RULES = {
     "write_missing": "the boundary declares it writes this argument, but it was not written",
     "write_undeclared": "the boundary wrote into an argument it does not declare",
     "disagree": "arguments that must carry the same fact carry different ones",
+    # container boundaries (kv_contract.py, M5.1): what a cache holds for a sequence against what the sequence has
+    "kv_written": "the slots reserved and the slots written disagree",
+    "kv_needed": "the slots held are not the slots the tokens need",
+    "kv_shrank": "the slots held shrank since the last check, and nothing said so",
+    "kv_layers": "the layers of one cache hold different lengths",
+    "kv_request": "after the request, the cache does not hold the tokens the request wrote",
 }
 
 

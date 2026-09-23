@@ -1,26 +1,41 @@
-"""One RANGE contract for the KV cache, written once, translated by each engine's adapter.
+"""kv_contract: the contract of the containers that hold a sequence's KV, in the core (LIBRARY_DESIGN.md 4.6, 4.7;
+ROADMAP M5.1).
 
-Three engines were checked separately first, and each one keeps its own books:
+A cache replaces its tensors as it grows, so a fact tagged on a tensor goes stale while the live cache carries
+nothing (audits/PROPAGATE.md). The fact belongs to the container, and it is checked at the container's own boundary:
+where an engine updates or allocates a sequence's KV. Three engines keep three sets of books - a length per cache
+layer (transformers), blocks per request (vLLM), two counters per request (SGLang) - but the fact is one: how much
+of this sequence is actually held, and does it match what the sequence has. An adapter only says where its engine
+keeps the numbers, as a KvExtent; the rules are here, once:
 
-  transformers  a length per cache layer (`get_seq_length()`), grown by `update()`
-  vLLM          blocks per request in a pool, handed out by `allocate_slots`
-  SGLang        `kv_allocated_len` and `kv_committed_len` on the request itself
+  kv_written  the slots reserved and the slots written agree (an engine that counts both)
+  kv_needed   the slots held are the slots the tokens need: equal, or within one allocation unit when the engine
+              allocates in units (vLLM blocks). A sliding window is allowed to hold less
+  kv_shrank   nothing held shrank since the last check of the same sequence, unless a window caps it
+  kv_layers   the layers of one cache agree on their length within a round of updates (a window may be shorter)
+  kv_request  after a request, every layer of its cache holds the tokens the request wrote (checked once, outside
+              any captured region: on a compiled path that is the only place a check may live)
 
-Different names, one fact: **how much of this sequence is actually held, and does it match how much the
-sequence has?** So the rule lives here once, and each adapter only says where its engine keeps the numbers.
-That translation is the whole point of a role vocabulary (ROADMAP 2.1): the fact is the stable thing, the
-bookkeeping is not.
-
-The rule, in the order it is checked:
-  1. reserved vs written   if an engine tracks both, they must agree
-  2. held vs needed        what is held must be what the tokens need
-  3. never shrinks         if the previous extent is known, nothing may have quietly taken tokens away
-A windowed extent is exempt from 2 and 3: it is meant to hold less than the sequence has.
+A rule that holds is counted (PASSES): a container boundary runs per layer per step, thousands of times a request.
+A broken one is a refused, blocking Decision recorded and raised through load.enforce. Nothing here reads the device
+on the hot path: lengths kept in device tensors are compared on the device and read once, by flush(). Nothing runs
+while torch is compiling or a CUDA graph is being captured: measured, a check inside that region cost 8x to 48x and
+changed the output (audits/CACHE_CONTRACT.md). An error inside entail is reported once per boundary and never breaks
+the engine (guarded; principle 12).
 """
+import atexit
+import json
+import os
+import sys
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 from .core import RoleError
+from .facts import _number
+
+PASSES: Dict[Tuple[str, str], int] = {}   # (boundary, rule) -> checks that held
+STATS: Dict[str, Dict[str, int]] = {}     # boundary -> {"checks", "refused", "skipped", "deferred"}
+_BROKEN = set()                            # boundaries entail itself failed at; left alone from then on
 
 
 @dataclass(frozen=True)
@@ -31,7 +46,7 @@ class KvExtent:
     needed    tokens the sequence has, so the KV it needs
     written   slots actually written, when the engine tracks it separately from what it reserved
     window    a sliding window, when the extent is allowed to be shorter than the sequence
-    previous  what `held` was the last time this extent was checked, when the adapter keeps a history
+    previous  what `held` should at least be, from the last time this sequence was checked
     granularity  the unit the engine allocates in (vLLM hands out blocks, not tokens), so `held` may exceed
                  `needed` by less than one unit. Without it, `held` must equal `needed` exactly
     """
@@ -42,32 +57,338 @@ class KvExtent:
     previous: Optional[int] = None
     granularity: Optional[int] = None
 
+    def __post_init__(self):
+        if self.held is None:
+            raise ValueError("KvExtent.held: required")
+        for name in ("held", "needed", "written", "previous"):
+            _number("KvExtent", name, getattr(self, name), 0, integer=True)
+        for name in ("window", "granularity"):
+            _number("KvExtent", name, getattr(self, name), 0, integer=True, strict=True)
 
-def check_extent(extent, where):
-    """Raise RoleError if this extent does not add up. Returns the number of comparisons actually made."""
-    made = 0
-    capped = extent.window is not None and (extent.needed or 0) > extent.window
 
-    if extent.written is not None:
-        made += 1
-        if extent.held != extent.written:
-            raise RoleError(f"{where}: {extent.held} KV slots reserved but {extent.written} written. "
-                            f"Two numbers about the same sequence, and nothing compares them.")
-    if extent.needed is not None and not capped:
-        made += 1
-        if extent.granularity:
-            # allocation is granular: enough, and not more than one unit more than enough
-            if not (extent.needed <= extent.held < extent.needed + extent.granularity):
-                raise RoleError(f"{where}: holds {extent.held} KV slots for {extent.needed} tokens, which is "
-                                f"not one allocation unit ({extent.granularity}) of the right size. The slots "
-                                f"a sequence holds and the tokens it has are two numbers nobody compares.")
-        elif extent.held != extent.needed:
-            raise RoleError(f"{where}: holds {extent.held} KV slots but the sequence has {extent.needed} "
-                            f"tokens. The length nobody compared is the one that drifts.")
-    if extent.previous is not None and not capped:
-        made += 1
-        if extent.held < extent.previous:
-            raise RoleError(f"{where}: was {extent.previous} slots when last checked, {extent.held} now. "
-                            f"Something dropped {extent.previous - extent.held} token(s) in between and said "
-                            f"nothing.")
-    return made
+# rule -> (what the declared side is, what the engine's side is), for the two facts of a refused decision
+_SIDES = {"kv_written": ("the slots written", "the slots reserved"),
+          "kv_needed": ("the slots its tokens need", "the slots it holds"),
+          "kv_shrank": ("what it held at the last check, with what was added since", "what it holds now"),
+          "kv_layers": ("the length of this layer", "the lengths of the other layers"),
+          "kv_request": ("the tokens the request wrote", "what its cache holds")}
+
+
+def _rules(held, needed=None, written=None, window=None, previous=None, granularity=None):
+    """The rules, on plain numbers (the one place they are written): ([(rule, note, the number the declared side
+    stands for)] for the broken ones, [the rules that were checked]). Text is made only for a broken rule."""
+    broken, checked = [], []
+    capped = window is not None and (needed or 0) > window
+    if written is not None:
+        checked.append("kv_written")
+        if held != written:
+            broken.append(("kv_written", f"{held} KV slots reserved but {written} written. Two numbers about the same "
+                                         f"sequence, and nothing compares them.", written))
+    if needed is not None and not capped:
+        checked.append("kv_needed")
+        if granularity:
+            if not (needed <= held < needed + granularity):   # enough, and less than one unit more
+                broken.append(("kv_needed", f"holds {held} KV slots for {needed} tokens, which is not one allocation "
+                                            f"unit ({granularity}) of the right size. The slots a sequence holds and the "
+                                            f"tokens it has are two numbers nobody compares.", needed))
+        elif held != needed:
+            broken.append(("kv_needed", f"holds {held} KV slots but the sequence has {needed} tokens. The length nobody "
+                                        f"compared is the one that drifts.", needed))
+    if previous is not None and not capped:
+        checked.append("kv_shrank")
+        if held < previous:
+            broken.append(("kv_shrank", f"was {previous} slots when last checked, {held} now. Something dropped "
+                                        f"{previous - held} token(s) in between and said nothing.", previous))
+    return broken, checked
+
+
+def _evaluate(e: KvExtent):
+    return _rules(e.held, e.needed, e.written, e.window, e.previous, e.granularity)
+
+
+def _stats(boundary):
+    s = STATS.get(boundary)
+    if s is None:
+        s = STATS[boundary] = {"checks": 0, "refused": 0, "skipped": 0, "deferred": 0}
+    return s
+
+
+def _tick(boundary):
+    """After the 1st, 2nd, 4th, 8th ... sequence a boundary saw, write what it has checked so far. Engines run their
+    caches in child processes that are not always let to exit normally (SGLang's scheduler), so a summary only at
+    exit could be lost; this costs a line at powers of two."""
+    s = STATS[boundary]
+    n = s["checks"] + s["skipped"] + s["deferred"]
+    if n & (n - 1) == 0:
+        _write_summary({boundary: stats(boundary)})
+
+
+def _passed(boundary, rules):
+    for r in rules:
+        PASSES[(boundary, r)] = PASSES.get((boundary, r), 0) + 1
+
+
+def _side(where, text, value):
+    from .facts import Certainty, Fact, Source
+
+    if value is None:   # a number that was never read (kept on the device): said to be unknown, not made up
+        return Fact("KvExtent", None, Source("engine", f"{where}: {text}"), Certainty.UNKNOWN)
+    return Fact("KvExtent", value, Source("engine", f"{where}: {text}"), Certainty.VERIFIED)
+
+
+def _refuse(boundary, consumer, where, extent, broken):
+    """One refused, blocking Decision per broken rule, recorded and raised by load.enforce. `extent` is the engine's
+    side; each broken rule gives the number the other side stands for (None when it was not read)."""
+    from . import load
+    from .contracts import RULES, Contract, Decision, Verdict
+
+    _stats(boundary)["refused"] += 1
+    _write_summary({boundary: stats(boundary)})   # the process may not live to write one at exit
+    contract = Contract(boundary, consumer, ("KvExtent",))
+    decisions = []
+    for rule, note, wanted in broken:
+        mine, theirs = _SIDES[rule]
+        decisions.append(Decision(contract, "KvExtent", Verdict.REFUSED, RULES[rule],
+                                  declared=_side(where, mine, None if wanted is None else KvExtent(held=wanted)),
+                                  chosen=_side(where, theirs, extent), blocking=True, note=f"{where}: {note}"))
+    load.enforce(decisions)
+
+
+def check(boundary: str, consumer: str, where: str, extent: KvExtent) -> int:
+    """Decide one extent at a container boundary. The rules that hold are counted; a broken one is refused and stops
+    the run before the step produces anything. Returns the number of rules the extent was checked on."""
+    broken, checked = _evaluate(extent)
+    _stats(boundary)["checks"] += 1
+    _passed(boundary, [r for r in checked if r not in {b[0] for b in broken}])
+    _tick(boundary)
+    if broken:
+        _refuse(boundary, consumer, where, extent, broken)
+    return len(checked)
+
+
+def skipped(boundary: str, n: int = 1) -> None:
+    """Sequences an adapter did not hand over because they are meant to hold less (a sliding window), counted."""
+    _stats(boundary)["skipped"] += n
+    _tick(boundary)
+
+
+def check_extent(extent: KvExtent, where: str) -> int:
+    """The 0.3.0 form: raise RoleError naming what does not add up, without a ledger. Returns the number of
+    comparisons made. New code goes through check()."""
+    broken, checked = _evaluate(extent)
+    if broken:
+        raise RoleError("; ".join(f"{where}: {note}" for _, note, _ in broken))
+    return len(checked)
+
+
+# --- the books of one cache: its layers' last lengths, for kv_shrank and kv_layers ------------------------------
+
+_BOOKS = None
+
+
+def _books(owner):
+    """The books of one cache object, forgotten when the cache is collected."""
+    global _BOOKS
+    if _BOOKS is None:
+        from .load import ByObject
+
+        _BOOKS = ByObject()
+    books = _BOOKS.get(owner)
+    if books is None:
+        books = {"lengths": {}, "counts": {}, "windowed": set(), "device": {}}
+        if not _BOOKS.set(owner, books):
+            return None   # an owner that takes no weak reference: nothing is remembered for it
+    return books
+
+
+def _is_tensor(x):
+    return hasattr(x, "device") and hasattr(x, "dtype")
+
+
+def grew(boundary: str, consumer: str, owner, where: str, layer: int, before, after, added: int,
+         window: Optional[int] = None) -> None:
+    """A layer of the cache `owner` was given `added` tokens: it held `before` and holds `after`.
+
+    kv_needed: after == before + added (a window may hold less); kv_shrank: nothing was dropped since this layer's
+    last update (its length then, plus what was added now); kv_layers: the layers of this cache - not of any other -
+    hold {after, after - added} in the middle of a round. Lengths kept in device tensors are compared on the device
+    and read by flush(). This runs per layer per step: on the way that holds, no text and no fact is made."""
+    books = _books(owner)
+    if _is_tensor(before) or _is_tensor(after):
+        _defer(boundary, books, layer, before, after, added)
+        return
+    after, needed = int(after), int(before) + added
+    last = None if books is None else books["lengths"].get(layer)
+    previous = None if last is None else last + added
+    broken, checked = _rules(after, needed, window=window, previous=previous)
+    _stats(boundary)["checks"] += 1
+    _passed(boundary, [r for r in checked if r not in {b[0] for b in broken}] if broken else checked)
+    _tick(boundary)
+    if broken:
+        _refuse(boundary, consumer, f"{where} {type(owner).__name__} layer {layer}",
+                KvExtent(held=after, needed=needed, window=window, previous=previous), broken)
+    if books is None:
+        return
+    books["lengths"][layer] = after
+    if window is not None:
+        books["windowed"].add(layer)
+        return   # a window caps on purpose; it takes no part in the agreement
+    counts = books["counts"]   # length -> how many of this cache's layers hold it
+    if last is not None:
+        if counts.get(last, 0) > 1:
+            counts[last] -= 1
+        else:
+            counts.pop(last, None)
+    counts[after] = counts.get(after, 0) + 1
+    if all(n == after or n == after - added for n in counts):
+        _passed(boundary, ["kv_layers"])
+        return
+    odd = {i: n for i, n in books["lengths"].items()
+           if i not in books["windowed"] and n != after and n != after - added}
+    shown = dict(sorted(odd.items())[:4])
+    _first, n = sorted(odd.items())[0]
+    _refuse(boundary, consumer, f"{where} {type(owner).__name__} layer {layer}", KvExtent(held=n), [(
+        "kv_layers", f"holds {int(after)} tokens, but {len(odd)} other layer(s) of the same cache hold a different "
+                     f"length: {shown}. The layers of one cache disagree and nothing compares them.", int(after))])
+
+
+def _defer(boundary, books, layer, before, after, added):
+    """A length kept in a device tensor: compared on the device, no synchronisation; flush() reads the result."""
+    _stats(boundary)["deferred"] += 1
+    _tick(boundary)
+    if books is None:
+        return
+    flag = books["device"].get(layer)
+    if flag is None:
+        import torch
+
+        # our own tensor: a value computed inside a captured graph must not be held across steps
+        flag = books["device"][layer] = torch.zeros((), dtype=torch.bool, device=after.device)
+    flag.logical_or_((after != (before + added)).reshape(()))
+
+
+def flush(boundary: str, consumer: str, where: str = "kv cache") -> int:
+    """Read the device-side comparisons once - where a synchronisation happens anyway, after a generate or at the end
+    of a request - and refuse if a layer's length did not add up. Returns the number of layers read."""
+    if _BOOKS is None:
+        return 0
+    read, bad = 0, []
+    for _ref, books in list(_BOOKS._d.values()):
+        for layer, flag in list(books["device"].items()):
+            read += 1
+            if bool(flag):
+                bad.append(layer)
+            del books["device"][layer]
+    if bad:
+        _refuse(boundary, consumer, where, None, [(
+            "kv_needed", f"layers {sorted(bad)}: the length they report is not the length they were given. A static "
+                         f"cache keeps that number on the device, so nothing compared it.", None)])
+    elif read:
+        _passed(boundary, ["kv_needed"])
+    return read
+
+
+def request(boundary: str, consumer: str, where: str, lengths: Dict[int, Tuple[int, Optional[int]]],
+            expected: int) -> int:
+    """After a request: every layer holds the tokens the request wrote; a windowed layer holds at most its window.
+    `lengths` is {layer: (length, window)} as the adapter read them, once, outside any captured region."""
+    _stats(boundary)["checks"] += 1
+    bad = {}
+    for layer, (n, window) in lengths.items():
+        want = min(expected, window) if window else expected
+        if int(n) != want:
+            bad[layer] = (int(n), want)
+    if not bad:
+        _passed(boundary, ["kv_request"])
+        return len(lengths)
+    first, (got, want) = sorted(bad.items())[0]
+    shown = {i: f"{g} tokens, expected {w}" for i, (g, w) in sorted(bad.items())[:4]}
+    _refuse(boundary, consumer, where, KvExtent(held=got), [(
+        "kv_request", f"{len(bad)} layer(s) do not hold the number of tokens the request wrote: {shown}", want)])
+    return len(lengths)
+
+
+# --- where a check may not run, and what happens when entail itself fails --------------------------------------
+
+def inside_capture() -> bool:
+    """True while torch is compiling or a CUDA graph is being captured: a check there becomes part of the captured
+    work, which cost 8x to 48x and changed the output when measured (audits/CACHE_CONTRACT.md)."""
+    if "torch" not in sys.modules:   # nothing can be capturing without torch; and the core never imports it
+        return False
+    import torch
+
+    # called directly, so that torch.compile folds it to a constant while tracing instead of breaking the graph
+    if torch.compiler.is_compiling():
+        return True
+    try:
+        return bool(torch.cuda.is_initialized() and torch.cuda.is_current_stream_capturing())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def guarded(boundary: str, consumer: str, work, *args, **kwargs):
+    """Run an adapter's reading and this module's deciding so that an error inside entail never breaks the engine
+    (principle 12): a refusal (RoleError) passes through; anything else is reported once, as this boundary not being
+    checked, and the boundary is left alone from then on. Returns work()'s result, or None."""
+    if boundary in _BROKEN:
+        return None
+    try:
+        return work(*args, **kwargs)
+    except RoleError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        from . import load, policies
+
+        _BROKEN.add(boundary)
+        load.enforce([load.cannot_check(boundary, consumer, "KvExtent",
+                                        f"entail failed here and stops checking this boundary: {type(e).__name__}: "
+                                        f"{e}", policies.current())])
+        return None
+
+
+def stats(boundary: Optional[str] = None) -> dict:
+    """Counts for one boundary (checks, refused, skipped, deferred, and the passes per rule), or all of them."""
+    if boundary is None:
+        return {b: stats(b) for b in STATS}
+    s = dict(_stats(boundary))
+    s["passed"] = {r: n for (b, r), n in PASSES.items() if b == boundary}
+    return s
+
+
+def reset(boundary: Optional[str] = None) -> None:
+    """Forget the counts (of one boundary, or all) and every cache's books."""
+    global _BOOKS
+    for b in [b for b in STATS if boundary is None or b == boundary]:
+        del STATS[b]
+    for k in [k for k in PASSES if boundary is None or k[0] == boundary]:
+        del PASSES[k]
+    if boundary is None:
+        _BROKEN.clear()
+    else:
+        _BROKEN.discard(boundary)
+    _BOOKS = None
+
+
+def _write_summary(container):
+    """One line saying what container boundaries checked: printed with ENTAIL_VERBOSE, written to ENTAIL_RECORD.
+    Passes are never recorded one by one."""
+    summary = {"pid": os.getpid(), "container": container}
+    if os.environ.get("ENTAIL_VERBOSE"):
+        print(f"[entail] container boundaries in pid {os.getpid()}: {container}", flush=True)
+    path = os.environ.get("ENTAIL_RECORD")
+    if path:
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(summary, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+
+@atexit.register
+def _report():
+    if STATS:
+        _write_summary(stats())
+
+
+__all__ = ["KvExtent", "check", "check_extent", "grew", "flush", "request", "skipped", "inside_capture", "guarded",
+           "stats", "reset", "PASSES", "STATS"]

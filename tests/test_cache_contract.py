@@ -1,16 +1,20 @@
-"""Tests for the KV cache contract, on a tiny model so they run on the CPU.
+"""Tests for the transformers adapter of the KV container contract (ROADMAP M5.1), on a tiny model so they run on the
+CPU. The rules are the core's (tests/test_kv_contract.py); these check that the adapter reads the cache right at
+Cache.update, and the defects the contract exists for.
 
 Run: python tests/test_cache_contract.py
 """
+import io
 import os
 import sys
+from contextlib import redirect_stdout
 
 import torch
-from transformers import LlamaConfig, LlamaForCausalLM
+from transformers import LlamaConfig, LlamaForCausalLM, StaticCache
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-from entail import core  # noqa: E402
+from entail import core, kv_contract  # noqa: E402
 from entail.adapters import cache_contract  # noqa: E402
 
 CFG = dict(vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=2, num_attention_heads=4,
@@ -39,101 +43,128 @@ def decode(model, ids, steps=3, drop_after=None):
     return cache
 
 
-def test_install_wraps_the_concrete_layers():
-    n = cache_contract.install()
+class Contract:
+    """The adapter installed, in a mode, with fresh books; everything undone afterwards."""
+
+    def __init__(self, mode="debug"):
+        self.mode = mode
+
+    def __enter__(self):
+        cache_contract.install()
+        cache_contract.reset()
+        core.set_mode(self.mode)
+        return self
+
+    def __exit__(self, *exc):
+        core.set_mode("off")
+        cache_contract.uninstall()
+
+
+def stops(fn, text):
     try:
-        assert n >= 1, "no cache layer class was wrapped; the mixin's update is abstract"
-    finally:
-        assert cache_contract.uninstall() == n
+        with redirect_stdout(io.StringIO()):
+            fn()
+    except core.RoleError as e:
+        assert text in str(e), (text, str(e))
+        return True
+    return False
+
+
+def test_install_wraps_the_container_boundary():
+    from transformers.cache_utils import Cache
+
+    orig = Cache.update
+    assert cache_contract.install() == 1 and cache_contract.install() == 0
+    assert Cache.update is not orig
+    assert cache_contract.uninstall() == 1 and Cache.update is orig
 
 
 def test_healthy_decode_is_quiet_and_checked():
-    cache_contract.install()
-    core.set_mode("debug")
-    cache_contract.reset()
-    try:
+    with Contract():
         model, ids = model_and_ids()
         decode(model, ids)
-        stats = cache_contract.stats()
-        assert stats["updates"] > 0 and stats["complaints"] == 0, stats
-        assert stats["checked"] == stats["updates"], stats
-    finally:
-        core.set_mode("off")
-        cache_contract.uninstall()
+        s = cache_contract.stats()
+        assert s["checks"] == 8 and s["refused"] == 0, s   # 2 layers x (prefill + 3 steps)
+        assert s["passed"]["kv_needed"] == 8 and s["passed"]["kv_shrank"] == 6 and s["passed"]["kv_layers"] == 8, s
 
 
 def test_a_cache_that_lost_a_token_is_caught():
-    cache_contract.install()
-    core.set_mode("debug")
-    cache_contract.reset()
-    try:
+    with Contract():
         model, ids = model_and_ids()
-        try:
-            decode(model, ids, steps=4, drop_after=1)
-        except core.RoleError as e:
-            assert "dropped 1 token" in str(e), e
-        else:
-            raise AssertionError("a cache one token short was accepted")
-    finally:
-        core.set_mode("off")
-        cache_contract.uninstall()
+        assert stops(lambda: decode(model, ids, steps=4, drop_after=1), "dropped 1 token"), \
+            "a cache one token short was accepted"
+
+
+def test_two_generations_in_one_process_are_quiet():
+    """The regression that moving the books per cache fixed: before M5.1 the second generate was refused, because
+    the layers of the first cache were still compared with the new one."""
+    with Contract(mode="load"):
+        model, _ = model_and_ids()
+        for prompt in ([1, 2, 3, 4, 5], [7, 8, 9]):
+            with torch.no_grad():
+                out = model.generate(torch.tensor([prompt]), max_new_tokens=3, do_sample=False)
+            assert out.shape[1] == len(prompt) + 3
+        assert cache_contract.stats()["refused"] == 0
 
 
 def test_layers_that_disagree_are_caught_even_without_history():
-    """A cache handed over already uneven: one layer is short and there is no history to compare against.
-
-    Only the agreement rule can see this one, which is why it exists next to the growth rule.
-    """
-    cache_contract.install()
-    core.set_mode("debug")
-    try:
+    """A cache handed over already uneven: one layer is short and there are no books to compare against. Only the
+    agreement rule can see this one."""
+    with Contract():
         model, ids = model_and_ids()
         with torch.no_grad():
             res = model(ids, use_cache=True)
         cache = res.past_key_values
         cache.layers[1].keys = cache.layers[1].keys[..., :-1, :].contiguous()
         cache.layers[1].values = cache.layers[1].values[..., :-1, :].contiguous()
-        cache_contract.reset()  # as if this process had just been handed the cache
+        cache_contract.reset()   # as if this process had just been handed the cache
         step = res.logits[:, -1:].argmax(-1)
         try:
-            with torch.no_grad():
-                model(step, past_key_values=cache, use_cache=True)
-        except core.RoleError as e:
-            assert "disagree" in str(e), e
+            caught = stops(lambda: model(step, past_key_values=cache, use_cache=True), "disagree")
         except RuntimeError:
-            pass  # in the eager path the mask is built from layer 0, so the shapes can crash first (loud)
-        else:
-            raise AssertionError("an uneven cache was accepted")
-    finally:
-        core.set_mode("off")
-        cache_contract.uninstall()
+            caught = True   # in the eager path the mask is built from layer 0, so the shapes can crash first (loud)
+        assert caught, "an uneven cache was accepted"
 
 
 def test_check_cache_from_outside():
-    """The same contract checked once per request, which is where it has to live on a compiled path."""
+    """The same contract once per request, which is where it has to live on a compiled path."""
     model, ids = model_and_ids()
     with torch.no_grad():
         res = model(ids, use_cache=True)
     cache = res.past_key_values
-    assert cache_contract.check_cache(cache, ids.shape[1]) == len(cache.layers)
+    core.set_mode("load")
     try:
-        cache_contract.check_cache(cache, ids.shape[1] + 1)  # a request that wrote one more than the cache holds
-    except core.RoleError as e:
-        assert "do not hold the number of tokens" in str(e), e
-    else:
-        raise AssertionError("a cache one token short was accepted")
+        assert cache_contract.check_cache(cache, ids.shape[1]) == len(cache.layers)
+        assert stops(lambda: cache_contract.check_cache(cache, ids.shape[1] + 1), "do not hold the number of tokens")
+    finally:
+        core.set_mode("off")
+
+
+def test_a_static_cache_is_compared_on_the_device_and_read_once():
+    """A static layer keeps its length in a device tensor and increments it in place: compared without a
+    synchronisation, read by flush()."""
+    with Contract(mode="load"):
+        model, ids = model_and_ids()
+        cache = StaticCache(config=model.config, max_cache_len=16)
+        with torch.no_grad():
+            res = model(ids, past_key_values=cache, use_cache=True)
+            model(res.logits[:, -1:].argmax(-1), past_key_values=cache, use_cache=True)
+        s = cache_contract.stats()
+        assert s["deferred"] == 4 and s["checks"] == 0, s
+        assert cache_contract.flush() == 2 and cache_contract.flush() == 0
+        assert cache_contract.stats()["refused"] == 0
+        # a counter that jumped: the layer says it holds one more token than it was given
+        with torch.no_grad():
+            kv_contract.grew(cache_contract.BOUNDARY, cache_contract.CONSUMER, cache, "static", 0,
+                             torch.tensor(6), torch.tensor(8), 1)
+        assert stops(cache_contract.flush, "the length they report is not the length they were given")
 
 
 def test_off_mode_does_not_check():
-    cache_contract.install()
-    core.set_mode("off")
-    cache_contract.reset()
-    try:
+    with Contract(mode="off"):
         model, ids = model_and_ids()
-        decode(model, ids, steps=4, drop_after=1)  # the same defect, no error
-        assert cache_contract.stats()["checked"] == 0
-    finally:
-        cache_contract.uninstall()
+        decode(model, ids, steps=4, drop_after=1)   # the same defect, no error
+        assert cache_contract.stats()["checks"] == 0
 
 
 if __name__ == "__main__":

@@ -3,7 +3,8 @@ logic, and their size. Reads the source only; imports nothing. Run: python tests
 
 An adapter gives three things - hooks, read_choice, handles - and install/uninstall. What would make it a place for
 rules, and is therefore refused here:
-  - importing from entail anything but the entry points: load (the contracts, resolve, enforce), policies.current,
+  - importing from entail anything but the entry points: load (the load-time contracts, resolve, enforce),
+    kv_contract (the container contracts, M5.1), policies.current,
     core.mode, readers.rotary_of / config_dict (to turn what it read into a fact value), facts (fact classes), base
     (Hook). Not caps, contracts, sources, preflight or _shared: they hold tables, verdicts and precedence.
   - raising RoleError itself: stopping is load.enforce's, on a blocking decision.
@@ -17,19 +18,18 @@ import os
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADAPTERS = os.path.join(os.path.dirname(HERE), "entail", "adapters")
 V2 = ("transformers_adapter", "transformers_config", "sglang_adapter", "vllm_attention", "vllm_loader",
-      "vllm_source", "rope_alias", "vllm_layout")
+      "vllm_source", "rope_alias", "vllm_layout", "cache_contract", "vllm_cache_contract", "sglang_cache_contract")
 LEGACY = {   # not yet on the v2 interface: where they move, and why they have not yet
-    "cache_contract": "M5.1: the KV rules move to the core, the engines' translations stay",
-    "vllm_cache_contract": "M5.1", "sglang_cache_contract": "M5.1",
     "comfyui": "M6.2", "diffusers_adapter": "M6.2",
     "vllm_ledger": "research tool: moves to tools/ (LIBRARY_DESIGN.md 10)",
     "vllm_seed": "research tool: plants defects for measurements",
+    "sglang_seed": "research tool: plants defects for measurements",
     "sglang_cache_probe": "research tool: moves to tools/",
     "_shared": "helpers the M6 adapters still use; nothing on v2 imports it",
 }
 NOT_ADAPTERS = ("__init__", "base")
-ALLOWED = {"load": None, "policies": {"current"}, "core": {"mode"}, "readers": {"rotary_of", "config_dict"},
-           "facts": None, "base": {"Hook"}}
+ALLOWED = {"load": None, "kv_contract": None, "policies": {"current"}, "core": {"mode"},
+           "readers": {"rotary_of", "config_dict"}, "facts": None, "base": {"Hook"}}
 REQUIRED = ("hooks", "read_choice", "handles", "install", "engine", "versions")
 
 
