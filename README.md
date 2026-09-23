@@ -1,5 +1,7 @@
 # entail
 
+[![PyPI](https://img.shields.io/pypi/v/entail-ai)](https://pypi.org/project/entail-ai/) [![tests](https://github.com/wwoosshh/entail/actions/workflows/tests.yml/badge.svg)](https://github.com/wwoosshh/entail/actions/workflows/tests.yml)
+
 **Keep what a value means intact across LLM inference-stack boundaries.**
 
 An inference stack is a chain of parts — checkpoint and config, loader, engine, kernels, quantization, cache.
@@ -36,12 +38,12 @@ others do not.
 ## Install
 
 ```bash
-pip install "git+https://github.com/wwoosshh/entail"
+pip install entail-ai
 ```
 
 Install it into the same environment as your engine (vLLM, SGLang or transformers). entail has no dependencies
-of its own. Once it is on PyPI: `pip install entail-ai` (the import name stays `entail`). `uv pip install` works
-the same way.
+of its own. The import name is `entail`. `uv pip install entail-ai` works the same way; for the latest commit,
+`pip install "git+https://github.com/wwoosshh/entail"`.
 
 Check what it sees:
 

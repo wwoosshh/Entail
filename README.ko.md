@@ -1,5 +1,7 @@
 # entail
 
+[![PyPI](https://img.shields.io/pypi/v/entail-ai)](https://pypi.org/project/entail-ai/) [![tests](https://github.com/wwoosshh/entail/actions/workflows/tests.yml/badge.svg)](https://github.com/wwoosshh/entail/actions/workflows/tests.yml)
+
 **LLM 추론 스택의 경계에서 값의 뜻이 사라지지 않게 지킨다.**
 
 추론 스택은 여러 부품이 이어진 사슬이다. 체크포인트와 설정, 로더, 엔진, 커널, 양자화, 캐시가 그 부품이다. 부품마다 제 규약 안에서는 맞게 계산하는데도, 두 부품 사이에서 값의 **뜻**이 사라질 수 있다. 몇 가지 예를 들면 이렇다.
@@ -38,12 +40,12 @@ entail은 값이 경계를 넘을 때 그 뜻을 선언하고, 선언을 실제�
 ## 설치
 
 ```bash
-pip install "git+https://github.com/wwoosshh/entail"
+pip install entail-ai
 ```
 
 - 엔진(vLLM, SGLang, transformers)이 있는 그 환경에 설치한다. entail 자체는 의존성이 없다.
-- PyPI에 올라간 뒤에는 `pip install entail-ai`로 설치한다. 가져올 때 쓰는 이름은 그대로 `entail`이다.
-- `uv pip install`도 같게 된다.
+- 가져올 때 쓰는 이름은 `entail`이다.
+- `uv pip install entail-ai`도 같게 된다. 최신 커밋을 쓰려면 `pip install "git+https://github.com/wwoosshh/entail"`로 설치한다.
 
 설치한 뒤에는 다음 명령으로 환경을 점검한다.
 
