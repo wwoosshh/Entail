@@ -71,12 +71,14 @@ def stops(fn, text):
 
 
 def test_install_wraps_the_container_boundary():
+    from transformers import masking_utils
     from transformers.cache_utils import Cache
 
-    orig = Cache.update
+    orig = (Cache.update, Cache.get_query_offset, masking_utils.add_offsets_to_mask_function)
     assert cache_contract.install() == 1 and cache_contract.install() == 0
-    assert Cache.update is not orig
-    assert cache_contract.uninstall() == 1 and Cache.update is orig
+    assert (Cache.update, Cache.get_query_offset, masking_utils.add_offsets_to_mask_function) != orig
+    assert cache_contract.uninstall() == 1
+    assert (Cache.update, Cache.get_query_offset, masking_utils.add_offsets_to_mask_function) == orig
 
 
 def test_healthy_decode_is_quiet_and_checked():
@@ -158,6 +160,46 @@ def test_a_static_cache_is_compared_on_the_device_and_read_once():
             kv_contract.grew(cache_contract.BOUNDARY, cache_contract.CONSUMER, cache, "static", 0,
                              torch.tensor(6), torch.tensor(8), 1)
         assert stops(cache_contract.flush, "the length they report is not the length they were given")
+
+
+def test_a_live_counter_handed_to_a_mask_is_bound_or_its_stale_read_refused():
+    """rolebench 10 on the adapter's hooks, without a flex kernel: a static cache hands out its counter tensor, the
+    flex mask builder closes over it, the next update writes it in place, attention reads the mask."""
+    from types import SimpleNamespace
+
+    from transformers import masking_utils
+
+    from entail import epochs
+
+    with Contract(mode="load"):
+        model, ids = model_and_ids()
+        cache = StaticCache(config=model.config, max_cache_len=16)
+        with torch.no_grad():
+            model(ids, past_key_values=cache, use_cache=True)               # sdpa: counters exist
+        offset = cache.get_query_offset(0)
+        assert epochs.reads(offset), "a static cache hands out its live counter"
+        with redirect_stdout(io.StringIO()):
+            fn = masking_utils.add_offsets_to_mask_function(lambda b, h, q, kv: kv <= q, offset, 0)
+        assert epochs.reads(fn) == () and epochs.stats(cache_contract.MASK_BUILDER)["resolved"] == 1
+        core.set_policy("refuse")
+        try:
+            stale = masking_utils.add_offsets_to_mask_function(lambda b, h, q, kv: kv <= q,
+                                                               cache.get_query_offset(0), 0)
+            assert epochs.reads(stale)
+            with torch.no_grad():
+                model(ids[:, :1], past_key_values=cache, use_cache=True)    # the update writes the counter
+            flex, cache_contract._ORIG["flex"] = cache_contract._ORIG["flex"], lambda *a, **kw: "attended"
+            try:
+                from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+                attend = ALL_ATTENTION_FUNCTIONS["flex_attention"]
+                assert attend(SimpleNamespace(layer_idx=0), None, None, None, SimpleNamespace(mask_mod=fn))                     == "attended"                                            # the bound mask reads nothing later
+                assert stops(lambda: attend(SimpleNamespace(layer_idx=0), None, None, None,
+                                            SimpleNamespace(mask_mod=stale)), "write(s) in between")
+            finally:
+                cache_contract._ORIG["flex"] = flex
+        finally:
+            core.set_policy("resolve")
 
 
 def test_off_mode_does_not_check():

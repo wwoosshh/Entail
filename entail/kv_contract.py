@@ -16,26 +16,19 @@ keeps the numbers, as a KvExtent; the rules are here, once:
   kv_request  after a request, every layer of its cache holds the tokens the request wrote (checked once, outside
               any captured region: on a compiled path that is the only place a check may live)
 
-A rule that holds is counted (PASSES): a container boundary runs per layer per step, thousands of times a request.
-A broken one is a refused, blocking Decision recorded and raised through load.enforce. Nothing here reads the device
-on the hot path: lengths kept in device tensors are compared on the device and read once, by flush(). Nothing runs
-while torch is compiling or a CUDA graph is being captured: measured, a check inside that region cost 8x to 48x and
-changed the output (audits/CACHE_CONTRACT.md). An error inside entail is reported once per boundary and never breaks
-the engine (guarded; principle 12).
+A rule that holds is counted (tally.PASSES): a container boundary runs per layer per step, thousands of times a
+request. A broken one is a refused, blocking Decision recorded and raised through load.enforce. Nothing here reads
+the device on the hot path: lengths kept in device tensors are compared on the device and read once, by flush().
+Nothing runs while torch is compiling or a CUDA graph is being captured, and an error inside entail never breaks the
+engine (tally.inside_capture, tally.guarded).
 """
-import atexit
-import json
-import os
-import sys
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
+from . import tally as _tally
 from .core import RoleError
 from .facts import _number
-
-PASSES: Dict[Tuple[str, str], int] = {}   # (boundary, rule) -> checks that held
-STATS: Dict[str, Dict[str, int]] = {}     # boundary -> {"checks", "refused", "skipped", "deferred"}
-_BROKEN = set()                            # boundaries entail itself failed at; left alone from then on
+from .tally import PASSES, STATS  # noqa: F401 - (boundary, rule) -> passes; boundary -> counts
 
 
 @dataclass(frozen=True)
@@ -106,26 +99,7 @@ def _evaluate(e: KvExtent):
     return _rules(e.held, e.needed, e.written, e.window, e.previous, e.granularity)
 
 
-def _stats(boundary):
-    s = STATS.get(boundary)
-    if s is None:
-        s = STATS[boundary] = {"checks": 0, "refused": 0, "skipped": 0, "deferred": 0}
-    return s
-
-
-def _tick(boundary):
-    """After the 1st, 2nd, 4th, 8th ... sequence a boundary saw, write what it has checked so far. Engines run their
-    caches in child processes that are not always let to exit normally (SGLang's scheduler), so a summary only at
-    exit could be lost; this costs a line at powers of two."""
-    s = STATS[boundary]
-    n = s["checks"] + s["skipped"] + s["deferred"]
-    if n & (n - 1) == 0:
-        _write_summary({boundary: stats(boundary)})
-
-
-def _passed(boundary, rules):
-    for r in rules:
-        PASSES[(boundary, r)] = PASSES.get((boundary, r), 0) + 1
+_stats, _tick, _passed = _tally.counts, _tally.tick, _tally.passed
 
 
 def _side(where, text, value):
@@ -142,8 +116,7 @@ def _refuse(boundary, consumer, where, extent, broken):
     from . import load
     from .contracts import RULES, Contract, Decision, Verdict
 
-    _stats(boundary)["refused"] += 1
-    _write_summary({boundary: stats(boundary)})   # the process may not live to write one at exit
+    _tally.refused(boundary)   # counted, and the summary written now: the process may not live to exit normally
     contract = Contract(boundary, consumer, ("KvExtent",))
     decisions = []
     for rule, note, wanted in broken:
@@ -308,86 +281,26 @@ def request(boundary: str, consumer: str, where: str, lengths: Dict[int, Tuple[i
     return len(lengths)
 
 
-# --- where a check may not run, and what happens when entail itself fails --------------------------------------
+# --- counts, summaries and guards: shared with the other per-step boundaries (tally.py) ---------------------------
 
-def inside_capture() -> bool:
-    """True while torch is compiling or a CUDA graph is being captured: a check there becomes part of the captured
-    work, which cost 8x to 48x and changed the output when measured (audits/CACHE_CONTRACT.md)."""
-    if "torch" not in sys.modules:   # nothing can be capturing without torch; and the core never imports it
-        return False
-    import torch
-
-    # called directly, so that torch.compile folds it to a constant while tracing instead of breaking the graph
-    if torch.compiler.is_compiling():
-        return True
-    try:
-        return bool(torch.cuda.is_initialized() and torch.cuda.is_current_stream_capturing())
-    except Exception:  # noqa: BLE001
-        return False
+inside_capture = _tally.inside_capture
 
 
 def guarded(boundary: str, consumer: str, work, *args, **kwargs):
-    """Run an adapter's reading and this module's deciding so that an error inside entail never breaks the engine
-    (principle 12): a refusal (RoleError) passes through; anything else is reported once, as this boundary not being
-    checked, and the boundary is left alone from then on. Returns work()'s result, or None."""
-    if boundary in _BROKEN:
-        return None
-    try:
-        return work(*args, **kwargs)
-    except RoleError:
-        raise
-    except Exception as e:  # noqa: BLE001
-        from . import load, policies
-
-        _BROKEN.add(boundary)
-        load.enforce([load.cannot_check(boundary, consumer, "KvExtent",
-                                        f"entail failed here and stops checking this boundary: {type(e).__name__}: "
-                                        f"{e}", policies.current())])
-        return None
+    """tally.guarded for this contract: an error inside entail never breaks the engine (principle 12)."""
+    return _tally.guarded(boundary, consumer, "KvExtent", work, *args, **kwargs)
 
 
 def stats(boundary: Optional[str] = None) -> dict:
     """Counts for one boundary (checks, refused, skipped, deferred, and the passes per rule), or all of them."""
-    if boundary is None:
-        return {b: stats(b) for b in STATS}
-    s = dict(_stats(boundary))
-    s["passed"] = {r: n for (b, r), n in PASSES.items() if b == boundary}
-    return s
+    return _tally.stats(boundary)
 
 
 def reset(boundary: Optional[str] = None) -> None:
     """Forget the counts (of one boundary, or all) and every cache's books."""
     global _BOOKS
-    for b in [b for b in STATS if boundary is None or b == boundary]:
-        del STATS[b]
-    for k in [k for k in PASSES if boundary is None or k[0] == boundary]:
-        del PASSES[k]
-    if boundary is None:
-        _BROKEN.clear()
-    else:
-        _BROKEN.discard(boundary)
+    _tally.reset(boundary)
     _BOOKS = None
-
-
-def _write_summary(container):
-    """One line saying what container boundaries checked: printed with ENTAIL_VERBOSE, written to ENTAIL_RECORD.
-    Passes are never recorded one by one."""
-    summary = {"pid": os.getpid(), "container": container}
-    if os.environ.get("ENTAIL_VERBOSE"):
-        print(f"[entail] container boundaries in pid {os.getpid()}: {container}", flush=True)
-    path = os.environ.get("ENTAIL_RECORD")
-    if path:
-        try:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(summary, ensure_ascii=False) + "\n")
-        except OSError:
-            pass
-
-
-@atexit.register
-def _report():
-    if STATS:
-        _write_summary(stats())
 
 
 __all__ = ["KvExtent", "check", "check_extent", "grew", "flush", "request", "skipped", "inside_capture", "guarded",

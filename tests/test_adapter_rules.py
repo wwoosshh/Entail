@@ -4,7 +4,7 @@ logic, and their size. Reads the source only; imports nothing. Run: python tests
 An adapter gives three things - hooks, read_choice, handles - and install/uninstall. What would make it a place for
 rules, and is therefore refused here:
   - importing from entail anything but the entry points: load (the load-time contracts, resolve, enforce),
-    kv_contract (the container contracts, M5.1), policies.current,
+    kv_contract and epochs (the container contracts, M5.1 and M5.2), policies.current,
     core.mode, readers.rotary_of / config_dict (to turn what it read into a fact value), facts (fact classes), base
     (Hook). Not caps, contracts, sources, preflight or _shared: they hold tables, verdicts and precedence.
   - raising RoleError itself: stopping is load.enforce's, on a blocking decision.
@@ -28,7 +28,7 @@ LEGACY = {   # not yet on the v2 interface: where they move, and why they have n
     "_shared": "helpers the M6 adapters still use; nothing on v2 imports it",
 }
 NOT_ADAPTERS = ("__init__", "base")
-ALLOWED = {"load": None, "kv_contract": None, "policies": {"current"}, "core": {"mode"},
+ALLOWED = {"load": None, "kv_contract": None, "epochs": None, "policies": {"current"}, "core": {"mode"},
            "readers": {"rotary_of", "config_dict"}, "facts": None, "base": {"Hook"}}
 REQUIRED = ("hooks", "read_choice", "handles", "install", "engine", "versions")
 

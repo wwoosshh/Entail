@@ -64,6 +64,10 @@ RULES = {
     "kv_shrank": "the slots held shrank since the last check, and nothing said so",
     "kv_layers": "the layers of one cache hold different lengths",
     "kv_request": "after the request, the cache does not hold the tokens the request wrote",
+    # TIME and SPECIALIZATION on the host side (epochs.py, M5.2)
+    "epoch_stale": "the value reads a buffer that was written after the value was made",
+    "epoch_live": "a reader that reads later was handed a buffer that is written in place",
+    "assumed_changed": "the artifact is reused under conditions it was not made for",
 }
 
 
