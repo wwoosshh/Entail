@@ -14,7 +14,7 @@ Environment:
   ENTAIL_FACT_POLICY         Name=setting,...                   per fact, e.g. "Prediction=refuse,Template=report"
 """
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping, Optional, Tuple
 
 from .facts import VOCABULARY
@@ -62,6 +62,14 @@ class Policy:
     def unknown_setting(self, name: str, meaning_changing: bool) -> str:
         default = self.on_unknown_meaning_changing if meaning_changing else self.on_unknown_other
         return self._override(name, ON_UNKNOWN) or default
+
+
+def current() -> Policy:
+    """The policy in force in this process: the mode and the mismatch setting as core holds them (set_mode,
+    set_policy and enable() change them at run time), everything else from the environment."""
+    from . import core
+
+    return replace(from_env(), mode=core.mode(), on_mismatch=core.policy())
 
 
 def from_env(environ: Optional[Mapping[str, str]] = None) -> Policy:

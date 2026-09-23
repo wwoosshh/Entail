@@ -157,7 +157,17 @@ def test_sources_that_fill_different_fields_are_combined():
 
 
 def test_row_declaration_against_the_data():
-    for name, (a, b) in SAMPLES.items():
+    # The data contradicts a declaration only where both say something (M3.2); every other pair already overlaps.
+    data = dict(SAMPLES, ModelProps=(ModelProps(softcap=50.0), ModelProps(softcap=30.0)))
+    window = fact("ModelProps", ModelProps(sliding_window=4096), kind="data", certainty=Certainty.VERIFIED)
+    both = ModelProps(softcap=50.0, sliding_window=4096)
+    partial = one("ModelProps", fact("ModelProps", ModelProps(softcap=50.0)), used("ModelProps", both), observed=window)
+    assert (partial.verdict, partial.declared.certainty) == (Verdict.PASS, Certainty.VERIFIED)
+    assert partial.declared.value == both                           # what the data adds is kept, and then required
+    d = one("ModelProps", fact("ModelProps", ModelProps(softcap=50.0)), used("ModelProps", ModelProps(softcap=50.0)),
+            observed=window)
+    assert d.verdict is Verdict.REFUSED                             # the consumer drops the window the data shows
+    for name, (a, b) in data.items():
         seen_b = fact(name, b, kind="data", certainty=Certainty.VERIFIED)
         d = one(name, fact(name, a), used(name, b), observed=seen_b)
         assert (d.verdict, d.rule, d.blocking) == (Verdict.REFUSED, RULES["false_declaration"], True), name

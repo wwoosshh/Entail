@@ -1,39 +1,43 @@
-"""Tests for the transformers adapter's verdict and for install/uninstall. Run: python tests/test_adapter.py"""
+"""Tests for the transformers attention adapter v2 (ROADMAP M3.3): what it reads, that its decisions are the core's
+(load.attention) and land in the ledger, and install/uninstall. Run: python tests/test_adapter.py"""
+import io
 import os
 import sys
-from types import SimpleNamespace
+from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
-from entail import core  # noqa: E402
+from entail import core, load  # noqa: E402
 from entail.adapters import transformers_adapter as adapter  # noqa: E402
+from entail.contracts import Verdict  # noqa: E402
+
+GEMMA = os.path.join(os.path.expanduser(os.environ.get("ENTAIL_TEST_MODELS", "~/models")), "gemma-2-2b-it")
 
 
-def cfg(**kw):
-    return SimpleNamespace(**kw)
+def test_read_choice():
+    from types import SimpleNamespace
+
+    assert adapter.read_choice("sdpa") == ("attention", "sdpa")
+    assert adapter.read_choice("paged|sdpa") == ("paged_attention", "sdpa")
+    assert [h.target.rsplit(".", 1)[1] for h in adapter.hooks()] == ["_check_and_adjust_attn_implementation",
+                                                                    "tie_weights"]
+    assert adapter.loader_ties(SimpleNamespace(tie_word_embeddings=False)) is False
+    assert adapter.loader_ties(SimpleNamespace(text_config=SimpleNamespace(tie_word_embeddings=True))) is True
+    assert adapter.loader_ties(SimpleNamespace()) is None
 
 
-def test_verdict_violation():
-    kind, msg = adapter.verdict(cfg(attn_logit_softcapping=50.0), "sdpa")
-    assert kind == "violation" and "attn_logit_softcapping=50.0" in msg
-    assert adapter.verdict(cfg(attn_logit_softcapping=50.0), "eager") is None
-    assert adapter.verdict(cfg(attn_logit_softcapping=50.0), "paged|sdpa")[0] == "violation"
-
-
-def test_verdict_nothing_declared():
-    assert adapter.verdict(cfg(), "sdpa") is None
-    assert adapter.verdict(cfg(), "flash_attention_2") is None  # nothing to lose, nothing to say
-
-
-def test_verdict_uncovered():
-    kind, msg = adapter.verdict(cfg(attn_logit_softcapping=50.0), "flash_attention_2")
-    assert kind == "uncovered" and "not in the capability table" in msg
-
-
-def test_nested_text_config():
-    c = cfg(text_config=cfg(attn_logit_softcapping=30.0))
-    assert adapter.verdict(c, "sdpa")[0] == "violation"
+def test_the_model_contracts_run_once_per_model():
+    if not os.path.isdir(GEMMA):
+        print("skip (no local model)")
+        return
+    with _On() as on, redirect_stdout(io.StringIO()):
+        model = _gemma_on_meta("eager")
+        model.tie_weights()                       # a second call decides nothing again
+        loader = [d for d in on.new() if d.contract.boundary == "load:transformers.loader"]
+        rope = [d for d in on.new() if d.contract.boundary == "load:transformers.config.rope_parameters"]
+    assert len(loader) == 1 and loader[0].verdict is Verdict.PASS          # no lm_head.weight: tied, as declared
+    assert len(rope) == 1 and rope[0].verdict is Verdict.PASS
 
 
 def test_install_is_reversible():
@@ -47,79 +51,102 @@ def test_install_is_reversible():
     assert PreTrainedModel._check_and_adjust_attn_implementation is before
 
 
-def _gemma_on_meta(impl):
-    import torch
-    from transformers import AutoConfig, AutoModelForCausalLM
+class _On:
+    def __init__(self, policy="resolve"):
+        self.policy = policy
 
-    path = os.path.join(os.path.expanduser(os.environ.get("ENTAIL_TEST_MODELS", "~/models")), "gemma-2-2b-it")
-    if not os.path.isdir(path):
-        return None
-    with torch.device("meta"):
-        return AutoModelForCausalLM.from_config(AutoConfig.from_pretrained(path), attn_implementation=impl)
+    def __enter__(self):
+        adapter.install()
+        core.set_mode("load")
+        core.set_policy(self.policy)
+        self.n = len(load.LEDGER.decisions)
+        return self
 
+    def new(self):
+        return load.LEDGER.decisions[self.n:]
 
-def test_resolve_switches_to_an_implementation_that_honours_the_model():
-    """Under the default policy a dropped property is fixed, not refused: sdpa becomes eager, and it is said."""
-    from entail.adapters import _shared
-
-    adapter.install()
-    core.set_mode("load")
-    core.set_policy("resolve")
-    before = len(_shared.RESOLUTIONS)
-    try:
-        model = _gemma_on_meta("sdpa")
-        if model is None:
-            print("skip (no local model)")
-            return
-        assert model.config._attn_implementation == "eager", model.config._attn_implementation
-        last = _shared.RESOLUTIONS[before]
-        assert last["from"] == "sdpa" and last["to"] == "eager", last
-    finally:
-        core.set_mode("off")
-        adapter.uninstall()
-
-
-def test_refuse_still_refuses():
-    adapter.install()
-    core.set_mode("load")
-    core.set_policy("refuse")
-    try:
-        try:
-            model = _gemma_on_meta("sdpa")
-        except core.RoleError as e:
-            assert "does not honour" in str(e), e
-        else:
-            if model is not None:
-                raise AssertionError("refuse policy let a dropped property through")
-    finally:
+    def __exit__(self, *exc):
         core.set_policy("resolve")
         core.set_mode("off")
         adapter.uninstall()
 
 
-def test_nothing_to_resolve_to_is_still_refused():
-    """The paged kernels have no alternative that honours softcap, so resolve has to stop and say what works."""
-    cfg = SimpleNamespace(attn_logit_softcapping=50.0)
-    from entail.adapters import _shared
-
-    assert _shared.choose(cfg, "transformers", ["paged|eager", "paged|sdpa"]) is None
-    assert _shared.choose(cfg, "transformers", adapter.PREFERENCE) == "eager"
-
-
-def test_mode_off_does_nothing():
-    """With the mode off the wrapper must not raise even on a violating pair."""
+def _gemma_on_meta(impl):
     import torch
     from transformers import AutoConfig, AutoModelForCausalLM
 
-    path = os.path.join(os.path.expanduser(os.environ.get("ENTAIL_TEST_MODELS", "~/models")), "gemma-2-2b-it")
-    if not os.path.isdir(path):
+    with torch.device("meta"):
+        return AutoModelForCausalLM.from_config(AutoConfig.from_pretrained(GEMMA), attn_implementation=impl)
+
+
+def test_resolve_switches_to_an_implementation_that_honours_the_model():
+    """Under the default policy a dropped property is repaired, not refused: sdpa becomes eager, and it is said."""
+    if not os.path.isdir(GEMMA):
+        print("skip (no local model)")
+        return
+    out = io.StringIO()
+    with _On() as on, redirect_stdout(out):
+        model = _gemma_on_meta("sdpa")
+        assert model.config._attn_implementation == "eager", model.config._attn_implementation
+        new = [d for d in on.new() if d.verdict is Verdict.RESOLVED]
+    assert new and new[0].contract.consumer == "transformers.attention.sdpa" and new[0].target == "eager"
+    assert new[0].declared.source.kind == "config" and "gemma-2-2b-it" in new[0].declared.source.where
+    assert "[entail] resolved at load:transformers.attention" in out.getvalue()
+
+
+def test_refuse_still_refuses():
+    if not os.path.isdir(GEMMA):
+        print("skip (no local model)")
+        return
+    with _On("refuse"):
+        try:
+            with redirect_stdout(io.StringIO()):
+                _gemma_on_meta("sdpa")
+        except core.RoleError as e:
+            assert "policy refuses mismatches" in str(e) and "stops here" in str(e), e
+        else:
+            raise AssertionError("refuse policy let a dropped property through")
+
+
+def test_nothing_to_resolve_to_is_still_refused():
+    """The paged kernels have no alternative that honours softcap: continuous batching is refused, not rerouted."""
+    if not os.path.isdir(GEMMA):
+        print("skip (no local model)")
+        return
+    with _On() as on:
+        model = _gemma_on_meta("eager")
+        try:
+            with redirect_stdout(io.StringIO()):
+                model.set_attn_implementation("paged|sdpa")
+        except core.RoleError as e:
+            assert "load:transformers.paged_attention" in str(e) and "no resolution is registered" in str(e), e
+        else:
+            raise AssertionError("a paged kernel that drops softcap was let through")
+        assert any(d.verdict is Verdict.REFUSED for d in on.new())
+
+
+def test_a_model_that_declares_nothing_for_attention_gets_no_decision():
+    import torch
+    from transformers import AutoModelForCausalLM, LlamaConfig
+
+    tiny = LlamaConfig(vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=1, num_attention_heads=2,
+                       num_key_value_heads=1)
+    with _On() as on, torch.device("meta"):
+        AutoModelForCausalLM.from_config(tiny, attn_implementation="sdpa")
+        assert [d for d in on.new() if d.contract.boundary.startswith("load:transformers.attention")] == []
+
+
+def test_mode_off_does_nothing():
+    """With the mode off the wrapper must not decide, raise or record, even on a violating pair."""
+    if not os.path.isdir(GEMMA):
         print("skip test_mode_off_does_nothing (no local model)")
         return
     adapter.install()
     core.set_mode("off")
+    n = len(load.LEDGER.decisions)
     try:
-        with torch.device("meta"):
-            AutoModelForCausalLM.from_config(AutoConfig.from_pretrained(path), attn_implementation="sdpa")
+        assert _gemma_on_meta("sdpa").config._attn_implementation == "sdpa"
+        assert len(load.LEDGER.decisions) == n
     finally:
         adapter.uninstall()
 

@@ -77,6 +77,16 @@ def flag(text):
     return _VALUES["flag"].get(str(text).strip().lower())
 
 
+def rotary_of(params):
+    """A Rotary value from one RoPE parameters dict ({"rope_type": ..., "rope_theta": ..., "factor": ...}), with the
+    problems of representing it: (Rotary or None, [problem, ...]). Used by adapters to say what a config holds."""
+    r = ReadResult()
+    rk = ALIASES["Rotary"]["hf_config"]
+    _, theta = _first(params or {}, rk["theta"])
+    _rotary(r, params, theta, None, "rope_parameters", "engine")
+    return (r.facts[0].value if r.facts else None), r.problems
+
+
 # --- Hugging Face config.json ----------------------------------------------------------------------------------
 
 def _rotary(result, spec, theta, theta_key, where, source_kind="config"):
@@ -124,70 +134,97 @@ class HfConfig:
 
     def read(self, path):
         file = os.path.join(path, "config.json") if os.path.isdir(path) else path
-        cfg = _load_json(file)
-        r = ReadResult()
-        nested = isinstance(cfg.get("text_config"), dict)
-        text, prefix = (cfg["text_config"], "text_config.") if nested else (cfg, "")
+        return read_hf_dict(_load_json(file), file)
 
-        # ModelProps: the model's own requirements of whatever runs its attention
-        k = ALIASES["ModelProps"]["hf_config"]
-        props, used = {}, []
-        key, v = _first(text, k["softcap"])
+
+def read_hf_dict(cfg, label, source_kind="config", from_object=False):
+    """The facts a Hugging Face config states, from its dict: config.json as read from disk, or the config object an
+    engine holds (config_dict below, from_object=True). `label` names it in every Source."""
+    file = label
+    r = ReadResult()
+    nested = isinstance(cfg.get("text_config"), dict)
+    text, prefix = (cfg["text_config"], "text_config.") if nested else (cfg, "")
+
+    # ModelProps: the model's own requirements of whatever runs its attention
+    k = ALIASES["ModelProps"]["hf_config"]
+    props, used = {}, []
+    key, v = _first(text, k["softcap"])
+    if key:
+        props["softcap"], used = v, used + [prefix + key]
+    key, v = _first(text, k["sliding_window"])
+    _, enabled = _first(text, k["window_enabled"])
+    if key and enabled is not False:       # a window the config switches off is not a requirement
+        props["sliding_window"], used = v, used + [prefix + key]
+    for scope, p in ((cfg, ""), (text, prefix)):
+        key, v = _first(scope, k["tie"])
         if key:
-            props["softcap"], used = v, used + [prefix + key]
-        key, v = _first(text, k["sliding_window"])
-        _, enabled = _first(text, k["window_enabled"])
-        if key and enabled is not False:       # a window the config switches off is not a requirement
-            props["sliding_window"], used = v, used + [prefix + key]
-        for scope, p in ((cfg, ""), (text, prefix)):
-            key, v = _first(scope, k["tie"])
-            if key:
-                props["tie_word_embeddings"], used = v, used + [p + key]
-                break
-        _props(r, props, used, "config", file)
+            props["tie_word_embeddings"], used = v, used + [p + key]
+            break
+    _props(r, props, used, source_kind, file)
 
-        # Rotary: transformers 5 writes rope_parameters; older files write rope_theta and rope_scaling
-        rk = ALIASES["Rotary"]["hf_config"]
-        pkey, params = _first(text, rk["parameters"])
-        if pkey:
-            if isinstance(params, dict) and params and all(isinstance(x, dict) for x in params.values()):
-                r.problems.append(f"{file}#{prefix}{pkey}: RoPE set per layer type ({sorted(params)}) "
-                                  f"is not in vocabulary v{VOCAB_VERSION}")
-            elif isinstance(params, dict):
-                _, theta = _first(params, rk["theta"])
-                _rotary(r, params, theta, None, f"{file}#{prefix}{pkey}")
-        tkey, theta = _first(text, rk["theta"])
-        skey, scaling = _first(text, rk["scaling"])
-        if tkey or skey:
-            where = f"{file}#" + ",".join(prefix + x for x in (tkey, skey) if x)
-            _rotary(r, scaling if isinstance(scaling, dict) else None, theta, tkey, where)
+    # Rotary: transformers 5 writes rope_parameters; older files write rope_theta and rope_scaling
+    rk = ALIASES["Rotary"]["hf_config"]
+    pkey, params = _first(text, rk["parameters"])
+    if pkey:
+        if isinstance(params, dict) and params and all(isinstance(x, dict) for x in params.values()):
+            r.problems.append(f"{file}#{prefix}{pkey}: RoPE set per layer type ({sorted(params)}) "
+                              f"is not in vocabulary v{VOCAB_VERSION}")
+        elif isinstance(params, dict):
+            _, theta = _first(params, rk["theta"])
+            _rotary(r, params, theta, None, f"{file}#{prefix}{pkey}", source_kind)
+    tkey, theta = _first(text, rk["theta"])
+    skey, scaling = _first(text, rk["scaling"])
+    # config.json may state both spellings: two facts, and sources.merge finds a disagreement. In the config object an
+    # engine holds, the model reads rope_parameters only; a leftover old-name attribute is not a declaration.
+    if (tkey or skey) and not (pkey and from_object):
+        where = f"{file}#" + ",".join(prefix + x for x in (tkey, skey) if x)
+        _rotary(r, scaling if isinstance(scaling, dict) else None, theta, tkey, where, source_kind)
 
-        # Layout of quantized weights
-        qk = ALIASES["Layout"]["hf_quantization_config"]
-        qc = cfg.get("quantization_config")
-        if isinstance(qc, dict):
-            where = f"{file}#quantization_config"
-            _, method = _first(qc, qk["method"])
-            if method == "fp8":
-                _, block = _first(qc, qk["block"])
-                _, fmt = _first(qc, qk["fmt"])
-                _, scale = _first(qc, qk["scale_format"])
-                if block:
-                    _emit(r, "Layout", lambda: Layout("fp8_block", dtype=_VALUES["fp8_format"].get(fmt),
-                                                      block=tuple(block), scale_format=scale), "config", where)
-                else:
-                    r.problems.append(f"{where}: per-tensor fp8 (no weight_block_size) is not in vocabulary v1")
-            elif method in ("awq", "gptq"):
-                _, bits = _first(qc, qk["bits"])
-                _, gs = _first(qc, qk["group_size"])
-                if bits == 4:
-                    block = (gs,) if isinstance(gs, int) and gs > 0 else None
-                    _emit(r, "Layout", lambda: Layout("int4_packed", block=block), "config", where)
-                else:
-                    r.problems.append(f"{where}: {method} with {bits} bits is not in vocabulary v1")
+    # Layout of quantized weights
+    qk = ALIASES["Layout"]["hf_quantization_config"]
+    qc = cfg.get("quantization_config")
+    if isinstance(qc, dict):
+        where = f"{file}#quantization_config"
+        _, method = _first(qc, qk["method"])
+        if method == "fp8":
+            _, block = _first(qc, qk["block"])
+            _, fmt = _first(qc, qk["fmt"])
+            _, scale = _first(qc, qk["scale_format"])
+            if block:
+                _emit(r, "Layout", lambda: Layout("fp8_block", dtype=_VALUES["fp8_format"].get(fmt),
+                                                  block=tuple(block), scale_format=scale), source_kind, where)
             else:
-                r.problems.append(f"{where}: quantization method {method!r} is not in vocabulary v1")
-        return r
+                r.problems.append(f"{where}: per-tensor fp8 (no weight_block_size) is not in vocabulary v1")
+        elif method in ("awq", "gptq"):
+            _, bits = _first(qc, qk["bits"])
+            _, gs = _first(qc, qk["group_size"])
+            if bits == 4:
+                block = (gs,) if isinstance(gs, int) and gs > 0 else None
+                _emit(r, "Layout", lambda: Layout("int4_packed", block=block), source_kind, where)
+            else:
+                r.problems.append(f"{where}: {method} with {bits} bits is not in vocabulary v1")
+        else:
+            r.problems.append(f"{where}: quantization method {method!r} is not in vocabulary v1")
+    return r
+
+
+def config_dict(obj):
+    """A plain dict of the config object an engine holds: PretrainedConfig.to_dict(), or its attributes (nested
+    objects become dicts), so read_hf_dict reads it the way it reads config.json."""
+    to_dict = getattr(obj, "to_dict", None)
+    if callable(to_dict):
+        try:
+            d = to_dict()
+            if isinstance(d, dict):
+                return d
+        except Exception:  # noqa: BLE001 - fall back to the attributes
+            pass
+    out = {}
+    for k, v in vars(obj).items():
+        if k.startswith("__"):
+            continue
+        out[k] = config_dict(v) if hasattr(v, "__dict__") and not isinstance(v, type) else v
+    return out
 
 
 class HfTemplate:

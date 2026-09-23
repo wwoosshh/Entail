@@ -1,23 +1,37 @@
-"""D-arm check, load side: does the weight in memory still hold what the checkpoint file holds?
+"""Adapter v2, load side of vLLM: does the weight in memory still hold what the checkpoint file holds?
+(LIBRARY_DESIGN.md 4.8; ROADMAP M3.3; test problem fd-shift)
 
-adapters/vllm_layout.py checks the weight against the layout its kernel declares, and against a sample taken
-before post-processing. Neither can see a weight that was already wrong when it arrived — read from the wrong
-offset, fused in the wrong order, a shard swapped. For that the only reference is the file itself.
+A weight that was already wrong when it arrived - read from the wrong offset, fused in the wrong order, a shard
+swapped - looks like any other weight: shapes and dtypes are right. The only reference is the file itself. To compare
+a fused weight with the checkpoint one has to know which source tensor each row came from, and that mapping lives in
+vLLM's loader code rather than in any declaration; fusion_plan below writes it down per model family.
 
-The awkward part is the reason this check does not exist upstream: to compare a fused weight with the
-checkpoint, you have to know which source tensor each row came from, and that mapping lives inside the loader's
-code rather than in any declaration. So it is declared here, per model family, and that declaration is the
-point: FUSION below is the fact vLLM knows but never writes down.
-
-Only bf16/fp16 weights with tensor parallelism 1 are compared; anything quantised or sharded on the way in is
-reported as skipped rather than silently passed.
+  hook         vllm.model_executor.model_loader.utils.process_weights_after_loading: the weights are all loaded and
+               not yet repacked.
+  read_choice  for every linear weight: sampled elements compared with the checkpoint rows the fusion plan names;
+               the weights whose samples did not land where the plan puts them, and, for a weight that cannot be
+               compared (quantised, not in the checkpoint, no plan), the reason.
+  handles      none: a wrong weight cannot be repaired here.
+load.weights_taken decides (anything that did not land -> refused); load.cannot_check reports what was not compared.
+Only bf16/fp16 weights with tensor parallelism 1 are compared. Opt-in (ENTAIL_SOURCE=1): it costs a little I/O.
 """
 import os
 
-from .. import core
-from ..core import RoleError
+from .. import core, load, policies
+from .base import Hook
 
+engine = "vllm"
+versions = "0.30.0"
 SAMPLE_ROWS, SAMPLE_COLS = 4, 4  # 16 elements per weight
+
+
+def hooks():
+    return [Hook("vllm.model_executor.model_loader.utils.process_weights_after_loading", "load")]
+
+
+def handles():
+    return {}
+
 
 # layer suffix -> [(checkpoint suffix, how many rows it contributes)], rows resolved from the HF config.
 # "llama-like" covers Qwen 2/3, Llama, Mistral, Gemma: q/k/v fused into qkv_proj, gate/up into gate_up_proj.
@@ -76,15 +90,16 @@ class Checkpoint:
         for h in self._open.values():
             try:
                 h.__exit__(None, None, None)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         self._open = {}
 
 
-def check_layer(name, weight, cfg, ckpt):
-    """Compare a few elements of one loaded weight with the checkpoint they came from."""
+def read_layer(name, weight, cfg, ckpt):
+    """(mismatch, reason) for one loaded weight: mismatch is "" when every sampled element landed where the plan puts
+    it, the first one that did not otherwise; None with a reason when the weight could not be compared."""
     if weight is None or weight.ndim != 2:
-        return [], "not a matrix"
+        return None, "not a matrix"
     parts = name.rsplit(".", 2)
     suffix = ".".join(parts[-2:]) if len(parts) >= 2 else name
     prefix = name[: len(name) - len(suffix)]
@@ -93,14 +108,13 @@ def check_layer(name, weight, cfg, ckpt):
         if name.endswith("embed_tokens") or name.endswith("lm_head"):
             plan = [(suffix + ".weight", weight.shape[0])]
         else:
-            return [], "no declared source mapping"
+            return None, "no declared source mapping"
     total = sum(rows for _, rows in plan)
-    if total != weight.shape[0]:
-        return ([f"{name}: the declared sources add up to {total} rows, the weight has {weight.shape[0]} "
-                 f"(sharded or fused differently than declared)"], "shape mismatch")
+    if total != weight.shape[0]:   # with tensor parallelism 1 (the only case compared) this is a wrong fusion
+        return (f"{name}: the declared sources add up to {total} rows, the weight has {weight.shape[0]} (sharded or "
+                f"fused differently than declared)"), None
     rows = [min(weight.shape[0] - 1, r * max(1, weight.shape[0] // SAMPLE_ROWS)) for r in range(SAMPLE_ROWS)]
     cols = [min(weight.shape[1] - 1, c * max(1, weight.shape[1] // SAMPLE_COLS)) for c in range(SAMPLE_COLS)]
-    out, compared = [], 0
     for r in rows:
         offset, source, local = 0, None, None
         for src, n in plan:
@@ -108,61 +122,64 @@ def check_layer(name, weight, cfg, ckpt):
                 source, local = src, r - offset
                 break
             offset += n
-        if source is None:
-            continue
         for c in cols:
             want = ckpt.element(prefix + source, local, c)
             if want is None:
-                return [], f"{prefix + source} is not in the checkpoint"
+                return None, f"{prefix + source} is not in the checkpoint"
             if want.dtype != weight.dtype:
-                return [], f"dtype changed at load ({want.dtype} -> {weight.dtype})"
+                return None, f"dtype changed at load ({want.dtype} -> {weight.dtype})"
             got = weight[r, c].to("cpu")
-            compared += 1
             if want.item() != got.item():
-                out.append(f"{name}: row {r} should come from {source} row {local}, but the value at column "
-                           f"{c} is {got.item():.6g} where the checkpoint holds {want.item():.6g}")
-                break
-        if out:
-            break
-    return out, f"compared {compared}"
+                return (f"{name} row {r} (from {source} row {local}) column {c}: {got.item():.6g}, the checkpoint "
+                        f"holds {want.item():.6g}"), None
+    return "", None
+
+
+def read_choice(model, model_config):
+    """What the loader took, weight by weight: (weights compared, [the weights whose sampled elements did not land
+    where the plan puts them, with the first such element], {reason: number of weights not compared})."""
+    from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+
+    cfg = getattr(model_config, "hf_text_config", None) or getattr(model_config, "hf_config", None)
+    ckpt = Checkpoint(model_config.model)
+    compared, left, skipped = 0, [], {}
+    if not ckpt.map:
+        return 0, [], {"no safetensors checkpoint to compare with": 1}
+    try:
+        for name, module in model.named_modules():
+            if not isinstance(getattr(module, "quant_method", None), QuantizeMethodBase):
+                continue
+            mismatch, why = read_layer(name, getattr(module, "weight", None), cfg, ckpt)
+            if why is not None:
+                skipped[why] = skipped.get(why, 0) + 1
+                continue
+            compared += 1
+            if mismatch:
+                left.append(mismatch)
+    finally:
+        ckpt.close()
+    return compared, left, skipped
 
 
 def install():
-    """Wrap process_weights_after_loading and check the weights against the files before anything repacks them."""
-    from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+    """Wrap process_weights_after_loading and compare the weights with the files before anything repacks them."""
     from vllm.model_executor.model_loader import utils as loader_utils
 
     orig = loader_utils.process_weights_after_loading
 
     def wrapped(model, model_config, target_device, *a, **kw):
         if core.mode() in ("load", "debug"):
-            import time
+            def decide():
+                policy = policies.current()
+                compared, left, skipped = read_choice(model, model_config)
+                decisions = load.weights_taken(engine, str(model_config.model), compared, left, policy)
+                if skipped:
+                    why = "; ".join(f"{n} weight(s): {w}" for w, n in sorted(skipped.items()))
+                    decisions.append(load.cannot_check(f"load:{engine}.weights", f"{engine}.loader", "Coverage",
+                                                       why, policy))
+                load.enforce(decisions)
 
-            t0 = time.perf_counter()
-            cfg = getattr(model_config, "hf_text_config", None) or getattr(model_config, "hf_config", None)
-            ckpt = Checkpoint(model_config.model)
-            complaints, checked, skipped = [], 0, {}
-            if ckpt.map:
-                for name, module in model.named_modules():
-                    qm = getattr(module, "quant_method", None)
-                    if not isinstance(qm, QuantizeMethodBase):
-                        continue
-                    said, why = check_layer(name, getattr(module, "weight", None), cfg, ckpt)
-                    complaints += said
-                    if why.startswith("compared"):
-                        checked += 1
-                    else:
-                        skipped[why] = skipped.get(why, 0) + 1
-                ckpt.close()
-            if os.environ.get("ENTAIL_VERBOSE"):
-                print(f"[entail] source check: {checked} weights against the checkpoint, "
-                      f"{len(complaints)} complaints, skipped {skipped}, "
-                      f"{(time.perf_counter() - t0) * 1e3:.0f} ms", flush=True)
-            if complaints:
-                head = complaints[:5]
-                more = f"\n  ... and {len(complaints) - len(head)} more" if len(complaints) > len(head) else ""
-                raise RoleError("weights do not match the checkpoint they were loaded from:\n  "
-                                + "\n  ".join(head) + more)
+            load.safely(f"load:{engine}.weights", f"{engine}.loader", "Coverage", decide)
         return orig(model, model_config, target_device, *a, **kw)
 
     loader_utils.process_weights_after_loading = wrapped

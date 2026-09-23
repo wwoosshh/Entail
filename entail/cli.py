@@ -2,9 +2,14 @@
 
   entail doctor                          what is installed, whether the start-up hook is in place, what would run
   entail hook {install,uninstall,status} manage the start-up hook in this environment
+  entail check --model DIR --engine {sglang,transformers,vllm} [--attention NAME] [--manifests DIR] [--json FILE]
+                                         the load decisions before anything runs, without a GPU (M3.4)
   entail preflight --model DIR --engine {sglang,transformers,vllm} [--backend NAME | --list]
+                                         the 0.3.0 start-up check, kept for its users; `entail check` supersedes it
   entail infer PATH [--out FILE]         a manifest draft: what a model file or folder declares, and empty slots
   entail pin MANIFEST                    mark a reviewed manifest pinned, so its facts count as declarations
+  entail probe --engine E --consumer C --fact Name.field --model DIR [--out FILE] [--no-gate]
+                                         check one capability-table row with data (runs the engine on the GPU)
   entail version
 """
 import argparse
@@ -101,6 +106,43 @@ def _infer(args):
     return 0
 
 
+def _check(args):
+    """`entail check`: exit 1 when a decision would stop the run, 2 when the named backend is not in the table."""
+    from . import load, record, sites
+    from .contracts import Verdict
+
+    per_backend, model, notes = sites.check_static(args.model, args.engine, {"attention": args.attention,
+                                                                            "manifest_dirs": args.manifests})
+    facts = load.declared(args.model)
+    print(f"entail check: {args.model} on {args.engine}")
+    for name, group in sorted(facts.facts.items()):
+        for f in group:
+            print(f"  declared {f.value} ({f.source}, {f.certainty.value})")
+    for n in notes:
+        print(f"  note: {n}")
+    if not args.attention:
+        print("  attention backends in the capability table:")
+        for d in per_backend:
+            what = f"{d.verdict.value}" + (f" (to {d.target})" if d.target else "") + ("; stops" if d.blocking else "")
+            print(f"    {d.contract.consumer:42} {what}")
+        if not per_backend:
+            print("    (the model declares nothing the attention backends act on)")
+    for d in (per_backend if args.attention else []) + model:
+        print(record.line(d))
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as f:
+            json.dump({"model": args.model, "engine": args.engine, "notes": notes,
+                       "attention": [record.decision_json(d) for d in per_backend],
+                       "model_decisions": [record.decision_json(d) for d in model]}, f, ensure_ascii=False, indent=1)
+    chosen = per_backend if args.attention else []
+    if any(d.blocking for d in chosen + model):
+        return 1
+    if args.attention and any(d.verdict is Verdict.UNKNOWN and d.rule.startswith("what the consumer uses")
+                              for d in chosen):
+        return 2
+    return 0
+
+
 def _pin(args):
     from . import manifest
     m = manifest.load(args.manifest)
@@ -123,6 +165,20 @@ def main(argv=None):
     i.add_argument("--out", help="write the draft here instead of printing it")
     pn = sub.add_parser("pin", help="mark a reviewed manifest pinned")
     pn.add_argument("manifest")
+    ck = sub.add_parser("check", help="the load decisions for a model and an engine, before anything runs")
+    ck.add_argument("--model", required=True, help="a local model folder")
+    ck.add_argument("--engine", required=True, choices=["transformers", "sglang", "vllm"])
+    ck.add_argument("--attention", help="the backend the engine will use (default: every backend in the table)")
+    ck.add_argument("--manifests", action="append", default=[], help="a folder to look for manifests in")
+    ck.add_argument("--json", help="write the decisions as JSON here")
+    pr = sub.add_parser("probe", help="check one capability-table row with data")
+    pr.add_argument("--engine", required=True, choices=["transformers", "sglang", "vllm"])
+    pr.add_argument("--consumer", required=True, help="short name (sdpa) or full name (transformers.attention.sdpa)")
+    pr.add_argument("--fact", required=True, help="vocabulary name and field, e.g. ModelProps.softcap")
+    pr.add_argument("--model", required=True, help="a local model folder that declares the fact")
+    pr.add_argument("--table", help="a capability table other than the packaged one")
+    pr.add_argument("--out", help="write the measurement as JSON here")
+    pr.add_argument("--no-gate", action="store_true", help="skip the binding gate for an 'ignores' verdict")
     sub.add_parser("version", help="print the version")
     args, rest = ap.parse_known_args(argv)
     if args.cmd == "preflight":
@@ -140,6 +196,12 @@ def main(argv=None):
         return _infer(args)
     if args.cmd == "pin":
         return _pin(args)
+    if args.cmd == "probe":
+        from .probes import main as probe_main
+
+        return probe_main(args)
+    if args.cmd == "check":
+        return _check(args)
     return _hook(args)
 
 

@@ -23,42 +23,29 @@ import json
 import os
 import sys
 
+from . import caps as _caps
 from .facts import KernelCaps, ModelProps
 
+
+def _legacy_caps():
+    """engine -> backend -> (KernelCaps, evidence), built from data/caps.json (M3.1). The table used to be written
+    here; it is data now, and this view remains for the code that has not moved to caps.py yet."""
+    out = {}
+    for consumer, cells in _caps.as_dict(_caps.default_table()).items():
+        engine, role, short = consumer.split(".", 2)
+        if role == "paged_attention":
+            short = f"paged|{short}"   # the name transformers gives the paged implementations
+        elif role != "attention":
+            continue
+        sc, sw = cells.get("ModelProps.softcap"), cells.get("ModelProps.sliding_window")
+        kc = KernelCaps(softcap=bool(sc and sc.honours), sliding_window=bool(sw and sw.honours))
+        why = "; ".join(f"{c.field} {c.evidence}: {c.ref}" for c in cells.values())
+        out.setdefault(engine, {})[short] = (kc, why)
+    return out
+
+
 # engine -> backend -> (caps, evidence)
-CAPS = {
-    "transformers": {
-        "eager": (KernelCaps(softcap=True, sliding_window=True), "measured: audits/cap_probe"),
-        "sdpa": (KernelCaps(softcap=False, sliding_window=True),
-                 "integrations/sdpa_attention.py never reads softcap (measured: audits/cap_probe, rolebench 08)"),
-        "flex_attention": (KernelCaps(softcap=True, sliding_window=True),
-                           "score_mod applies softcap (measured: audits/cap_probe)"),
-        "paged|eager": (KernelCaps(softcap=False, sliding_window=True),
-                        "continuous batching paged kernels take no softcap (measured: audits/cap_probe,"
-                        " audits/tf_paged_softcap)"),
-        "paged|sdpa": (KernelCaps(softcap=False, sliding_window=True), "measured: audits/cap_probe"),
-    },
-    "sglang": {
-        "triton": (KernelCaps(softcap=True, sliding_window=True), "measured: audits/sglang_backend_survey"),
-        "flashinfer": (KernelCaps(softcap=False, sliding_window=True),
-                       "measured: audits/sglang_backend_survey; upstream issue #33915"),
-        "flex_attention": (KernelCaps(softcap=False, sliding_window=False),
-                           "measured: audits/sglang_backend_survey, sweep/RESULTS.md; block masks are causal-only"),
-        "torch_native": (KernelCaps(softcap=False, sliding_window=True),
-                         "measured: rolebench case 17; window only on causal layers"),
-        "trtllm_mha": (KernelCaps(softcap=False, sliding_window=True), "code read: no logit_cap in the backend"),
-    },
-    "vllm": {
-        "FLASH_ATTN": (KernelCaps(softcap=True, sliding_window=True),
-                       "measured: sweep/RESULTS.md (vLLM 0.30.0, sm_89); softcap passed to the kernel"),
-        "TRITON_ATTN": (KernelCaps(softcap=True, sliding_window=True), "measured: sweep/RESULTS.md (vLLM 0.30.0)"),
-        "FLASHINFER": (KernelCaps(softcap=True, sliding_window=True),
-                       "code read: softcap applied except on the TRTLLM/XQA paths (SM100, Hopper XQA)"),
-        # A code read said this backend raises on softcap. Run, it honours it without raising (vLLM 0.30.0).
-        "FLEX_ATTENTION": (KernelCaps(softcap=True, sliding_window=True), "measured: sweep/RESULTS.md (vLLM 0.30.0)"),
-        "ROCM_ATTN": (KernelCaps(softcap=False, sliding_window=True), "code read: softcap stored, not passed"),
-    },
-}
+CAPS = _legacy_caps()
 
 
 def read_props(model_dir):

@@ -12,8 +12,9 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-from entail import core  # noqa: E402
-from entail.adapters import _shared, rope_alias  # noqa: E402
+from entail import core, load  # noqa: E402
+from entail.adapters import rope_alias  # noqa: E402
+from entail.contracts import Verdict  # noqa: E402
 
 MODELS = {name: os.path.join(os.path.expanduser(os.environ.get("ENTAIL_TEST_MODELS", "~/models")), name)
           for name in ("Qwen3-4B", "Llama-3.2-3B-Instruct", "gemma-3-1b-it", "gemma-2-2b-it")}
@@ -54,11 +55,12 @@ class _On:
         rope_alias.install()
         core.set_mode("load")
         core.set_policy(self.policy)
-        self.n = len(_shared.RESOLUTIONS)
+        self.n = len(load.LEDGER.decisions)
         return self
 
     def new(self):
-        return _shared.RESOLUTIONS[self.n:]
+        """The repairs made since entering: resolved decisions in the ledger."""
+        return [d for d in load.LEDGER.decisions[self.n:] if d.verdict is Verdict.RESOLVED]
 
     def __exit__(self, *exc):
         core.set_policy("resolve")
@@ -140,7 +142,7 @@ def test_refuse_raises_only_when_something_would_be_lost():
         try:
             cfg.rope_scaling = dict(YARN)
         except core.RoleError as e:
-            assert "rope_parameters" in str(e)
+            assert "rope_parameters" in str(e) and "policy refuses mismatches" in str(e), e
         else:
             raise AssertionError("refuse let a lossy rope_scaling write through")
 

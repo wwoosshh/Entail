@@ -41,6 +41,8 @@ def line(decision) -> str:
         text += f"; the data shows {_shown(d.observed)}"
     if d.conflict:
         text += "; sources disagreed: " + ", ".join(_shown(f) for f in d.conflict)
+    if getattr(d, "note", ""):
+        text += f"; note: {d.note}"
     if d.blocking:
         text += "; stops here"
     return text
@@ -51,6 +53,14 @@ def _fact_json(fact):
         return None
     return {"name": fact.name, "kind": fact.kind, "value": None if fact.value is None else str(fact.value),
             "source": {"kind": fact.source.kind, "where": fact.source.where}, "certainty": fact.certainty.value}
+
+
+def decision_json(d) -> dict:
+    return {"boundary": d.contract.boundary, "consumer": d.contract.consumer, "name": d.name,
+            "verdict": d.verdict.value, "blocking": d.blocking, "rule": d.rule, "resolution": d.resolution,
+            "handle": d.handle, "target": None if getattr(d, "target", None) is None else str(d.target),
+            "note": getattr(d, "note", ""), "declared": _fact_json(d.declared), "chosen": _fact_json(d.chosen),
+            "observed": _fact_json(d.observed), "conflict": [_fact_json(f) for f in d.conflict]}
 
 
 @dataclass
@@ -72,11 +82,7 @@ class Ledger:
         return [line(d) for d in self.decisions]
 
     def to_json(self) -> dict:
-        return {"decisions": [{
-            "boundary": d.contract.boundary, "consumer": d.contract.consumer, "name": d.name, "verdict": d.verdict.value,
-            "blocking": d.blocking, "rule": d.rule, "resolution": d.resolution, "handle": d.handle,
-            "declared": _fact_json(d.declared), "chosen": _fact_json(d.chosen), "observed": _fact_json(d.observed),
-            "conflict": [_fact_json(f) for f in d.conflict]} for d in self.decisions]}
+        return {"decisions": [decision_json(d) for d in self.decisions]}
 
     def locate(self) -> Localization:
         raise NotImplementedError("M7.1: locating where meaning broke")

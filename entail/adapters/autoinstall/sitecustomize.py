@@ -19,11 +19,14 @@ import sys
 # module that must finish importing -> ["adapter module[:function]", ...] to run once it has
 TARGETS = {
     # Before any model config class exists: each one copies the __setattr__ it inherits when it is created.
-    "transformers.configuration_utils": ["entail.adapters.rope_alias"],
+    # rope_alias first: both wrap from_dict, and the key coverage check reads the config rope_alias has settled.
+    "transformers.configuration_utils": ["entail.adapters.rope_alias", "entail.adapters.transformers_config"],
     "transformers.modeling_utils": ["entail.adapters.transformers_adapter"],
     "sglang.srt.model_executor.model_runner": ["entail.adapters.sglang_adapter"],
     "sglang.srt.managers.schedule_batch": ["entail.adapters.sglang_cache_contract"],
-    "vllm.model_executor.model_loader.utils": ["entail.adapters.vllm_layout"],
+    "vllm.model_executor.model_loader.utils": ["entail.adapters.vllm_layout", "entail.adapters.vllm_loader"],
+    # Patched as soon as the selector has run, so attention.py imports the wrapped name.
+    "vllm.v1.attention.selector": ["entail.adapters.vllm_attention"],
     "vllm.v1.core.kv_cache_manager": ["entail.adapters.vllm_cache_contract"],
     # ComfyUI: the LoRA check sits where LoRAs are applied; the node hook only adds the file name to the message.
     "comfy.sd": ["entail.adapters.comfyui"],
@@ -34,6 +37,9 @@ TARGETS = {
     "comfy.model_sampling": ["entail.adapters.comfyui:install_schedule_record"],
     "comfy.model_patcher": ["entail.adapters.comfyui:install_buffer_guard"],
     "comfy.model_base": ["entail.adapters.comfyui:install_schedule_check"],
+    # diffusers: the same declaration and LoRA checks, hooked where diffusers loads single files and LoRAs.
+    "diffusers.loaders.single_file": ["entail.adapters.diffusers_adapter"],
+    "diffusers.loaders.lora_pipeline": ["entail.adapters.diffusers_adapter:install_lora"],
 }
 # A one-shot probe of SGLang's request bookkeeping, used while writing the cache contract.
 if os.environ.get("ENTAIL_PROBE") == "sglang_cache":

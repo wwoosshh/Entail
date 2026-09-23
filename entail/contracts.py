@@ -50,6 +50,7 @@ RULES = {
     "sources_disagree": "the sources disagree",
     "false_declaration": "the declaration contradicts the data",
     "data_used": "the declaration contradicts the data; the data's value is used",
+    "cannot_check": "this boundary could not be checked",
 }
 
 
@@ -84,15 +85,21 @@ class Contract:
 @dataclass(frozen=True)
 class Resolution:
     """One way to repair a mismatch for one vocabulary name. `handle` names the adapter operation that carries it
-    out; `when` limits it to the mismatches it can repair (None: any)."""
+    out; `when` limits it to the mismatches it can repair (None: any). `target`, when given, says what the handle is
+    given (e.g. the backend to switch to); a resolution whose target is None does not apply (M3.2)."""
     name: str
     handle: str
     when: Optional[Callable[[Fact, Fact], bool]] = None
+    target: Optional[Callable[[Fact, Fact], object]] = None
 
     def applies(self, declared: Fact, chosen: Fact) -> bool:
-        return True if self.when is None else bool(self.when(declared, chosen))
+        if self.when is not None and not self.when(declared, chosen):
+            return False
+        return self.target is None or self.target(declared, chosen) is not None
 
-    def describe(self, declared: Fact, chosen: Fact) -> str:
+    def describe(self, declared: Fact, chosen: Fact, target=None) -> str:
+        if target is not None:
+            return f"{self.name} (to {target})"
         return f"{self.name} ({_value(chosen)} -> {_value(declared)})"
 
 
@@ -120,6 +127,8 @@ class Decision:
     handle: Optional[str] = None
     blocking: bool = False
     conflict: Tuple[Fact, ...] = ()
+    target: Optional[object] = None   # what the handle is given, when the resolution names it
+    note: str = ""                    # why a boundary could not be checked, or what else the ledger should say
 
 
 def agrees(declared_value, chosen_value) -> bool:
@@ -129,6 +138,12 @@ def agrees(declared_value, chosen_value) -> bool:
         return False
     return all(getattr(chosen_value, f.name) == getattr(declared_value, f.name)
                for f in fields(declared_value) if getattr(declared_value, f.name) is not None)
+
+
+def _fill(declared_value, observed_value):
+    """The declared value with the fields it leaves open taken from what the data shows."""
+    return type(declared_value)(**{f.name: getattr(declared_value, f.name) if getattr(declared_value, f.name)
+                                   is not None else getattr(observed_value, f.name) for f in fields(declared_value)})
 
 
 def _value(fact):
@@ -141,11 +156,14 @@ def _check(fact, name, role):
 
 
 def decide(contract: Contract, declared: Dict[str, object], chosen: Dict[str, Fact], policy: Optional[Policy] = None,
-           observed: Optional[Dict[str, Fact]] = None) -> List[Decision]:
+           observed: Optional[Dict[str, Fact]] = None, resolutions: Optional[Dict[str, List[Resolution]]] = None
+           ) -> List[Decision]:
     """Apply the verdict order above to every name the contract needs. `declared[name]` is a Fact or a tuple of
-    candidate Facts from different sources."""
+    candidate Facts from different sources. `resolutions` adds repairs that only this call can offer (e.g. routing
+    to a backend of this engine); they are tried before the registered ones."""
     policy = policy or Policy()
     observed = observed or {}
+    resolutions = resolutions or {}
     out = []
     for name in contract.needs:
         candidates = declared.get(name, ())
@@ -169,8 +187,10 @@ def decide(contract: Contract, declared: Dict[str, object], chosen: Dict[str, Fa
         note = None
         if o is not None and o.certainty is not Certainty.UNKNOWN:
             if d is not None and d.certainty in (Certainty.DECLARED, Certainty.VERIFIED):
-                if agrees(d.value, o.value):
-                    d = replace(d, certainty=Certainty.VERIFIED)
+                # the data contradicts a declaration only where both say something (an observation may cover a
+                # few fields); confirmed, the declaration takes what the data adds to its open fields (M3.2)
+                if _sources.compatible(d.value, o.value):
+                    d = replace(d, value=_fill(d.value, o.value), certainty=Certainty.VERIFIED)
                 elif policy.on_false_declaration == "refuse":
                     out.append(decision(Verdict.REFUSED, RULES["false_declaration"], blocking=True))
                     continue
@@ -198,10 +218,12 @@ def decide(contract: Contract, declared: Dict[str, object], chosen: Dict[str, Fa
         if policy.mismatch_setting(name) == "refuse":
             out.append(decision(Verdict.REFUSED, RULES["policy_refuses"], declared=d, blocking=True))
             continue
-        fix = next((r for r in RESOLUTIONS.get(name, []) if r.applies(d, c)), None)
+        offered = list(resolutions.get(name, ())) + RESOLUTIONS.get(name, [])
+        fix = next((r for r in offered if r.applies(d, c)), None)
         if fix is None:
             out.append(decision(Verdict.REFUSED, RULES["no_resolution"], declared=d, blocking=True))
         else:
-            out.append(decision(Verdict.RESOLVED, RULES["resolved"], declared=d, resolution=fix.describe(d, c),
-                                handle=fix.handle))
+            target = fix.target(d, c) if fix.target is not None else None
+            out.append(decision(Verdict.RESOLVED, RULES["resolved"], declared=d, resolution=fix.describe(d, c, target),
+                                handle=fix.handle, target=target))
     return out

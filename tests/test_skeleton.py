@@ -10,12 +10,8 @@ import entail  # noqa: E402
 from entail import boundaries, caps, contracts, core, facts, manifest, policies, record, sites, sources, testing  # noqa: E402
 from entail.adapters import base  # noqa: E402
 
-PLANNED = [   # built since M0.3: contracts, policies, the ledger, sources and readers (M1, M2), manifests (M2.3)
-    (caps.load_table, ("x",), "M3.1"),
-    (caps.lookup, ([], "c", "f"), "M3.1"),
-    (caps.probe, ("e", "c", "f"), "M3.1"),
-    (sites.check_static, ("m", "e", {}), "M3.4"),
-    (sites.at_load, ("m", "e", {}, None), "M3.2"),
+PLANNED = [   # built since M0.3: contracts, policies, the ledger, sources and readers (M1, M2), manifests (M2.3),
+    #             the capability table and probes (M3.1), the load contracts (M3.2), entail check (M3.4)
     (sites.at_container, (None, "w", None), "M5.1"),
     (sites.at_request, ({}, {}, None), "M5.3"),
     (sites.debug_propagation, (), "M7.1"),

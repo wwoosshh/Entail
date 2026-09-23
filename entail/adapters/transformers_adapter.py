@@ -1,31 +1,52 @@
-"""Adapter: make transformers itself keep the model's declared attention properties when a backend is chosen.
+"""Adapter v2 for transformers' model loading (LIBRARY_DESIGN.md 4.8; ROADMAP M3.3).
 
-`install()` wraps PreTrainedModel._check_and_adjust_attn_implementation. transformers 5.17 calls it in two
-places (modeling_utils.py:1263 at model __init__, and inside set_attn_implementation), so the decision is made
-before the weights are read, and again when continuous batching switches to `paged|...`.
-
-What happens when the requested implementation would drop a declared property depends on the policy
-(core.policy()):
-  resolve  (default) switch to an implementation measured to honour it - eager - and say so in one line.
-           The model then runs, and runs as declared.
-  refuse   raise RoleError, as before.
-The paged implementations have no alternative that honours softcap, so there is nothing to switch to; that
-case is refused under either policy, with a message that says what would work instead.
-
-With the mode off (the default) the wrapper returns immediately, and `uninstall()` restores the original method.
+Three things, and no rules:
+  hooks        PreTrainedModel._check_and_adjust_attn_implementation. transformers 5.17 calls it at model __init__
+               (modeling_utils.py:1263), before the weights are read, and inside set_attn_implementation, which is
+               how continuous batching switches to `paged|...`.
+               PreTrainedModel.tie_weights: where the head is tied to the embedding (post_init and after loading);
+               the contracts about the model itself (load.model_contracts) run there, once per model.
+  read_choice  the implementation it settled on, as (group, backend): "paged|sdpa" is sdpa among the paged kernels;
+               whether the loader ties the head (what the config it holds says).
+  handle       switch_attention_backend: ask the same method for another implementation.
+load.attention compares the model's declarations with the backend (caps.json) and decides; load.enforce records the
+decision, prints it, and stops on a blocking one. With the mode off the wrapper returns at once, and uninstall()
+restores the original method.
 """
-from .. import core
-from . import _shared
+from .. import core, load, policies
+from .base import Hook
 
+engine = "transformers"
+versions = "5.12.1, 5.16.1, 5.17.0"
 _ORIG = None
-# eager first: it is the reference implementation and it honoured every fact in the sweep; flex_attention
-# honours softcap too but failed to compile for some fact combinations (sweep/RESULTS.md, void rows)
-PREFERENCE = ["eager", "flex_attention"]
+_ORIG_TIE = None
+# A model and the model inside it share one config and both ask: decide once per config (and implementation).
+_SEEN = load.ByObject()      # config -> True once its model-level contracts have run
+_CHOSEN = load.ByObject()    # config -> {implementation asked for: implementation to use}
 
 
-def verdict(config, impl):
-    """(kind, message) or None. Kept as its own name because the tests and the pilot use it."""
-    return _shared.verdict(config, impl, "transformers")
+def hooks():
+    return [Hook("transformers.modeling_utils.PreTrainedModel._check_and_adjust_attn_implementation", "load"),
+            Hook("transformers.modeling_utils.PreTrainedModel.tie_weights", "load")]
+
+
+def read_choice(impl):
+    """(group role, backend) for an implementation name transformers settled on."""
+    if impl.startswith("paged|"):
+        return "paged_attention", impl.split("|", 1)[1]
+    return "attention", impl
+
+
+def loader_ties(config):
+    """Whether the loader will tie the head: the tie_word_embeddings the config holds (top level, else text_config)."""
+    tie = getattr(config, "tie_word_embeddings", None)
+    if tie is None:
+        tie = getattr(getattr(config, "text_config", None), "tie_word_embeddings", None)
+    return tie if isinstance(tie, bool) else None
+
+
+def handles(model, args, kwargs):
+    return {"switch_attention_backend": lambda target: _ORIG(model, target, *args, **kwargs)}
 
 
 def install():
@@ -39,26 +60,47 @@ def install():
 
     def wrapped(self, attn_implementation, *a, **kw):
         impl = _ORIG(self, attn_implementation, *a, **kw)
-        if core.mode() not in ("load", "debug"):
+        if core.mode() not in ("load", "debug") or not isinstance(impl, str):
             return impl
-        said = verdict(self.config, impl)
-        if said is None:
-            return impl
-        if said[0] == "violation" and core.policy() == "resolve":
-            paged = isinstance(impl, str) and impl.startswith("paged|")
-            alt = None if paged else _shared.choose(self.config, "transformers", PREFERENCE)
-            if alt is not None:
-                _shared.note_resolution("transformers", "attention implementation", impl, alt, self.config)
-                return _ORIG(self, alt, *a, **kw)
-            if paged:
-                kind, msg = said
-                said = (kind, msg + "\n  no paged implementation honours it; generate() instead of "
-                                    "generate_batch() keeps the declared behaviour")
-        _shared.report(said)
-        return impl
+        role, backend = read_choice(impl)
+        known = _CHOSEN.get(self.config, {})
+        if impl in known:
+            return known[impl]
+
+        def decide():
+            facts = load.declared(getattr(self.config, "_name_or_path", None), self.config)
+            decisions = load.attention(engine, backend, facts, policy=policies.current(), role=role)
+            done = load.resolve(decisions, handles(self, a, kw))
+            load.enforce(decisions)
+            return done.get("switch_attention_backend", impl)
+
+        use = load.safely(f"load:{engine}.{role}", f"{engine}.{role}.{backend}", "ModelProps", decide, impl)
+        _CHOSEN.set(self.config, {**known, impl: use})
+        return use
 
     PreTrainedModel._check_and_adjust_attn_implementation = wrapped
+    _install_tie(PreTrainedModel)
     return 1
+
+
+def _install_tie(PreTrainedModel):
+    global _ORIG_TIE
+    _ORIG_TIE = PreTrainedModel.tie_weights
+
+    def tie_weights(self, *a, **kw):
+        out = _ORIG_TIE(self, *a, **kw)
+        config = getattr(self, "config", None)
+        if core.mode() in ("load", "debug") and config is not None and not _SEEN.get(config):
+            _SEEN.set(config, True)
+
+            def decide():
+                load.enforce(load.model_contracts(engine, getattr(config, "_name_or_path", None), config,
+                                                  loader_ties(config), policies.current()))
+
+            load.safely(f"load:{engine}.loader", f"{engine}.loader", "ModelProps", decide)
+        return out
+
+    PreTrainedModel.tie_weights = tie_weights
 
 
 def uninstall():
@@ -68,5 +110,8 @@ def uninstall():
     from transformers import PreTrainedModel
 
     PreTrainedModel._check_and_adjust_attn_implementation = _ORIG
+    PreTrainedModel.tie_weights = _ORIG_TIE
     _ORIG = None
+    _SEEN.clear()
+    _CHOSEN.clear()
     return 1

@@ -29,7 +29,9 @@ def test_rope_alias_goes_in_before_any_model_config_exists():
     """@strict copies __setattr__ into each config class when it is created, so the hook has to be in place when
     configuration_utils finishes, before the first model config module is imported."""
     t = _load().TARGETS
-    assert t["transformers.configuration_utils"] == ["entail.adapters.rope_alias"], t
+    assert t["transformers.configuration_utils"] == ["entail.adapters.rope_alias",
+                                                     "entail.adapters.transformers_config"], t
+    assert t["vllm.v1.attention.selector"] == ["entail.adapters.vllm_attention"], t
 
 
 def test_only_keeps_the_named_adapters():
