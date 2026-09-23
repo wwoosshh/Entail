@@ -60,6 +60,35 @@ class KernelCaps:
     sliding_window: bool = False
 
 
+PREDICTION_KINDS = frozenset({"eps", "v", "x0", "flow", "edm"})
+
+
+@dataclass(frozen=True)
+class Prediction:
+    """What a diffusion model's network predicts (PROPERTY), and whether its schedule reaches zero terminal SNR.
+
+    `kind` is a closed set. `zsnr` None means the source does not say; comparisons then use the kind alone."""
+    kind: str
+    zsnr: Optional[bool] = None
+
+    def __post_init__(self):
+        if self.kind not in PREDICTION_KINDS:
+            raise ValueError(f"unknown prediction kind {self.kind!r}; closed set is {sorted(PREDICTION_KINDS)}")
+
+    def __str__(self):
+        name = {"eps": "eps", "v": "v-prediction", "x0": "x0", "flow": "flow", "edm": "EDM"}[self.kind]
+        return name + {True: " with zero terminal SNR", False: " without zero terminal SNR", None: ""}[self.zsnr]
+
+
+@dataclass(frozen=True)
+class Base:
+    """The model family an artifact was made for: a checkpoint's architecture, the base a LoRA was trained on."""
+    family: str
+
+    def __str__(self):
+        return self.family
+
+
 @dataclass(frozen=True)
 class Invalidated:
     """A fact that stopped being true because of an operation, kept instead of being dropped.
