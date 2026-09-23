@@ -9,7 +9,7 @@ from .core import (RoleError, boundary, check_config_keys, check_props, check_ti
                    set_mode, set_policy, tag)
 from .facts import (LAYOUT_KINDS, KernelCaps, Layout, ModelProps, Positions, Quantized, Reduction, Valid)
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def enable(mode="load", policy="resolve"):

@@ -27,6 +27,7 @@ TARGETS = {
     "vllm.v1.core.kv_cache_manager": ["entail.adapters.vllm_cache_contract"],
     # ComfyUI: the LoRA check sits where LoRAs are applied; the node hook only adds the file name to the message.
     "comfy.sd": ["entail.adapters.comfyui"],
+    "comfy.sample": ["entail.adapters.comfyui:install_sampling"],
     "nodes": ["entail.adapters.comfyui:install_nodes"],
 }
 # A one-shot probe of SGLang's request bookkeeping, used while writing the cache contract.

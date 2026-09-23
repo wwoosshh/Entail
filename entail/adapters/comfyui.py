@@ -13,15 +13,31 @@ the text encoder when one is given):
         the LoRA declares it was trained for, and which model it met (RoleError; ComfyUI shows it as a node error)
   some  one line saying how many are left out; the workflow goes on
   all   nothing is said (ENTAIL_VERBOSE=1 prints a line anyway)
+
+Second check: the prediction type. For SD1/SD2/SDXL checkpoints ComfyUI decides v-prediction from one marker, a
+`v_pred` key in the file (comfy/supported_models.py). A merge or conversion that drops it makes ComfyUI sample a
+v-prediction model as eps, and the run still "succeeds": measured with NoobAI-XL-Vpred, the images came out as
+coloured noise or completely black, 89-189 of 255 away from the right ones on average. So the declaration is
+checked against the model itself, on the first model call of each sampling - the noisiest step, so no extra
+forward pass is needed: an eps model predicts the noise in its input back (cosine ~1.00 measured on 8
+checkpoints), a v-prediction model predicts the image (~0.01). A separate probe pass was tried first; it changed
+the kernels picked for the first image after start-up (0.6/255 on average), so the check only watches now. When the behaviour contradicts what ComfyUI decided from the marker, the model is
+sampled the way it behaves - exactly what a ModelSamplingDiscrete node would do - and one line says so. When it
+contradicts a sampling node the workflow itself set, or the sigmas were already computed (custom samplers), it stops
+with the reason instead: an explicit choice is not overridden silently.
 """
 import contextvars
+import importlib
 import os
 import re
 
 from .. import core
+from . import _shared
 
 _ORIG_APPLY = None
 _ORIG_NODE = None
+_ORIG_SAMPLE = None
+_ORIG_SAMPLE_CUSTOM = None
 _name = contextvars.ContextVar("entail_lora_name", default=None)
 
 # What follows a module name in the LoRA formats ComfyUI reads (kohya, peft/diffusers, LyCORIS and friends).
@@ -81,6 +97,160 @@ def _declared(meta):
     parts = [meta.get("modelspec.architecture"), meta.get("ss_base_model_version")]
     parts = [p for p in parts if p]
     return " / ".join(dict.fromkeys(parts)) or None
+
+
+# Halfway between what theory predicts - eps: cos = sigma_t (0.99 at the last timestep, >0.9 from the middle up),
+# v: ~0 at every timestep - so not fitted to data. Measured with a separate probe at t=999: eps 0.9997-0.9999 on
+# 8 checkpoints, v -0.013..0.039 (issue_track/comfyui_field_test/VPRED_PROTOCOL.md).
+BOUNDARY = 0.5
+MIN_T = 500  # below this the eps value (sigma_t) nears the boundary; the first call of a low-denoise img2img is skipped
+_seen = {}  # id(base model) -> 'eps' | 'v_prediction', as measured on its first sampling
+
+
+def behaves_like(cos):
+    return "eps" if cos > BOUNDARY else "v_prediction"
+
+
+def sampling_kind(ms, ms_mod):
+    """'eps' | 'v_prediction' for the plain discrete schedules this check has been measured on; None otherwise."""
+    if not isinstance(ms, ms_mod.ModelSamplingDiscrete) or isinstance(ms, ms_mod.ModelSamplingDiscreteEDM):
+        return None
+    names = {c.__name__ for c in type(ms).__mro__}
+    if isinstance(ms, (ms_mod.EDM, ms_mod.X0)) or "LCM" in names or "ModelSamplingDiscreteDistilled" in names:
+        return None
+    if isinstance(ms, ms_mod.V_PREDICTION):
+        return "v_prediction"
+    return "eps" if isinstance(ms, ms_mod.EPS) else None
+
+
+def raw_output(kind, x, sigma, denoised, sigma_data=1.0):
+    """The network output that ComfyUI turned into `denoised` (inverting calculate_denoised of EPS / V_PREDICTION)."""
+    s = sigma.reshape(sigma.shape[:1] + (1,) * (x.ndim - 1)).to(x.dtype)
+    if kind == "eps":
+        return (x - denoised) / s
+    d2 = sigma_data ** 2
+    return (x * d2 / (s ** 2 + d2) - denoised) * (s ** 2 + d2) ** 0.5 / (s * sigma_data)
+
+
+def first_call_cos(kind, x, sigma, denoised, sigma_data=1.0):
+    """cos(network output, network input) for one model call, as the probe of VPRED_PROTOCOL measures it."""
+    import torch.nn.functional as F
+
+    s = sigma.reshape(sigma.shape[:1] + (1,) * (x.ndim - 1)).to(x.dtype)
+    xin = x / (s ** 2 + sigma_data ** 2) ** 0.5
+    out = raw_output(kind, x, sigma, denoised, sigma_data)
+    return F.cosine_similarity(out.float().flatten(), xin.float().flatten(), dim=0).item()
+
+
+class _Mismatch(Exception):
+    def __init__(self, cos):
+        super().__init__(cos)
+        self.cos = cos
+
+
+def _switched(model, actual, ms_mod):
+    class ModelSamplingAdvanced(ms_mod.ModelSamplingDiscrete,
+                                ms_mod.V_PREDICTION if actual == "v_prediction" else ms_mod.EPS):
+        pass
+
+    patched = model.clone()
+    patched.add_object_patch("model_sampling", ModelSamplingAdvanced(model.model.model_config, zsnr=None))
+    return patched
+
+
+def _contradiction(model, declared, actual, cos, custom, ms_mod):
+    """What to do when the model does not behave as it was set up: the model to sample, or RoleError."""
+    target = type(model.model.model_config).__name__
+    probe = f"{cos:.2f}" if cos is not None else "measured on an earlier run"
+    seen = (f"the model behaves like {actual} (probe {probe}; eps models give about 1.00, v-prediction models "
+            f"about 0.00)")
+    if "model_sampling" in model.object_patches:
+        raise core.RoleError(f"This workflow sets the model's sampling to {declared} (ModelSamplingDiscrete or a "
+                             f"similar node), but {seen}. Sampled this way the image comes out as noise or black. "
+                             f"Set it to {actual}, or remove that node.")
+    why = "it found no 'v_pred' marker in the file" if declared == "eps" else "the file carries a 'v_pred' marker"
+    if custom or core.policy() == "refuse":
+        where = ("The sigmas for this sampler were already computed for that setting, so entail cannot switch it "
+                 "here. " if custom else "")
+        raise core.RoleError(f"ComfyUI set this {target} checkpoint up as {declared} because {why}, but {seen}. "
+                             f"{where}Add ModelSamplingDiscrete({actual}) right after the model loader.")
+    _shared.note({"engine": "comfyui", "where": "prediction type", "from": declared, "to": actual, "probe": cos},
+                 f"prediction type: ComfyUI set this {target} checkpoint up as {declared} because {why}, but {seen}; "
+                 f"sampling it as {actual}, as a ModelSamplingDiscrete({actual}) node would")
+    return _switched(model, actual, ms_mod)
+
+
+def _sample_checked(orig, model, args, kwargs, custom, ms_mod):
+    """Sample, watching the first model call. No extra forward pass: the first call already sees the noisiest
+    input, so its own output is the probe. A contradiction found there costs that one call and a restart."""
+    try:
+        ms = model.get_model_object("model_sampling")
+        declared = sampling_kind(ms, ms_mod)
+        applies = declared is not None and type(model.model.diffusion_model).__name__ == "UNetModel"
+    except Exception:  # noqa: BLE001
+        applies = False
+    if not applies:
+        return orig(model, *args, **kwargs)
+    base = model.model
+    known = _seen.get(id(base))
+    if known == declared:
+        return orig(model, *args, **kwargs)
+    if known is not None:  # measured on an earlier run of this model: no need to watch again
+        return orig(_contradiction(model, declared, known, None, custom, ms_mod), *args, **kwargs)
+
+    watched = model.clone()
+    before = watched.model_options.get("model_function_wrapper")
+    state = {"done": False}
+    sigma_data = float(getattr(ms, "sigma_data", 1.0))
+
+    def wrapper(apply_model, a):
+        out = before(apply_model, a) if before else apply_model(a["input"], a["timestep"], **a["c"])
+        if not state["done"]:
+            state["done"] = True
+            try:
+                t = float(ms.timestep(a["timestep"]).max())
+                cos = first_call_cos(declared, a["input"], a["timestep"], out, sigma_data) if t >= MIN_T else None
+            except Exception as e:  # noqa: BLE001 - never break sampling because the check could not run
+                print(f"[entail] could not check the prediction type ({type(e).__name__}: {e})", flush=True)
+                cos = None
+            if cos is not None:
+                _seen[id(base)] = behaves_like(cos)
+                if behaves_like(cos) != declared:
+                    raise _Mismatch(cos)
+                if os.environ.get("ENTAIL_VERBOSE"):
+                    print(f"[entail] {type(base.model_config).__name__} model behaves like {declared} as set up "
+                          f"(probe {cos:.2f})", flush=True)
+        return out
+
+    watched.set_model_unet_function_wrapper(wrapper)
+    try:
+        return orig(watched, *args, **kwargs)
+    except _Mismatch as m:
+        actual = "eps" if declared == "v_prediction" else "v_prediction"
+        return orig(_contradiction(model, declared, actual, m.cos, custom, ms_mod), *args, **kwargs)
+
+
+def install_sampling():
+    """Wrap comfy.sample.sample and sample_custom. Returns 1, or 0 if already installed."""
+    global _ORIG_SAMPLE, _ORIG_SAMPLE_CUSTOM
+    sample_mod = importlib.import_module("comfy.sample")
+    ms_mod = importlib.import_module("comfy.model_sampling")
+    if _ORIG_SAMPLE is not None:
+        return 0
+    _ORIG_SAMPLE, _ORIG_SAMPLE_CUSTOM = sample_mod.sample, sample_mod.sample_custom
+
+    def sample(model, *a, **kw):
+        if core.mode() in ("load", "debug"):
+            return _sample_checked(_ORIG_SAMPLE, model, a, kw, False, ms_mod)
+        return _ORIG_SAMPLE(model, *a, **kw)
+
+    def sample_custom(model, *a, **kw):
+        if core.mode() in ("load", "debug"):
+            return _sample_checked(_ORIG_SAMPLE_CUSTOM, model, a, kw, True, ms_mod)
+        return _ORIG_SAMPLE_CUSTOM(model, *a, **kw)
+
+    sample_mod.sample, sample_mod.sample_custom = sample, sample_custom
+    return 1
 
 
 def install():
@@ -158,7 +328,7 @@ def install_nodes():
 
 
 def uninstall():
-    global _ORIG_APPLY, _ORIG_NODE
+    global _ORIG_APPLY, _ORIG_NODE, _ORIG_SAMPLE, _ORIG_SAMPLE_CUSTOM
     import sys
 
     n = 0
@@ -170,5 +340,10 @@ def uninstall():
     if _ORIG_NODE is not None and loader is not None:
         loader.load_lora = _ORIG_NODE
         _ORIG_NODE = None
+        n += 1
+    if _ORIG_SAMPLE is not None:
+        mod = sys.modules["comfy.sample"]
+        mod.sample, mod.sample_custom = _ORIG_SAMPLE, _ORIG_SAMPLE_CUSTOM
+        _ORIG_SAMPLE = _ORIG_SAMPLE_CUSTOM = None
         n += 1
     return n

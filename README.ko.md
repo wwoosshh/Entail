@@ -89,6 +89,7 @@ vLLM과 SGLang은 모델을 자기가 새로 띄운 프로세스에서 돌린다
 | 설정이 만들어진 뒤 transformers 4 이름으로 준 RoPE 값(`rope_theta`, `rope_scaling`). `from_pretrained` 인자, 속성, vLLM `--hf-overrides`, SGLang `--json-model-override-args` 모두 해당한다 | `config.json`이 넣었을 자리에 쓴다. 층 종류마다 다른 RoPE도 설정 클래스에게 물어 같은 자리에 쓴다 | 모델 4종 × 경로 2 × 값 3에서 `config.json` 경로와 같음. GSM8K가 원래로 돌아옴(위 표) |
 | 모델이 선언한 성질을 버리는 어텐션 백엔드. 예: transformers `sdpa`와 SGLang `flashinfer`가 Gemma 2의 logit soft-capping을 버림 | 지킨다고 측정된 백엔드(`eager`, `triton`)로 바꾼다 | 기준 실행과 토큰이 같음. 비용은 transformers 1.18배, SGLang 1.13배이고, 이는 바뀐 백엔드 자체의 값이다 |
 | **ComfyUI:** 붙인 모델에 닿지 못하는 LoRA(예: SDXL 워크플로에 Anima LoRA). ComfyUI는 모듈마다 콘솔에 한 줄을 남기고 건너뛰며, 실행은 "성공"으로 끝나지만 LoRA는 아무것도 하지 않는다 | 바꿀 방법이 없으므로 샘플링 전에 멈추고 이유를 보여 준다. 이유에는 LoRA가 선언한 학습 기반과 실제로 만난 모델이 들어간다. 일부만 닿으면 알리고 계속한다 | 실제 ComfyUI 0.34.1에서 잘못된 조합은 그림을 평균 0.8/255만 바꿨다(맞는 LoRA는 35.2). 그 뒤에서 콘솔 경고가 840줄 나왔다. entail을 켜면 잘못된 조합이 두 방향 모두 멈췄다. 맞는 조합 22개(SDXL LoRA 21개, 텍스트 인코더 포함, Anima 1개)는 오탐 없이 통과했다. entail을 켜고 끈 그림은 같았다 |
+| **ComfyUI:** 병합이나 변환 과정에서 `v_pred` 표지를 잃은 v-prediction 체크포인트. ComfyUI는 이를 eps로 돌리고, 실행은 "성공"이지만 그림은 색 잡음이나 검은 화면이 된다 | 샘플링의 첫 모델 호출로 모델이 실제로 어떻게 동작하는지 판정한다. eps 모델은 받은 잡음을 되돌려 주고 v 모델은 그러지 않는다. 계산을 추가로 돌리지 않는다. 판정에 맞게 샘플링 방식을 바꾸며, ModelSamplingDiscrete 노드가 하는 것과 같다. 워크플로에 넣은 샘플링 노드가 모델과 어긋나면 해소하지 않고 멈춘다 | 표지를 뺀 NoobAI-XL-Vpred에서, entail이 없을 때는 정상 그림과의 차이가 67~102/255였고 entail을 켜면 12~20이었다. 남은 차이는 ztsnr 설정 때문인데, 이것은 동작으로 알 수 없다. eps 체크포인트는 0.9997~0.9999, v 체크포인트는 0.01로 나뉘었다. 서버를 켠 뒤 첫 그림까지 포함해 entail을 켜고 끈 그림은 같았다 |
 
 **검사하는 것** (해소할 수 없으면 멈춘다)
 

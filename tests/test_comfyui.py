@@ -62,6 +62,92 @@ def test_partial_is_said_not_stopped():
     assert kind == "partial" and "1 of 3 model modules" in msg
 
 
+def _fake_sampling_module():
+    """The class layout of comfy/model_sampling.py, without ComfyUI."""
+    from types import SimpleNamespace
+
+    class ModelSamplingDiscrete:
+        pass
+
+    class ModelSamplingDiscreteEDM(ModelSamplingDiscrete):
+        pass
+
+    class EPS:
+        pass
+
+    class V_PREDICTION(EPS):
+        pass
+
+    class EDM(V_PREDICTION):
+        pass
+
+    class X0(EPS):
+        pass
+
+    return SimpleNamespace(ModelSamplingDiscrete=ModelSamplingDiscrete, ModelSamplingDiscreteEDM=ModelSamplingDiscreteEDM,
+                           EPS=EPS, V_PREDICTION=V_PREDICTION, EDM=EDM, X0=X0)
+
+
+def test_probe_boundary_follows_the_measurements():
+    from entail.adapters.comfyui import behaves_like
+
+    for cos in (0.9997, 0.9998, 0.9999):  # eps checkpoints, t=999
+        assert behaves_like(cos) == "eps"
+    for cos in (0.0388, 0.0094, -0.0131):  # NoobAI-XL-Vpred, t=999
+        assert behaves_like(cos) == "v_prediction"
+
+
+def test_sampling_kind_only_covers_what_was_measured():
+    from entail.adapters.comfyui import sampling_kind
+
+    m = _fake_sampling_module()
+
+    def make(*bases):
+        return type("S", bases, {})()
+    assert sampling_kind(make(m.ModelSamplingDiscrete, m.EPS), m) == "eps"
+    assert sampling_kind(make(m.ModelSamplingDiscrete, m.V_PREDICTION), m) == "v_prediction"
+    assert sampling_kind(make(m.ModelSamplingDiscreteEDM, m.EDM), m) is None  # EDM schedules: not measured
+    assert sampling_kind(make(m.ModelSamplingDiscrete, m.X0), m) is None
+    LCM = type("LCM", (m.EPS,), {})
+    assert sampling_kind(make(m.ModelSamplingDiscrete, LCM), m) is None  # distilled
+    assert sampling_kind(make(m.EPS), m) is None  # not a discrete schedule (flow models and the like)
+
+
+def test_raw_output_inverts_comfyui_formulas():
+    """calculate_denoised of EPS and V_PREDICTION (comfy/model_sampling.py), undone."""
+    import torch
+
+    from entail.adapters.comfyui import raw_output
+
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(2, 4, 8, 8, generator=g) * 5
+    f = torch.randn(2, 4, 8, 8, generator=g)
+    sigma = torch.tensor([14.6, 3.0])
+    s = sigma.reshape(2, 1, 1, 1)
+    eps_denoised = x - f * s
+    v_denoised = x / (s ** 2 + 1) - f * s / (s ** 2 + 1) ** 0.5
+    assert torch.allclose(raw_output("eps", x, sigma, eps_denoised), f, atol=1e-5)
+    assert torch.allclose(raw_output("v_prediction", x, sigma, v_denoised), f, atol=1e-5)
+
+
+def test_first_call_tells_the_two_apart():
+    """At the noisiest step an eps model returns the noise; a v model's output is unrelated to it."""
+    import torch
+
+    from entail.adapters.comfyui import behaves_like, first_call_cos
+
+    g = torch.Generator().manual_seed(1)
+    eps = torch.randn(2, 4, 64, 64, generator=g)
+    sigma = torch.tensor([14.6, 14.6])
+    x = eps * 14.6  # the first input of a txt2img: pure noise at sigma_max
+    s = sigma.reshape(2, 1, 1, 1)
+    as_eps = x - eps * s                     # an eps model: predicts the noise
+    v_out = -torch.randn(2, 4, 64, 64, generator=g)  # a v model near t=999: ~ -x0, independent of the noise
+    as_v_read_as_eps = x - v_out * s         # what ComfyUI computes when it treats that model as eps
+    assert behaves_like(first_call_cos("eps", x, sigma, as_eps)) == "eps"
+    assert behaves_like(first_call_cos("eps", x, sigma, as_v_read_as_eps)) == "v_prediction"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
