@@ -1,25 +1,88 @@
-"""Role vocabulary v0 (RESEARCH_PLAN.md section 2.2, entail/DESIGN.md section 1.1).
+"""Fact vocabulary v1 and the fact envelope (LIBRARY_DESIGN.md 4.1 and 6; ROADMAP M1.1).
 
-Facts are small frozen dataclasses. A consumer states what it accepts either as one fact (must be equal),
-a tuple of facts (closed set: must be one of them) or a predicate (callable returning bool).
+A fact class is a small frozen dataclass. Every field that names a kind of thing takes its value from a closed set,
+and a value outside the set is an error (principle 1): a new kind of layout, prediction or rope type is added here,
+with a vocabulary version bump, never passed through silently. Numeric fields are checked for type and range.
+
+The classes keep the names and fields they had in v0, so existing code keeps working; what v1 adds is the checks,
+six new classes (Rotary, LatentScale, Template, Epoch, Assumed, Origin), and the envelope `Fact`, which says where a
+fact came from and how sure the library is of it.
+
+A consumer states what it accepts either as one fact (must be equal), a tuple of facts (closed set: must be one of
+them) or a predicate (callable returning bool); see core.boundary.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+from enum import Enum
 from typing import Optional, Tuple
 
+VOCAB_VERSION = 1
+
+
+def _closed(cls_name, field, value, allowed, optional=True):
+    if value is None and optional:
+        return
+    if value not in allowed:
+        raise ValueError(f"{cls_name}.{field}: unknown value {value!r}; closed set is {sorted(allowed)}")
+
+
+def _number(cls_name, field, value, minimum, integer=False, strict=False):
+    """None, or an int (or float unless `integer`) >= minimum (> minimum when `strict`). Booleans are not numbers."""
+    if value is None:
+        return
+    kinds = (int,) if integer else (int, float)
+    if isinstance(value, bool) or not isinstance(value, kinds):
+        raise ValueError(f"{cls_name}.{field}: expected {'an int' if integer else 'a number'}, got {value!r}")
+    if value < minimum or (strict and value == minimum):
+        raise ValueError(f"{cls_name}.{field}: expected {'>' if strict else '>='} {minimum}, got {value!r}")
+
+
+# --- LAYOUT ---------------------------------------------------------------------------------------------------
+
 LAYOUT_KINDS = frozenset({"dense", "strided", "q8_0", "fp8_block", "int4_packed"})
+LAYOUT_PACKINGS = frozenset({"interleaved", "split"})
+SCALE_FORMATS = frozenset({"fp32", "bf16", "fp16", "ue8m0", "e4m3"})
+DTYPES = frozenset({"float32", "float16", "bfloat16", "float8_e4m3fn", "float8_e5m2", "int8", "uint8", "int4",
+                    "uint4"})
 
 
 @dataclass(frozen=True)
 class Layout:
+    """How a value is stored: its kind, packing and scale format."""
     kind: str
     dtype: Optional[str] = None
     block: Optional[Tuple[int, ...]] = None
-    packing: Optional[str] = None       # e.g. "interleaved" | "split" for q8_0
-    scale_format: Optional[str] = None  # e.g. "fp32" | "ue8m0"
+    packing: Optional[str] = None       # "interleaved" | "split" (q8_0)
+    scale_format: Optional[str] = None  # "fp32" | "ue8m0" | ...
 
     def __post_init__(self):
         if self.kind not in LAYOUT_KINDS:
             raise ValueError(f"unknown layout kind {self.kind!r}; closed set is {sorted(LAYOUT_KINDS)}")
+        _closed("Layout", "dtype", self.dtype, DTYPES)
+        _closed("Layout", "packing", self.packing, LAYOUT_PACKINGS)
+        _closed("Layout", "scale_format", self.scale_format, SCALE_FORMATS)
+        if self.block is not None and not (isinstance(self.block, tuple) and self.block
+                                           and all(isinstance(b, int) and not isinstance(b, bool) and b > 0
+                                                   for b in self.block)):
+            raise ValueError(f"Layout.block: expected a tuple of positive ints, got {self.block!r}")
+
+
+# --- DTYPE ----------------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Quantized:
+    """The dtype a value is stored in, and the per-tensor scale that turns it back (None when not quantized)."""
+    dtype: str
+    scale: Optional[float] = None
+
+    def __post_init__(self):
+        _closed("Quantized", "dtype", self.dtype, DTYPES, optional=False)
+        _number("Quantized", "scale", self.scale, 0, strict=True)
+
+
+# --- FRAME ----------------------------------------------------------------------------------------------------
+
+POSITION_FRAMES = frozenset({"absolute", "chunk_relative"})
+ROPE_TYPES = frozenset({"default", "linear", "dynamic", "yarn", "longrope", "llama3"})
 
 
 @dataclass(frozen=True)
@@ -27,37 +90,52 @@ class Positions:
     frame: str                    # "absolute" | "chunk_relative"
     offset: Optional[int] = None  # start of the chunk, for chunk_relative
 
+    def __post_init__(self):
+        _closed("Positions", "frame", self.frame, POSITION_FRAMES, optional=False)
+        _number("Positions", "offset", self.offset, 0, integer=True)
+
+
+@dataclass(frozen=True)
+class Rotary:
+    """The rotary position embedding a model was trained with: its type, base and scaling."""
+    rope_type: str = "default"
+    theta: Optional[float] = None
+    factor: Optional[float] = None
+    original_max_position: Optional[int] = None
+
+    def __post_init__(self):
+        _closed("Rotary", "rope_type", self.rope_type, ROPE_TYPES, optional=False)
+        _number("Rotary", "theta", self.theta, 0, strict=True)
+        _number("Rotary", "factor", self.factor, 0, strict=True)
+        _number("Rotary", "original_max_position", self.original_max_position, 0, integer=True, strict=True)
+
+
+# --- RANGE (KvExtent lives in kv_contract.py) -------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Valid:
     length: Optional[int] = None
     window: Optional[int] = None
 
-
-@dataclass(frozen=True)
-class Reduction:
-    state: str                  # spmd_types notation: "R", "P", "S", "I", "V"
-    dim: Optional[int] = None   # for "S"
-    group: Optional[str] = None
+    def __post_init__(self):
+        _number("Valid", "length", self.length, 0, integer=True)
+        _number("Valid", "window", self.window, 0, integer=True, strict=True)
 
 
-@dataclass(frozen=True)
-class Quantized:
-    dtype: str                    # e.g. "float8_e4m3fn"
-    scale: Optional[float] = None  # per-tensor scale; None when the value is not quantized
-
+# --- PROPERTY -------------------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class ModelProps:
+    """Properties a model requires of whatever runs it."""
     softcap: Optional[float] = None
     sliding_window: Optional[int] = None
     tie_word_embeddings: Optional[bool] = None
 
-
-@dataclass(frozen=True)
-class KernelCaps:
-    softcap: bool = False
-    sliding_window: bool = False
+    def __post_init__(self):
+        _number("ModelProps", "softcap", self.softcap, 0, strict=True)
+        _number("ModelProps", "sliding_window", self.sliding_window, 0, integer=True)
+        if self.tie_word_embeddings is not None and not isinstance(self.tie_word_embeddings, bool):
+            raise ValueError(f"ModelProps.tie_word_embeddings: expected a bool, got {self.tie_word_embeddings!r}")
 
 
 PREDICTION_KINDS = frozenset({"eps", "v", "x0", "flow", "edm"})
@@ -65,7 +143,7 @@ PREDICTION_KINDS = frozenset({"eps", "v", "x0", "flow", "edm"})
 
 @dataclass(frozen=True)
 class Prediction:
-    """What a diffusion model's network predicts (PROPERTY), and whether its schedule reaches zero terminal SNR.
+    """What a diffusion model's network predicts, and whether its schedule reaches zero terminal SNR.
 
     `kind` is a closed set. `zsnr` None means the source does not say; comparisons then use the kind alone."""
     kind: str
@@ -74,6 +152,8 @@ class Prediction:
     def __post_init__(self):
         if self.kind not in PREDICTION_KINDS:
             raise ValueError(f"unknown prediction kind {self.kind!r}; closed set is {sorted(PREDICTION_KINDS)}")
+        if self.zsnr is not None and not isinstance(self.zsnr, bool):
+            raise ValueError(f"Prediction.zsnr: expected a bool, got {self.zsnr!r}")
 
     def __str__(self):
         name = {"eps": "eps", "v": "v-prediction", "x0": "x0", "flow": "flow", "edm": "EDM"}[self.kind]
@@ -81,8 +161,111 @@ class Prediction:
 
 
 @dataclass(frozen=True)
+class LatentScale:
+    """How a VAE's latents are scaled (and shifted) between the encoder, the sampler and the decoder."""
+    scale: float
+    shift: Optional[float] = None
+
+    def __post_init__(self):
+        if self.scale is None:
+            raise ValueError("LatentScale.scale: required")
+        _number("LatentScale", "scale", self.scale, 0, strict=True)
+        if self.shift is not None and (isinstance(self.shift, bool) or not isinstance(self.shift, (int, float))):
+            raise ValueError(f"LatentScale.shift: expected a number, got {self.shift!r}")
+
+
+REASONING_HISTORY = frozenset({"keep", "drop"})
+
+
+@dataclass(frozen=True)
+class Template:
+    """What a request must look like for this model: its chat template, and whether earlier reasoning is sent back.
+
+    v1 is deliberately small; the tool-call format is added in M5.3 with names checked against the engines."""
+    chat_template_sha256: Optional[str] = None
+    reasoning_history: Optional[str] = None
+
+    def __post_init__(self):
+        h = self.chat_template_sha256
+        if h is not None and not (isinstance(h, str) and len(h) == 64 and all(c in "0123456789abcdef" for c in h)):
+            raise ValueError(f"Template.chat_template_sha256: expected 64 lowercase hex digits, got {h!r}")
+        _closed("Template", "reasoning_history", self.reasoning_history, REASONING_HISTORY)
+
+
+# --- REDUCTION ------------------------------------------------------------------------------------------------
+
+REDUCTION_STATES = frozenset({"R", "P", "S", "I", "V"})
+
+
+@dataclass(frozen=True)
+class Reduction:
+    state: str                  # spmd_types notation: "R", "P", "S", "I", "V"
+    dim: Optional[int] = None   # for "S"
+    group: Optional[str] = None
+
+    def __post_init__(self):
+        _closed("Reduction", "state", self.state, REDUCTION_STATES, optional=False)
+        _number("Reduction", "dim", self.dim, 0, integer=True)
+        if self.state == "S" and self.dim is None:
+            raise ValueError("Reduction.dim: a sharded value ('S') must say which dim it is sharded on")
+
+
+# --- TIME, SPECIALIZATION, PRECEDENCE -------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Epoch:
+    """Which version of a buffer's contents a value was made from (bumped whenever the buffer is rewritten)."""
+    version: int
+    owner: Optional[str] = None
+
+    def __post_init__(self):
+        _number("Epoch", "version", self.version, 0, integer=True)
+        if self.version is None:
+            raise ValueError("Epoch.version: required")
+
+
+@dataclass(frozen=True)
+class Assumed:
+    """The conditions a compiled artifact was specialised for, as sorted (name, value) pairs."""
+    conditions: Tuple[Tuple[str, object], ...]
+
+    def __post_init__(self):
+        ok = isinstance(self.conditions, tuple) and all(
+            isinstance(c, tuple) and len(c) == 2 and isinstance(c[0], str) for c in self.conditions)
+        if not ok:
+            raise ValueError(f"Assumed.conditions: expected a tuple of (name, value) pairs, got {self.conditions!r}")
+        if list(self.conditions) != sorted(self.conditions, key=lambda c: c[0]):
+            raise ValueError("Assumed.conditions: pairs must be sorted by name, so equal assumptions compare equal")
+
+
+ORIGINS = frozenset({"default", "checkpoint", "config", "manifest", "user"})
+
+
+@dataclass(frozen=True)
+class Origin:
+    """Where the value a consumer uses for one setting came from."""
+    setting: str
+    came_from: str
+
+    def __post_init__(self):
+        if not isinstance(self.setting, str) or not self.setting:
+            raise ValueError(f"Origin.setting: expected a setting name, got {self.setting!r}")
+        _closed("Origin", "came_from", self.came_from, ORIGINS, optional=False)
+
+
+# --- not in the vocabulary ------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class KernelCaps:
+    """What a kernel honours. A capability, not a fact about a value; moves to caps.py in M3.1."""
+    softcap: bool = False
+    sliding_window: bool = False
+
+
+@dataclass(frozen=True)
 class Base:
-    """The model family an artifact was made for: a checkpoint's architecture, the base a LoRA was trained on."""
+    """The model family an artifact was made for. Used by the ComfyUI adapter; not in vocabulary v1 yet, because the
+    family names are not a closed set (decided with the sources in M2 and the image work in M6)."""
     family: str
 
     def __str__(self):
@@ -101,12 +284,7 @@ class Invalidated:
     why: str    # the operation that did it, e.g. "aten.transpose"
 
 
-# --- The fact envelope (LIBRARY_DESIGN.md 4.1). Shape declared in M0.3; the vocabulary v1 classes that are not
-# here yet (Rotary, LatentScale, Epoch, Assumed, Origin, Template) and the closed-set checks come in M1.1. ---
-
-from enum import Enum  # noqa: E402
-
-VOCAB_VERSION = 1
+# --- the vocabulary and the envelope --------------------------------------------------------------------------
 
 # The ten fact kinds (RESEARCH_PLAN.md 2.2), and which kind each vocabulary name belongs to (LIBRARY_DESIGN.md 6).
 FACT_KINDS = frozenset({"LAYOUT", "DTYPE", "FRAME", "RANGE", "PROPERTY", "MAPPING", "REDUCTION", "TIME",
@@ -117,35 +295,59 @@ VOCABULARY = {
     "Template": "PROPERTY", "Coverage": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME",
     "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE",
 }
+_HERE = {"Layout": Layout, "Quantized": Quantized, "Rotary": Rotary, "Positions": Positions, "Valid": Valid,
+         "ModelProps": ModelProps, "Prediction": Prediction, "LatentScale": LatentScale, "Template": Template,
+         "Reduction": Reduction, "Epoch": Epoch, "Assumed": Assumed, "Origin": Origin}
+
+
+def vocabulary_class(name):
+    """The class for a vocabulary name. KvExtent and Coverage live next to their rules and are imported on demand."""
+    if name in _HERE:
+        return _HERE[name]
+    if name == "KvExtent":
+        from .kv_contract import KvExtent
+        return KvExtent
+    if name == "Coverage":
+        from .coverage import Coverage
+        return Coverage
+    raise ValueError(f"unknown fact name {name!r}; vocabulary v{VOCAB_VERSION} has {sorted(VOCABULARY)}")
 
 
 class Certainty(str, Enum):
     """How sure the library is of a fact (LIBRARY_DESIGN.md principle 3)."""
     DECLARED = "declared"    # an artifact, a pinned manifest, a code boundary or the user states it
-    VERIFIED = "verified"    # declared, and checked against the data (bytes, strides, dtypes, keys)
+    VERIFIED = "verified"    # declared or read from the data, and checked against the data (bytes, strides, keys)
     INFERRED = "inferred"    # derived without a declaration (a probe, a key pattern); never the only basis for a change
     DEFAULTED = "defaulted"  # a default filled it in; recorded so it is never silent
     UNKNOWN = "unknown"      # nobody says; reported, and for meaning-changing facts not replaced by a default
 
 
+# "engine": what an engine chose, read by an adapter. "data": what the data itself shows (bytes, strides, keys).
+SOURCE_KINDS = frozenset({"user", "manifest", "boundary", "file", "config", "probe", "default", "engine", "data"})
+
+
 @dataclass(frozen=True)
 class Source:
-    """Where a fact came from.
-
-    kind   "file" (model file metadata), "config" (config files), "manifest", "boundary" (a code signature),
-           "user", "probe" or "default"
-    where  a precise address, e.g. "model.safetensors#__metadata__.modelspec.prediction_type"
-    """
+    """Where a fact came from: a kind from SOURCE_KINDS and a precise address, e.g.
+    Source("file", "model.safetensors#__metadata__.modelspec.prediction_type")."""
     kind: str
     where: str
+
+    def __post_init__(self):
+        _closed("Source", "kind", self.kind, SOURCE_KINDS, optional=False)
+        if not isinstance(self.where, str) or not self.where:
+            raise ValueError(f"Source.where: expected an address, got {self.where!r}")
+
+    def __str__(self):
+        return f"{self.kind}: {self.where}"
 
 
 @dataclass(frozen=True)
 class Fact:
     """One fact about a value: which vocabulary name, its value, where it came from, and how sure it is.
 
-    `value` is an instance of the vocabulary class called `name` (e.g. Prediction("v")), or None when the fact is
-    unknown. The kind (LAYOUT, PROPERTY ...) is VOCABULARY[name].
+    `value` is an instance of the vocabulary class called `name` (e.g. Prediction("v")), or None exactly when the
+    certainty is UNKNOWN. The kind (LAYOUT, PROPERTY ...) is VOCABULARY[name].
     """
     name: str
     value: Optional[object]
@@ -153,6 +355,28 @@ class Fact:
     certainty: Certainty
     vocab_version: int = VOCAB_VERSION
 
+    def __post_init__(self):
+        if self.name not in VOCABULARY:
+            raise ValueError(f"unknown fact name {self.name!r}; vocabulary v{VOCAB_VERSION} has {sorted(VOCABULARY)}")
+        if self.vocab_version != VOCAB_VERSION:
+            raise ValueError(f"fact {self.name} was written with vocabulary v{self.vocab_version}; "
+                             f"this library reads v{VOCAB_VERSION}")
+        if not isinstance(self.certainty, Certainty):
+            raise ValueError(f"Fact.certainty: expected a Certainty, got {self.certainty!r}")
+        if not isinstance(self.source, Source):
+            raise ValueError(f"Fact.source: expected a Source, got {self.source!r}")
+        if (self.value is None) != (self.certainty is Certainty.UNKNOWN):
+            raise ValueError(f"fact {self.name}: a fact has no value exactly when its certainty is unknown "
+                             f"(value {self.value!r}, certainty {self.certainty.value})")
+        cls = vocabulary_class(self.name)
+        if self.value is not None and not isinstance(self.value, cls):
+            raise ValueError(f"fact {self.name}: holds a {type(self.value).__name__}, expected {cls.__name__}")
+
     @property
     def kind(self):
         return VOCABULARY[self.name]
+
+
+def unconstrained_fields(value):
+    """Fields of a fact value that are None, i.e. that the value does not say anything about."""
+    return {f.name for f in fields(value) if getattr(value, f.name) is None}

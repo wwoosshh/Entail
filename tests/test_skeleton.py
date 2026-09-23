@@ -10,17 +10,14 @@ import entail  # noqa: E402
 from entail import boundaries, caps, contracts, core, facts, manifest, policies, record, sites, sources, testing  # noqa: E402
 from entail.adapters import base  # noqa: E402
 
-PLANNED = [
+PLANNED = [   # contracts.decide, policies.from_env, sources.pick/merge and the ledger were built in M1
     (sources.read_all, ("x",), "M2.1"),
-    (sources.merge, ([],), "M2.2"),
     (manifest.load, ("x",), "M2.3"),
     (manifest.find, ("x", []), "M2.3"),
     (manifest.infer, ("x",), "M2.3"),
     (caps.load_table, ("x",), "M3.1"),
     (caps.lookup, ([], "c", "f"), "M3.1"),
     (caps.probe, ("e", "c", "f"), "M3.1"),
-    (contracts.decide, (None, {}, {}, None, None), "M1.2"),
-    (policies.from_env, (), "M1.2"),
     (sites.check_static, ("m", "e", {}), "M3.4"),
     (sites.at_load, ("m", "e", {}, None), "M3.2"),
     (sites.at_container, (None, "w", None), "M5.1"),
@@ -46,15 +43,12 @@ def test_planned_functions_name_their_milestone():
             assert str(e).startswith(milestone), (fn.__name__, str(e))
 
 
-def test_ledger_methods_are_planned():
-    ledger = record.Ledger()
-    for call, milestone in ((lambda: ledger.add(None), "M1.2"), (ledger.lines, "M1.2"), (ledger.to_json, "M1.2"),
-                            (ledger.locate, "M7.1")):
-        try:
-            call()
-            raise AssertionError("should not run yet")
-        except NotImplementedError as e:
-            assert str(e).startswith(milestone), str(e)
+def test_locating_is_planned():
+    try:
+        record.Ledger().locate()
+        raise AssertionError("should not run yet")
+    except NotImplementedError as e:
+        assert str(e).startswith("M7.1"), str(e)
 
 
 def test_boundaries_is_the_same_objects():
@@ -74,7 +68,7 @@ def test_verdicts_and_policy_defaults():
     p = policies.Policy()
     assert (p.mode, p.on_mismatch, p.on_unknown_meaning_changing, p.on_unknown_other) == \
         ("off", "resolve", "require", "report")
-    assert sources.DEFAULT_PRECEDENCE[:3] == ("user", "manifest", "file")
+    assert sources.DEFAULT_PRECEDENCE == ("user", "manifest", "boundary", "file", "config", "probe", "default")
     assert set(sites.SITES) == {"load", "container", "request", "debug"} and set(sites.BUDGET) == set(sites.SITES)
 
 

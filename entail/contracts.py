@@ -1,21 +1,32 @@
-"""contracts: compare what was declared with what a consumer chose, and decide (LIBRARY_DESIGN.md 4.5, 7). Built in M1.2.
+"""contracts: compare what was declared with what a consumer uses, and decide (LIBRARY_DESIGN.md 4.5, 7; ROADMAP M1.2).
 
-The verdicts (LIBRARY_DESIGN.md 7):
-  declared, consumer agrees                         -> PASS
-  declared, consumer differs, a resolution exists   -> RESOLVED (route to a consumer that honours it, convert, or
-                                                       recompute; one line in the ledger)
-  declared, consumer differs, no resolution         -> REFUSED, before any output is produced
-  declared, consumer not in the capability table    -> UNKNOWN (consumer)
-  not declared                                      -> UNKNOWN (declaration): `require` for meaning-changing facts,
-                                                       `report` for the rest (policy)
-The rules live here and only here. Adapters supply the consumer's choice and the handles that carry out a
-resolution; they never decide (principle 8). The earlier one-fact `contract.py` (reconcile) is folded in here in M1.2.
+For every vocabulary name a contract needs, `decide` looks at up to three facts:
+  declared  what the sources say (several candidates are allowed; the precedence picks one, a disagreement is kept)
+  chosen    what the consumer will actually use, read by an adapter (the source "user" marks an explicit user choice)
+  observed  what the data itself shows (bytes, strides, keys), when a check looked
+
+and gives one Decision with a verdict, in this order:
+  1. the sources disagree and the policy says stop                     -> REFUSED
+  2. the data contradicts a declaration                                -> REFUSED, or the data's value is used (policy)
+  3. nothing declares it (unknown, or only inferred or defaulted)      -> UNKNOWN; blocking for meaning-changing facts
+                                                                          under `require`/`stop`, a report otherwise
+  4. what the consumer uses is unknown                                 -> UNKNOWN; blocking only in debug mode
+  5. the consumer uses the declared value                              -> PASS
+  6. it differs, and it was the user's explicit choice                 -> REFUSED (never overridden silently)
+  7. it differs, the policy refuses mismatches                         -> REFUSED
+  8. it differs, a registered resolution applies                       -> RESOLVED (the adapter's handle carries it out)
+  9. it differs, nothing can repair it                                 -> REFUSED
+
+An inferred fact is never the basis for a change (principle 5): with nothing declared the verdict is UNKNOWN even
+when a probe has an opinion. The rules live here only; adapters supply `chosen` and the handles (principle 8).
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from enum import Enum
-from typing import Dict, List, Optional, Protocol, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
-from .facts import Fact
+from . import sources as _sources
+from .facts import VOCABULARY, Certainty, Fact
+from .policies import Policy
 
 
 class Verdict(str, Enum):
@@ -25,46 +36,172 @@ class Verdict(str, Enum):
     UNKNOWN = "unknown"
 
 
+# Fixed wording: the ledger prints it and the tests match it.
+RULES = {
+    "match": "the consumer uses the declared value",
+    "resolved": "the consumer differs from the declaration; a registered resolution repairs it",
+    "no_resolution": "the consumer differs from the declaration and no resolution is registered",
+    "policy_refuses": "the consumer differs from the declaration and the policy refuses mismatches",
+    "user_choice": "the user's explicit choice contradicts the declaration; it is not overridden",
+    "consumer_unknown": "what the consumer uses is unknown (not read, or not in the capability table)",
+    "undeclared": "nothing declares it",
+    "inferred_only": "only inferred, never declared",
+    "defaulted_only": "only a default, never declared",
+    "sources_disagree": "the sources disagree",
+    "false_declaration": "the declaration contradicts the data",
+    "data_used": "the declaration contradicts the data; the data's value is used",
+}
+
+
 @dataclass(frozen=True)
 class Contract:
     """What one boundary needs.
 
     boundary          where, e.g. "load:sglang.attention_backend" or "container:vllm.allocate_slots"
-    needs             vocabulary names the consumer at this boundary must honour
+    consumer          who uses the facts there, e.g. "sglang.attention.flashinfer" or "comfyui.sampler"
+    needs             vocabulary names the consumer must honour
     meaning_changing  the subset whose absence may not be filled by a default (policy `require`)
     """
     boundary: str
+    consumer: str
     needs: Tuple[str, ...]
     meaning_changing: Tuple[str, ...] = ()
+
+    def __post_init__(self):
+        for label, text in (("boundary", self.boundary), ("consumer", self.consumer)):
+            if not isinstance(text, str) or not text:
+                raise ValueError(f"Contract.{label}: expected a name, got {text!r}")
+        if not isinstance(self.needs, tuple) or not self.needs:
+            raise ValueError(f"Contract.needs: expected a non-empty tuple of vocabulary names, got {self.needs!r}")
+        for name in self.needs + tuple(self.meaning_changing):
+            if name not in VOCABULARY:
+                raise ValueError(f"Contract: unknown fact name {name!r}; vocabulary has {sorted(VOCABULARY)}")
+        extra = set(self.meaning_changing) - set(self.needs)
+        if extra:
+            raise ValueError(f"Contract.meaning_changing: {sorted(extra)} are not in needs")
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """One way to repair a mismatch for one vocabulary name. `handle` names the adapter operation that carries it
+    out; `when` limits it to the mismatches it can repair (None: any)."""
+    name: str
+    handle: str
+    when: Optional[Callable[[Fact, Fact], bool]] = None
+
+    def applies(self, declared: Fact, chosen: Fact) -> bool:
+        return True if self.when is None else bool(self.when(declared, chosen))
+
+    def describe(self, declared: Fact, chosen: Fact) -> str:
+        return f"{self.name} ({_value(chosen)} -> {_value(declared)})"
+
+
+RESOLUTIONS: Dict[str, List[Resolution]] = {}
+
+
+def register(name: str, resolution: Resolution) -> None:
+    if name not in VOCABULARY:
+        raise ValueError(f"register: unknown fact name {name!r}; vocabulary has {sorted(VOCABULARY)}")
+    RESOLUTIONS.setdefault(name, []).append(resolution)
 
 
 @dataclass(frozen=True)
 class Decision:
-    """One verdict, with everything the ledger needs to explain it: the blame requirement of LIBRARY_DESIGN.md 7."""
+    """One verdict, with what the ledger needs to explain it: which fact, the declared value and where it came from,
+    the consumer and its choice, the rule, the verdict, and what was changed (LIBRARY_DESIGN.md 7)."""
     contract: Contract
     name: str
-    declared: Optional[Fact]
-    chosen: Optional[Fact]
     verdict: Verdict
     rule: str
-    resolution: Optional[str] = None   # what was changed, when RESOLVED
+    declared: Optional[Fact] = None
+    chosen: Optional[Fact] = None
+    observed: Optional[Fact] = None
+    resolution: Optional[str] = None
+    handle: Optional[str] = None
+    blocking: bool = False
+    conflict: Tuple[Fact, ...] = ()
 
 
-class Resolution(Protocol):
-    """One way to repair a mismatch for one vocabulary name. The adapter's handle carries it out."""
-    name: str
-    handle: str   # the adapter handle that performs it
-
-    def applies(self, declared: Fact, chosen: Fact) -> bool:
-        ...
-
-    def describe(self, declared: Fact, chosen: Fact) -> str:
-        ...
+def agrees(declared_value, chosen_value) -> bool:
+    """The chosen value honours the declared one: same class, and every field the declaration fills is equal.
+    A field the declaration leaves open (None) is not compared."""
+    if type(declared_value) is not type(chosen_value):
+        return False
+    return all(getattr(chosen_value, f.name) == getattr(declared_value, f.name)
+               for f in fields(declared_value) if getattr(declared_value, f.name) is not None)
 
 
-RESOLUTIONS: Dict[str, List[Resolution]] = {}   # vocabulary name -> resolutions; filled in M1.2 and later milestones
+def _value(fact):
+    return "unknown" if fact is None or fact.value is None else str(fact.value)
 
 
-def decide(contract: Contract, declared: Dict[str, Fact], chosen: Dict[str, Fact], caps, policy) -> List[Decision]:
-    """Apply the verdict table to every name the contract needs."""
-    raise NotImplementedError("M1.2: the verdict table, resolutions registry and policy")
+def _check(fact, name, role):
+    if fact is not None and (not isinstance(fact, Fact) or fact.name != name):
+        raise ValueError(f"decide: {role} for {name!r} must be a Fact named {name!r}, got {fact!r}")
+
+
+def decide(contract: Contract, declared: Dict[str, object], chosen: Dict[str, Fact], policy: Optional[Policy] = None,
+           observed: Optional[Dict[str, Fact]] = None) -> List[Decision]:
+    """Apply the verdict order above to every name the contract needs. `declared[name]` is a Fact or a tuple of
+    candidate Facts from different sources."""
+    policy = policy or Policy()
+    observed = observed or {}
+    out = []
+    for name in contract.needs:
+        candidates = declared.get(name, ())
+        candidates = (candidates,) if isinstance(candidates, Fact) else tuple(candidates)
+        for fact in candidates:
+            _check(fact, name, "a declared fact")
+        c, o = chosen.get(name), observed.get(name)
+        _check(c, name, "the chosen fact")
+        _check(o, name, "the observed fact")
+        d, conflict = _sources.pick(candidates)
+
+        def decision(verdict, rule, **kw):
+            base = dict(declared=d, chosen=c, observed=o, conflict=conflict)
+            base.update(kw)
+            return Decision(contract, name, verdict, rule, **base)
+
+        if conflict and policy.on_source_conflict == "stop":
+            out.append(decision(Verdict.REFUSED, RULES["sources_disagree"], blocking=True))
+            continue
+
+        note = None
+        if o is not None and o.certainty is not Certainty.UNKNOWN:
+            if d is not None and d.certainty in (Certainty.DECLARED, Certainty.VERIFIED):
+                if agrees(d.value, o.value):
+                    d = replace(d, certainty=Certainty.VERIFIED)
+                elif policy.on_false_declaration == "refuse":
+                    out.append(decision(Verdict.REFUSED, RULES["false_declaration"], blocking=True))
+                    continue
+                else:
+                    d, note = o, RULES["data_used"]
+            else:
+                d = o   # nothing reliable was declared; what the data shows is known, not guessed
+
+        if d is None or d.certainty in (Certainty.UNKNOWN, Certainty.INFERRED, Certainty.DEFAULTED):
+            rule = {Certainty.INFERRED: RULES["inferred_only"], Certainty.DEFAULTED: RULES["defaulted_only"]}.get(
+                None if d is None else d.certainty, RULES["undeclared"])
+            setting = policy.unknown_setting(name, name in contract.meaning_changing)
+            out.append(decision(Verdict.UNKNOWN, rule, declared=d, blocking=setting in ("require", "stop")))
+            continue
+        if c is None or c.certainty is Certainty.UNKNOWN:
+            out.append(decision(Verdict.UNKNOWN, RULES["consumer_unknown"], declared=d,
+                                blocking=policy.mode == "debug"))
+            continue
+        if agrees(d.value, c.value):
+            out.append(decision(Verdict.PASS, note or RULES["match"], declared=d))
+            continue
+        if c.source.kind == "user":
+            out.append(decision(Verdict.REFUSED, RULES["user_choice"], declared=d, blocking=True))
+            continue
+        if policy.mismatch_setting(name) == "refuse":
+            out.append(decision(Verdict.REFUSED, RULES["policy_refuses"], declared=d, blocking=True))
+            continue
+        fix = next((r for r in RESOLUTIONS.get(name, []) if r.applies(d, c)), None)
+        if fix is None:
+            out.append(decision(Verdict.REFUSED, RULES["no_resolution"], declared=d, blocking=True))
+        else:
+            out.append(decision(Verdict.RESOLVED, RULES["resolved"], declared=d, resolution=fix.describe(d, c),
+                                handle=fix.handle))
+    return out
