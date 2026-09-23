@@ -59,6 +59,7 @@ Turn it on with one environment variable; nothing else changes.
 ENTAIL=load vllm serve meta-llama/Llama-3.2-3B-Instruct --hf-overrides '{"rope_scaling": {...}}'
 ENTAIL=load python -m sglang.launch_server --model-path ... --json-model-override-args '{...}'
 ENTAIL=load python your_transformers_script.py
+ENTAIL=load python main.py            # ComfyUI, from its folder (on Windows: set ENTAIL=load in the launcher .bat)
 ```
 
 When it changes something, it says so:
@@ -90,6 +91,7 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
 |---|---|---|
 | a RoPE value given under its transformers-4 name after the config is built (`rope_theta`, `rope_scaling` — keyword to `from_pretrained`, attribute, vLLM `--hf-overrides`, SGLang `--json-model-override-args`) | written where `config.json` would have put it, including per-layer-type RoPE (asks the config class) | equal to the `config.json` route on 4 model families × 2 routes × 3 values; GSM8K restored (table above) |
 | an attention backend that drops a declared model property (e.g. Gemma 2 logit soft-capping on transformers `sdpa`, SGLang `flashinfer`) | switched to a backend measured to honour it (`eager`, `triton`) | tokens equal the reference run; cost 1.18× (transformers), 1.13× (SGLang, the backend's own price) |
+| **ComfyUI:** a LoRA that cannot reach the model it is applied to (e.g. an Anima LoRA in an SDXL workflow). ComfyUI skips each module with a console line and the run "succeeds" with the LoRA doing nothing | nothing can convert it, so the workflow stops before sampling with the reason: what the LoRA declares it was trained for, and which model it met. A partial match is reported and the run goes on | on a real ComfyUI 0.34.1: the wrong pairing changed the image by 0.8/255 (the right LoRA: 35.2) behind 840 console lines; with entail both wrong directions stop; 22 right pairings (21 SDXL LoRAs incl. text encoders, 1 Anima) pass with no false alarm; images identical with entail on and off |
 
 **Checks** (and stops, when nothing can resolve it)
 
@@ -115,8 +117,8 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
 
 ## Tested with
 
-transformers 5.12.1 and 5.17.0, vLLM 0.30.0, SGLang 0.5.20, torch 2.13–2.14, Python 3.12, one RTX 4070 Ti
-(12 GB). Other versions may work; `entail doctor` prints what is installed. On transformers 4.x the RoPE resolver
+transformers 5.12.1, 5.16.1 and 5.17.0, vLLM 0.30.0, SGLang 0.5.20, ComfyUI 0.34.1 (Windows), torch 2.13–2.14,
+Python 3.12, one RTX 4070 Ti (12 GB). Other versions may work; `entail doctor` prints what is installed. On transformers 4.x the RoPE resolver
 has nothing to do and stays out of the way.
 
 The capability table (which backend honours what) records its evidence per entry, and only entries marked

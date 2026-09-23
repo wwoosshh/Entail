@@ -61,6 +61,7 @@ entail doctor
 ENTAIL=load vllm serve meta-llama/Llama-3.2-3B-Instruct --hf-overrides '{"rope_scaling": {...}}'
 ENTAIL=load python -m sglang.launch_server --model-path ... --json-model-override-args '{...}'
 ENTAIL=load python your_transformers_script.py
+ENTAIL=load python main.py            # ComfyUI는 그 폴더에서 실행한다(윈도우에서는 실행 .bat에 set ENTAIL=load)
 ```
 
 스크립트 안에서 켤 때는 이렇게 한다.
@@ -87,6 +88,7 @@ vLLM과 SGLang은 모델을 자기가 새로 띄운 프로세스에서 돌린다
 |---|---|---|
 | 설정이 만들어진 뒤 transformers 4 이름으로 준 RoPE 값(`rope_theta`, `rope_scaling`). `from_pretrained` 인자, 속성, vLLM `--hf-overrides`, SGLang `--json-model-override-args` 모두 해당한다 | `config.json`이 넣었을 자리에 쓴다. 층 종류마다 다른 RoPE도 설정 클래스에게 물어 같은 자리에 쓴다 | 모델 4종 × 경로 2 × 값 3에서 `config.json` 경로와 같음. GSM8K가 원래로 돌아옴(위 표) |
 | 모델이 선언한 성질을 버리는 어텐션 백엔드. 예: transformers `sdpa`와 SGLang `flashinfer`가 Gemma 2의 logit soft-capping을 버림 | 지킨다고 측정된 백엔드(`eager`, `triton`)로 바꾼다 | 기준 실행과 토큰이 같음. 비용은 transformers 1.18배, SGLang 1.13배이고, 이는 바뀐 백엔드 자체의 값이다 |
+| **ComfyUI:** 붙인 모델에 닿지 못하는 LoRA(예: SDXL 워크플로에 Anima LoRA). ComfyUI는 모듈마다 콘솔에 한 줄을 남기고 건너뛰며, 실행은 "성공"으로 끝나지만 LoRA는 아무것도 하지 않는다 | 바꿀 방법이 없으므로 샘플링 전에 멈추고 이유를 보여 준다. 이유에는 LoRA가 선언한 학습 기반과 실제로 만난 모델이 들어간다. 일부만 닿으면 알리고 계속한다 | 실제 ComfyUI 0.34.1에서 잘못된 조합은 그림을 평균 0.8/255만 바꿨다(맞는 LoRA는 35.2). 그 뒤에서 콘솔 경고가 840줄 나왔다. entail을 켜면 잘못된 조합이 두 방향 모두 멈췄다. 맞는 조합 22개(SDXL LoRA 21개, 텍스트 인코더 포함, Anima 1개)는 오탐 없이 통과했다. entail을 켜고 끈 그림은 같았다 |
 
 **검사하는 것** (해소할 수 없으면 멈춘다)
 
@@ -109,7 +111,7 @@ vLLM과 SGLang은 모델을 자기가 새로 띄운 프로세스에서 돌린다
 
 ## 시험한 판
 
-- transformers 5.12.1과 5.17.0, vLLM 0.30.0, SGLang 0.5.20, torch 2.13~2.14, Python 3.12, RTX 4070 Ti(12 GB)에서 시험했다.
+- transformers 5.12.1, 5.16.1, 5.17.0, vLLM 0.30.0, SGLang 0.5.20, ComfyUI 0.34.1(윈도우), torch 2.13~2.14, Python 3.12, RTX 4070 Ti(12 GB)에서 시험했다.
 - 다른 버전에서도 될 수 있다. `entail doctor`가 설치된 버전을 보여 준다.
 - transformers 4.x에서는 RoPE 해소기가 할 일이 없으므로 끼어들지 않는다.
 - 능력표(어느 백엔드가 무엇을 지키는가)는 항목마다 근거를 적는다. 해소 대상으로는 "measured"로 표시된 항목만 쓴다.

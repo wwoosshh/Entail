@@ -15,7 +15,7 @@ import sys
 from . import __version__, hook
 
 # Versions the adapters were measured against (see README, "Tested with").
-TESTED = {"transformers": "5.12.1, 5.17.0", "vllm": "0.30.0", "sglang": "0.5.20"}
+TESTED = {"transformers": "5.12.1, 5.16.1, 5.17.0", "vllm": "0.30.0", "sglang": "0.5.20"}
 
 
 def _installed(name):
@@ -58,7 +58,10 @@ def doctor(_args):
           f"  ENTAIL_ONLY={os.environ.get('ENTAIL_ONLY', '') or '(all)'}")
     print("adapters that ENTAIL=load installs, once their module is imported:")
     for module, adapters in _targets().items():
-        present = importlib.util.find_spec(module.split(".")[0]) is not None
+        top = module.split(".")[0]
+        # ComfyUI is not a pip package: it is importable when you run from its folder, as its launcher does
+        present = (importlib.util.find_spec(top) is not None or os.path.isdir(os.path.join(os.getcwd(), top))
+                   or os.path.isfile(os.path.join(os.getcwd(), top + ".py")))
         for a in adapters:
             print(f"  {a:48} after {module}{'' if present else '   (engine not installed here)'}")
     return 0
