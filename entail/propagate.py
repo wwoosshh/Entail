@@ -86,7 +86,7 @@ class RolePropagation(TorchDispatchMode):
             target = first
             while target is not None:
                 facts = core.facts_of(target)
-                marks = [Invalidated(kind=k, why=f"aten.{name} wrote into the value")
+                marks = [Invalidated(kind=k, why=f"aten.{name}, which wrote into the value")
                          for k in facts if k != "Invalidated"]
                 if marks:
                     core._FACTS.pop(id(target), None)
@@ -96,7 +96,7 @@ class RolePropagation(TorchDispatchMode):
             return out
 
         if name in INVALIDATE:
-            facts = dict(core.facts_of(inputs[0]))
+            facts = dict(core._FACTS.get(id(inputs[0]), {}))   # envelopes: what is carried keeps its source
             keep = {k: v for k, v in facts.items() if k not in AXIS_DEPENDENT and k != "Invalidated"}
             marks = [Invalidated(kind=k, why=f"aten.{name}") for k in facts if k in AXIS_DEPENDENT]
             for o in outputs:
@@ -106,13 +106,15 @@ class RolePropagation(TorchDispatchMode):
             return out
 
         if name in BINARY and len(inputs) >= 2:
-            merged = {}
+            merged = {}   # kind -> the envelope (or marker) carried on; compared by value
             for t in inputs:
-                for kind, fact in core.facts_of(t).items():
-                    if kind in merged and merged[kind] != fact:
+                for kind, fact in core._FACTS.get(id(t), {}).items():
+                    value = getattr(fact, "value", fact) if kind != "Invalidated" else fact
+                    if kind in merged and getattr(merged[kind], "value", merged[kind]) != value:
                         STATS["conflicts"] += 1
                         msg = (f"aten.{name}: the two values disagree about {kind}: "
-                               f"{merged[kind]} and {fact}. Convert one of them and say so.")
+                               f"{getattr(merged[kind], 'value', merged[kind])} and {value}. Convert one of them "
+                               f"and say so.")
                         if self.on_conflict == "raise":
                             raise RoleError(msg)
                     else:
@@ -123,7 +125,7 @@ class RolePropagation(TorchDispatchMode):
             return out
 
         if name in CARRY:
-            facts = core.facts_of(inputs[0])
+            facts = dict(core._FACTS.get(id(inputs[0]), {}))   # envelopes: what is carried keeps its source
             for o in outputs:
                 core.tag(o, *facts.values())
             STATS["carried"] += len(facts)

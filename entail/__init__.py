@@ -5,9 +5,12 @@ on for a process and every process it spawns (see README). `enable()` does the s
 """
 import os
 
-from .core import (RoleError, boundary, carry, check_config_keys, check_props, check_tied, facts_of, mode, policy,
-                   require, set_mode, set_policy, tag)
-from .facts import (LAYOUT_KINDS, KernelCaps, Layout, ModelProps, Positions, Quantized, Reduction, Valid)
+# core first: it re-exports boundary and carry from boundaries, which imports core
+from .core import (RoleError, boundary, carry, check_config_keys, check_props, check_tied, envelopes_of, facts_of,
+                   mode, policy, require, set_mode, set_policy, tag)
+from .boundaries import advance  # noqa: E402
+from .facts import (LAYOUT_KINDS, Assumed, Epoch, KernelCaps, LatentScale, Layout, ModelProps, Origin, Positions,
+                    Prediction, Quantized, Reduction, Rotary, Template, Valid)
 
 __version__ = "0.3.0"
 
@@ -26,6 +29,7 @@ def enable(mode="load", policy="resolve"):
     _hook.activate()
 
 
-__all__ = ["RoleError", "boundary", "carry", "check_config_keys", "check_props", "check_tied", "enable", "facts_of", "mode",
-           "policy", "require", "set_mode", "set_policy", "tag", "LAYOUT_KINDS", "KernelCaps", "Layout", "ModelProps",
-           "Positions", "Quantized", "Reduction", "Valid", "__version__"]
+__all__ = ["RoleError", "advance", "boundary", "carry", "check_config_keys", "check_props", "check_tied", "enable",
+           "envelopes_of", "facts_of", "mode", "policy", "require", "set_mode", "set_policy", "tag", "LAYOUT_KINDS",
+           "Assumed", "Epoch", "KernelCaps", "LatentScale", "Layout", "ModelProps", "Origin", "Positions",
+           "Prediction", "Quantized", "Reduction", "Rotary", "Template", "Valid", "__version__"]

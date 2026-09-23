@@ -49,7 +49,7 @@ def test_a_boundary_says_why_the_fact_is_gone():
     try:
         kernel(w=moved)
     except RoleError as e:
-        assert "made it untrue" in str(e), e
+        assert "made untrue by aten.transpose" in str(e), e
     else:
         raise AssertionError("the boundary accepted a value whose layout fact was invalidated")
 

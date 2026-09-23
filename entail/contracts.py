@@ -51,6 +51,13 @@ RULES = {
     "false_declaration": "the declaration contradicts the data",
     "data_used": "the declaration contradicts the data; the data's value is used",
     "cannot_check": "this boundary could not be checked",
+    # code boundaries (boundaries.py, M4.1): checks about the call itself rather than a fact's value
+    "positional": "a declared argument must be passed by keyword at this boundary (the keyword is its role)",
+    "invalidated": "what it carried was made untrue on the way, and nothing says what it holds now",
+    "predicate": "the value it carries does not satisfy what this boundary takes",
+    "write_missing": "the boundary declares it writes this argument, but it was not written",
+    "write_undeclared": "the boundary wrote into an argument it does not declare",
+    "disagree": "arguments that must carry the same fact carry different ones",
 }
 
 

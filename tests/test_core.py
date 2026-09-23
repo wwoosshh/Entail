@@ -39,8 +39,15 @@ def test_boundary_checks_in_debug():
 
     ok = rc.tag(torch.zeros(2), rc.Positions("absolute"))
     f(q=ok)
-    expect_error(lambda: f(q=rc.tag(torch.zeros(2), rc.Positions("chunk_relative", 256))), "expected")
-    expect_error(lambda: f(q=torch.zeros(2)), "carries no")
+    # resolution first (M4.1): chunk-relative positions with their offset are made absolute ...
+    assert f(q=rc.tag(torch.zeros(2), rc.Positions("chunk_relative", 256))).tolist() == [256.0, 256.0]
+    rc.set_policy("refuse")   # ... and under `refuse` the mismatch stops the call
+    try:
+        expect_error(lambda: f(q=rc.tag(torch.zeros(2), rc.Positions("chunk_relative", 256))),
+                     "the policy refuses mismatches")
+    finally:
+        rc.set_policy("resolve")
+    expect_error(lambda: f(q=torch.zeros(2)), "nothing declares it")
     expect_error(lambda: f(torch.zeros(2)), "must be passed by keyword")
 
 
@@ -53,7 +60,8 @@ def test_closed_layout_set():
         return w
 
     dequant(w=rc.tag(torch.zeros(4), rc.Layout("q8_0", packing="interleaved")))
-    expect_error(lambda: dequant(w=rc.tag(torch.zeros(4), rc.Layout("q8_0", packing="split"))), "expected")
+    expect_error(lambda: dequant(w=rc.tag(torch.zeros(4), rc.Layout("q8_0", packing="split"))),
+                 "no resolution is registered")
     try:
         rc.Layout("q9_9")
     except ValueError:
