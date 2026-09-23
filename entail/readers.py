@@ -6,6 +6,11 @@ One reader per kind of artifact:
   diffusers    scheduler/scheduler_config.json and vae/config.json: Prediction, LatentScale
   safetensors  a .safetensors header (metadata and marker keys, never the tensors): Prediction
   gguf         a .gguf header: ModelProps, Rotary, Template
+and, for what an engine already holds (M6.1):
+  header_facts  the tensor names and metadata of a safetensors header, read from disk or kept by an engine (ComfyUI
+                reads the header and sets the metadata aside): the same facts as the safetensors reader
+  lora_modules  the modules a LoRA carries weights for, from its tensor names (Coverage of a LoRA: what it is given
+                to change); lora_base says what its metadata names as the model it was trained on, for a message
 
 Rules every reader follows:
   - A fact is emitted only for what the artifact states; nothing is filled in from defaults.
@@ -18,6 +23,7 @@ Rules every reader follows:
 import hashlib
 import json
 import os
+import re
 import struct
 from dataclasses import dataclass, field
 from typing import List
@@ -318,6 +324,42 @@ def safetensors_header(path):
     return list(header), meta
 
 
+def header_facts(keys, metadata, label, source_kind="file"):
+    """The facts a safetensors header states: its tensor names (`keys`) and its metadata dict. `label` names the file
+    (or what an engine read it from) in every Source. Prediction from ModelSpec's prediction_type, kohya's
+    ss_v_parameterization and the marker key v_pred - each statement its own fact, so sources.pick finds a file that
+    contradicts itself - with zero terminal SNR from the ztsnr key or ss_zero_terminal_snr."""
+    r = ReadResult()
+    keys, meta = set(keys), metadata or {}
+    mk, kk = ALIASES["Prediction"]["safetensors_metadata"], ALIASES["Prediction"]["safetensors_keys"]
+    zsnr, zsnr_from = None, None
+    if any(k in keys for k in kk["zsnr"]):
+        zsnr, zsnr_from = True, "key " + next(k for k in kk["zsnr"] if k in keys)
+    else:
+        zkey, z = _first(meta, mk["zsnr"])
+        if zkey and flag(z) is not None:
+            zsnr, zsnr_from = flag(z), zkey
+    note = f" (zsnr from {zsnr_from})" if zsnr_from else ""
+    statements = []
+    key, raw = _first(meta, mk["kind"])
+    if key:
+        kind = prediction_kind(raw)
+        if kind:
+            statements.append((kind, f"__metadata__.{key}"))
+        else:
+            r.problems.append(f"{label}#__metadata__.{key}: prediction type {raw!r} is not in vocabulary "
+                              f"v{VOCAB_VERSION}")
+    key, raw = _first(meta, mk["v_flag"])
+    if key and flag(raw) is not None:
+        statements.append(("v" if flag(raw) else "eps", f"__metadata__.{key}"))
+    for k in kk["v"]:
+        if k in keys:
+            statements.append(("v", f"key {k}"))
+    for kind, what in statements:
+        _emit(r, "Prediction", lambda: Prediction(kind, zsnr), source_kind, f"{label}#{what}{note}")
+    return r
+
+
 class SafetensorsMeta:
     name = "safetensors"
 
@@ -325,36 +367,39 @@ class SafetensorsMeta:
         return str(path).endswith(".safetensors") and os.path.isfile(path)
 
     def read(self, path):
-        r = ReadResult()
-        keys, meta = safetensors_header(path)
-        keys = set(keys)
-        mk, kk = ALIASES["Prediction"]["safetensors_metadata"], ALIASES["Prediction"]["safetensors_keys"]
-        zsnr, zsnr_from = None, None
-        if any(k in keys for k in kk["zsnr"]):
-            zsnr, zsnr_from = True, "key " + next(k for k in kk["zsnr"] if k in keys)
-        else:
-            zkey, z = _first(meta, mk["zsnr"])
-            if zkey and flag(z) is not None:
-                zsnr, zsnr_from = flag(z), zkey
-        note = f" (zsnr from {zsnr_from})" if zsnr_from else ""
-        statements = []
-        key, raw = _first(meta, mk["kind"])
-        if key:
-            kind = prediction_kind(raw)
-            if kind:
-                statements.append((kind, f"__metadata__.{key}"))
-            else:
-                r.problems.append(f"{path}#__metadata__.{key}: prediction type {raw!r} is not in vocabulary "
-                                  f"v{VOCAB_VERSION}")
-        key, raw = _first(meta, mk["v_flag"])
-        if key and flag(raw) is not None:
-            statements.append(("v" if flag(raw) else "eps", f"__metadata__.{key}"))
-        for k in kk["v"]:
-            if k in keys:
-                statements.append(("v", f"key {k}"))
-        for kind, what in statements:
-            _emit(r, "Prediction", lambda: Prediction(kind, zsnr), "file", f"{path}#{what}{note}")
-        return r
+        return header_facts(*safetensors_header(path), path)
+
+
+# --- LoRA files -----------------------------------------------------------------------------------------------
+
+_LK = ALIASES["Coverage"]["lora_keys"]
+_LORA_PART = re.compile(r"\.(?:" + "|".join(_LK["parts"]) + r")(?:\.|$)")
+
+
+def lora_module(key):
+    """The module a LoRA tensor belongs to: 'lora_unet_x.lora_down.weight' -> 'lora_unet_x'."""
+    m = _LORA_PART.search(key)
+    return key[:m.start()] if m else key.rsplit(".", 1)[0]
+
+
+def lora_modules(keys):
+    """The modules a LoRA carries weights for, from its tensor names; an empty set when they are not LoRA keys."""
+    keys = list(keys)
+    if not any(_LORA_PART.search(k) for k in keys):
+        return set()
+    return {lora_module(k) for k in keys}
+
+
+def is_text_module(name):
+    """A LoRA module of a text encoder (kohya lora_te*, diffusers text_encoder*, ...), by its prefix."""
+    return name.startswith(tuple(_LK["text_prefixes"]))
+
+
+def lora_base(metadata):
+    """What a LoRA's metadata names as the model it was trained on ("ss_base_model_version=sdxl_base_v1-0"), or None.
+    Text for a message: the model family is not in the vocabulary (facts.Base)."""
+    key, value = _first(metadata or {}, _LK["base"])
+    return f"{key}={value}" if key else None
 
 
 class GgufMeta:

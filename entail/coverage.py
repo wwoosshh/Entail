@@ -25,6 +25,11 @@ class Coverage:
     def all_taken(self):
         return self.taken == self.total
 
+    def __str__(self):
+        """As the dataclass shows it, with a long `left` cut after five names (a LoRA can leave hundreds, M6.1)."""
+        left = self.left if len(self.left) <= 5 else self.left[:5] + (f"... and {len(self.left) - 5} more",)
+        return f"Coverage(total={self.total}, taken={self.taken}, left={left!r})"
+
 
 def count(given, taken):
     """Coverage of `given` by `taken` (both iterables of names)."""

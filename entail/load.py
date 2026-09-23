@@ -1,4 +1,4 @@
-"""load: the load-time contracts (LIBRARY_DESIGN.md 4.5, 4.7; ROADMAP M3.2).
+"""load: the load-time contracts (LIBRARY_DESIGN.md 4.5, 4.7; ROADMAP M3.2, M6.1).
 
 When an engine loads a model it has the model's declarations in hand and makes its choices: which attention backend
 runs, whether the head is tied to the embedding, which config keys its config class takes, what an old RoPE name
@@ -27,6 +27,12 @@ them and stops the run on a blocking one - under the default policy only what th
                        sampled before it (sample_weights) against where it declares it moves them; a confirmed
                        layout goes onto the weight as a fact, so it travels with the value
   model_contracts(...) tie, rotary_held and layout together, for an engine's hook once the model is built
+  prediction(...)      Prediction: what a diffusion model predicts, as declared, against what the sampler is set up for;
+                       resolution: set the sampler up for the declared prediction (M6.1)
+  latent_scale(...)    LatentScale: the scale between the VAE's latents and the model's, as declared, against what the
+                       boundary that encodes and decodes applies; resolution: apply the declared scale (M6.1)
+  lora(...)            Coverage: the modules a LoRA carries weights for against the ones the engine finds in the model
+                       (M6.1)
   cannot_check(...)    a boundary the adapter could not check, reported as such (never a silent pass)
   safely(...)          runs an adapter's reading and deciding so that an error inside entail never breaks the run
 """
@@ -180,16 +186,21 @@ def manifest_dirs_from_env() -> List[str]:
 
 
 def declared(model_path: Optional[str] = None, config=None, manifest_dirs: Sequence[str] = (),
-             user: Sequence[Fact] = ()) -> Declared:
+             user: Sequence[Fact] = (), header: Optional[tuple] = None) -> Declared:
     """Everything declared about one model at load. With files, the files (and a pinned manifest) are the
     declaration and the engine's config object only adds what they leave open, as defaults. Without files (a config
-    built in code), the config object is the declaration. Manifest folders not given come from ENTAIL_MANIFESTS."""
+    built in code), the config object is the declaration. Manifest folders not given come from ENTAIL_MANIFESTS.
+    `header` - (tensor names, metadata, label) - is a safetensors header an engine already read, for a model it builds
+    from a state dict in hand (ComfyUI, M6.1); its facts are the file's own statements."""
     manifest_dirs = list(manifest_dirs) or manifest_dirs_from_env()
     out = Declared()
     file_facts, have_files = [], False
     if model_path and os.path.exists(os.path.expanduser(model_path)):
         r = _sources.read_all(os.path.expanduser(model_path), manifest_dirs)
         file_facts, out.problems, have_files = list(r.facts), list(r.problems), True
+    if header is not None:
+        r = _readers.header_facts(*header)
+        file_facts, out.problems, have_files = file_facts + list(r.facts), out.problems + list(r.problems), True
     held = []
     if config is not None:
         label = f"{type(config).__name__} held by the engine"
@@ -623,6 +634,99 @@ def model_contracts(engine: str, model_path: Optional[str], config, loader_ties:
     if facts.get("Layout") and model_path:
         out += layout(f"{engine}.linear.unknown", facts, observed=_observe.scale_format(os.path.expanduser(model_path)),
                       policy=policy)
+    return out
+
+
+# --- image models (M6.1) ---------------------------------------------------------------------------------------
+
+def _open_kept(declared_value, used_value):
+    """The declared value with every field it leaves open taken from what the consumer had: a declaration silent
+    about zero terminal SNR keeps the sampler's schedule, one silent about the shift keeps the decoder's."""
+    return type(declared_value)(**{f.name: getattr(declared_value, f.name) if getattr(declared_value, f.name)
+                                   is not None else getattr(used_value, f.name, None) for f in fields(declared_value)})
+
+
+def _consumer_fact(name: str, value, label: str, explicit: bool) -> Fact:
+    """What a consumer uses, as a fact: as the engine set it up, or as the user set it explicitly (a node, an
+    argument: never overridden); unknown when the adapter could not read it."""
+    if value is None:
+        return Fact(name, None, Source("engine", f"{label} [could not be read]"), Certainty.UNKNOWN)
+    if explicit:
+        return Fact(name, value, Source("user", f"{label}, set explicitly by the user"), Certainty.VERIFIED)
+    return Fact(name, value, Source("engine", f"{label}, as the engine set it up"), Certainty.VERIFIED)
+
+
+def prediction(engine: str, consumer: str, facts: Declared, used, explicit: bool = False, can_switch: bool = True,
+               policy: Optional[Policy] = None, where: str = "") -> List[Decision]:
+    """What a diffusion model's network predicts (Prediction: eps, v, x0, flow, edm; zero terminal SNR), as its file
+    (ModelSpec metadata, kohya metadata, the v_pred / ztsnr marker keys), a diffusers scheduler config, a manifest or
+    the user declares it, against what the sampler is set up for (`used`, the Prediction an adapter read; None when
+    it could not). fd-m7 and market I04: the file declares v, the engine reads only a marker key or nothing, and the
+    sampler stays at eps; the images are broken and the run succeeds.
+      - agrees (a field the declaration leaves open, e.g. zero terminal SNR, is not compared)  -> pass
+      - differs, and the sampler can be set up again (`can_switch`)                              -> resolved: handle
+        "switch_prediction", target the declared Prediction with the fields it leaves open kept as the sampler had them
+      - differs, set explicitly by the user (`explicit`: a sampling node, a scheduler argument)  -> broken, not overridden
+      - differs, nothing can set it up again                                                      -> broken
+      - nothing declares it                                                                        -> unknown, reported
+    Broken stops only where the policy stops (M5.4); unknown only under ENTAIL_UNKNOWN=require/stop (principle 4).
+    How the running model behaves is never the basis for a change (principle 5)."""
+    label = f"{consumer} ({where})" if where else consumer
+    candidates = [f for f in facts.get("Prediction") if f.value is not None]
+    switch = Resolution("set the sampler up for the declared prediction", "switch_prediction",
+                        target=lambda d, c: _open_kept(d.value, c.value))
+    contract = Contract(f"load:{engine}.prediction", consumer, ("Prediction",), ("Prediction",))
+    return decide(contract, {"Prediction": tuple(candidates)},
+                  {"Prediction": _consumer_fact("Prediction", used, label, explicit)}, policy,
+                  resolutions={"Prediction": [switch] if can_switch else []})
+
+
+def latent_scale(engine: str, consumer: str, facts: Declared, used, explicit: bool = False, can_switch: bool = True,
+                 policy: Optional[Policy] = None, where: str = "") -> List[Decision]:
+    """The scale (and shift) between a VAE's latents and the latents the diffusion model works in (LatentScale), as
+    the model's files (a diffusers folder's vae/config.json) or a manifest declare it, against what the boundary that
+    encodes and decodes applies (`used`, read by an adapter: the VAE's config in diffusers, the model's latent format
+    in ComfyUI; None when it could not). A VAE loaded on its own can carry another model family's scale: diffusers
+    reads a VAE file without a config as Stable Diffusion 1.5's, because the keys of the two VAEs are the same
+    (M6.1, code: loaders/single_file_utils.py infer_diffusers_model_type).
+      - agrees (a shift the declaration leaves open is not compared)             -> pass
+      - differs, and the scale the boundary applies can be set (`can_switch`)    -> resolved: handle "set_latent_scale",
+        target the declared LatentScale with a shift it leaves open kept
+      - differs, set explicitly by the user, or nothing can set it               -> broken
+      - nothing declares it (a single-file checkpoint states no scale)           -> unknown, reported"""
+    label = f"{consumer} ({where})" if where else consumer
+    candidates = [f for f in facts.get("LatentScale") if f.value is not None]
+    apply = Resolution("apply the declared latent scale at the encoder and decoder", "set_latent_scale",
+                       target=lambda d, c: _open_kept(d.value, c.value))
+    contract = Contract(f"load:{engine}.latent_scale", consumer, ("LatentScale",), ("LatentScale",))
+    return decide(contract, {"LatentScale": tuple(candidates)},
+                  {"LatentScale": _consumer_fact("LatentScale", used, label, explicit)}, policy,
+                  resolutions={"LatentScale": [apply] if can_switch else []})
+
+
+def lora(engine: str, where: str, given: Sequence[str], taken: Sequence[str], base: Optional[str] = None,
+         policy: Optional[Policy] = None) -> List[Decision]:
+    """Coverage of a LoRA (fd-lora, market I01): the modules it carries weights for, for the parts it is applied to
+    (`given`: the model, and the text encoder when that is given a strength), against the ones the engine's key
+    mapping finds in the loaded model (`taken`). A LoRA made for another base model, or written in a key format the
+    loader does not know, changes nothing and the run succeeds. Every module reaches -> pass. None or only some ->
+    broken (refused where the policy stops): no key mapping is registered, and the engine has converted the formats it
+    knows before this is decided. `base` - what the LoRA's metadata says it was trained on - goes into the note."""
+    from .coverage import Coverage
+
+    given = set(given)
+    if not given:
+        return []
+    got = set(taken) & given
+    declared_fact = Fact("Coverage", Coverage(len(given), len(given), ()),
+                         Source("file", f"{where} (every module the LoRA carries weights for)"), Certainty.DECLARED)
+    chosen = Fact("Coverage", Coverage(len(given), len(got), tuple(sorted(given - got))),
+                  Source("engine", f"{engine} LoRA key mapping: the modules it finds in the loaded model"),
+                  Certainty.VERIFIED)
+    contract = Contract(f"load:{engine}.lora", f"{engine}.lora_loader", ("Coverage",), ("Coverage",))
+    out = decide(contract, {"Coverage": declared_fact}, {"Coverage": chosen}, policy)
+    if base:
+        out = [d if d.verdict is Verdict.PASS else replace(d, note=f"the LoRA's metadata says {base}") for d in out]
     return out
 
 
