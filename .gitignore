@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Research workspace only: measurement scripts and raw results, source scans, working design notes.
+# They refer to local models and machines; the library does not need them.
+audits/
+tools/
+DESIGN.md

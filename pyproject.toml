@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# The import name is `entail`. On PyPI that name is held by an unrelated placeholder (v0.0.4), so the distribution
+# is `entail-ai` (checked 2026-09-23).
+name = "entail-ai"
+dynamic = ["version"]
+description = "Keep what a value means intact across LLM inference-stack boundaries: declare it, check it against the data, and resolve a mismatch before it becomes a silent wrong answer"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "wwoosshh" }]
+keywords = ["llm", "inference", "vllm", "sglang", "transformers", "correctness", "rope", "silent-errors"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Nothing is pulled in: the adapters run inside whatever engine is already installed.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/wwoosshh/entail"
+Issues = "https://github.com/wwoosshh/entail/issues"
+
+[project.scripts]
+entail = "entail.cli:main"
+entail-preflight = "entail.preflight:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "entail.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["entail*"]
