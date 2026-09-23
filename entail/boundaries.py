@@ -247,7 +247,10 @@ def _check_arg(where, arg, want, value, policy):
     else:
         d = replace(d, note=f"argument {arg}")
     if d.verdict is Verdict.RESOLVED:
-        fn = next(f for r, f in CONVERTERS[kind] if r.handle == d.handle)
+        r, fn = next((r, f) for r, f in CONVERTERS[kind] if r.handle == d.handle)
+        # a converter changes the value, so it goes from what the value carried to what this boundary takes
+        # (Resolution.describe words the load-time kind, which changes the consumer's choice towards the declaration)
+        d = replace(d, resolution=f"{r.name} ({carried.value} -> {chosen})")
         value = fn(value, carried.value, chosen)
         tag(value, _fact(kind, chosen, f"{where}.takes.{arg} ({d.resolution})"))
     return d, value

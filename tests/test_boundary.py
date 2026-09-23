@@ -229,6 +229,7 @@ def test_a_strided_value_is_made_contiguous_for_a_packed_reader():
     assert seen["contiguous"] and float(total) == float(q.sum())
     d = load.LEDGER.decisions[n]
     assert d.verdict is Verdict.RESOLVED and d.handle == "layout.contiguous" and "resolved at boundary:packed" in out
+    assert d.resolution == f"make the tensor contiguous ({STRIDED} -> {DENSE})", d.resolution   # value's side first
     quiet(kernel, q=q)                                   # the same repair again: counted, not printed again
     assert len(load.LEDGER.decisions) == n + 1 and sum(v for k, v in boundaries.REPEATS.items()
                                                         if k[0] == "packed kernel") >= 1
