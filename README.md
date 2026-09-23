@@ -9,15 +9,27 @@ Each part can be correct on its own terms while the *meaning* of a value is lost
 property the chosen kernel ignores, a setting that arrives under a name nobody reads any more, a cache that
 silently loses a token. The output is then wrong, fluently and without a warning.
 
-entail declares what a value means where it crosses a boundary, checks the declaration against the real thing,
-and when they disagree **it resolves the mismatch first** — routes the value to a consumer that honours it, or
-converts it to the form the consumer reads — and prints one line saying what it changed. It stops only when no
-fix exists.
+The goal of entail is to make that meaning explicit, like a type:
+- declared where it is produced and carried to where it is used
+- checked against the consumer's choice and against the data
+- resolved first when they disagree — routed to a consumer that honours it, or converted to the form the consumer
+  reads — and stopped only when no fix exists
+- said to be "unknown" when nobody declares it, instead of letting a default stand in silently
 
 The name is the logical sense of *entail*: what a checkpoint declares must entail what the engine executes.
 (ent·**AI**·**L** — an AI library.)
 
-> Status: research prototype (alpha). Measured on one RTX 4070 Ti with the versions under "Tested with".
+> **Status: research prototype (alpha). Read this before relying on it.**
+> 0.3.0 is not yet that general mechanism. It is a set of specific checks and resolvers for cases that were
+> measured, listed under [What it does](#what-it-does):
+> - RoPE settings passed under old names
+> - attention backends that drop a declared property
+> - a few ComfyUI cases
+> - start-up checks and cache contracts on three LLM engines
+>
+> Anything not listed there is not checked. The general layer is being built for the next major version: facts
+> read from model files and configs, contracts at load, cache and request boundaries, and a ledger that shows
+> where meaning broke. Measured on one RTX 4070 Ti with the versions under "Tested with".
 
 ## Why: a case measured end to end
 

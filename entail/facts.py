@@ -99,3 +99,60 @@ class Invalidated:
     """
     kind: str   # the fact class name that stopped being true, e.g. "Layout"
     why: str    # the operation that did it, e.g. "aten.transpose"
+
+
+# --- The fact envelope (LIBRARY_DESIGN.md 4.1). Shape declared in M0.3; the vocabulary v1 classes that are not
+# here yet (Rotary, LatentScale, Epoch, Assumed, Origin, Template) and the closed-set checks come in M1.1. ---
+
+from enum import Enum  # noqa: E402
+
+VOCAB_VERSION = 1
+
+# The ten fact kinds (RESEARCH_PLAN.md 2.2), and which kind each vocabulary name belongs to (LIBRARY_DESIGN.md 6).
+FACT_KINDS = frozenset({"LAYOUT", "DTYPE", "FRAME", "RANGE", "PROPERTY", "MAPPING", "REDUCTION", "TIME",
+                        "SPECIALIZATION", "PRECEDENCE"})
+VOCABULARY = {
+    "Layout": "LAYOUT", "Quantized": "DTYPE", "Rotary": "FRAME", "Positions": "FRAME", "Valid": "RANGE",
+    "KvExtent": "RANGE", "ModelProps": "PROPERTY", "Prediction": "PROPERTY", "LatentScale": "PROPERTY",
+    "Template": "PROPERTY", "Coverage": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME",
+    "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE",
+}
+
+
+class Certainty(str, Enum):
+    """How sure the library is of a fact (LIBRARY_DESIGN.md principle 3)."""
+    DECLARED = "declared"    # an artifact, a pinned manifest, a code boundary or the user states it
+    VERIFIED = "verified"    # declared, and checked against the data (bytes, strides, dtypes, keys)
+    INFERRED = "inferred"    # derived without a declaration (a probe, a key pattern); never the only basis for a change
+    DEFAULTED = "defaulted"  # a default filled it in; recorded so it is never silent
+    UNKNOWN = "unknown"      # nobody says; reported, and for meaning-changing facts not replaced by a default
+
+
+@dataclass(frozen=True)
+class Source:
+    """Where a fact came from.
+
+    kind   "file" (model file metadata), "config" (config files), "manifest", "boundary" (a code signature),
+           "user", "probe" or "default"
+    where  a precise address, e.g. "model.safetensors#__metadata__.modelspec.prediction_type"
+    """
+    kind: str
+    where: str
+
+
+@dataclass(frozen=True)
+class Fact:
+    """One fact about a value: which vocabulary name, its value, where it came from, and how sure it is.
+
+    `value` is an instance of the vocabulary class called `name` (e.g. Prediction("v")), or None when the fact is
+    unknown. The kind (LAYOUT, PROPERTY ...) is VOCABULARY[name].
+    """
+    name: str
+    value: Optional[object]
+    source: Source
+    certainty: Certainty
+    vocab_version: int = VOCAB_VERSION
+
+    @property
+    def kind(self):
+        return VOCABULARY[self.name]
