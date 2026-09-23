@@ -10,11 +10,7 @@ import entail  # noqa: E402
 from entail import boundaries, caps, contracts, core, facts, manifest, policies, record, sites, sources, testing  # noqa: E402
 from entail.adapters import base  # noqa: E402
 
-PLANNED = [   # contracts.decide, policies.from_env, sources.pick/merge and the ledger were built in M1
-    (sources.read_all, ("x",), "M2.1"),
-    (manifest.load, ("x",), "M2.3"),
-    (manifest.find, ("x", []), "M2.3"),
-    (manifest.infer, ("x",), "M2.3"),
+PLANNED = [   # built since M0.3: contracts, policies, the ledger, sources and readers (M1, M2), manifests (M2.3)
     (caps.load_table, ("x",), "M3.1"),
     (caps.lookup, ([], "c", "f"), "M3.1"),
     (caps.probe, ("e", "c", "f"), "M3.1"),

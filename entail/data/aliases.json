@@ -1,0 +1,42 @@
+{
+  "_about": "Other names for the same fact, as data (LIBRARY_DESIGN.md 4.2; ROADMAP M2.1). Readers look their keys up here and normalise values with the value maps. '{arch}' is the GGUF architecture name.",
+  "values": {
+    "prediction_kind": {
+      "v": "v", "v_prediction": "v", "v-prediction": "v", "vpred": "v",
+      "epsilon": "eps", "eps": "eps",
+      "sample": "x0", "x0": "x0",
+      "flow": "flow", "rectified_flow": "flow", "flow_matching": "flow",
+      "edm": "edm"
+    },
+    "flag": {"true": true, "1": true, "yes": true, "false": false, "0": false, "no": false},
+    "rope_type": {
+      "default": "default", "none": "default", "linear": "linear", "dynamic": "dynamic", "yarn": "yarn",
+      "longrope": "longrope", "llama3": "llama3"
+    },
+    "fp8_format": {"e4m3": "float8_e4m3fn", "e5m2": "float8_e5m2"}
+  },
+  "Prediction": {
+    "safetensors_metadata": {"kind": ["modelspec.prediction_type"], "v_flag": ["ss_v_parameterization"], "zsnr": ["ss_zero_terminal_snr"]},
+    "safetensors_keys": {"v": ["v_pred"], "zsnr": ["ztsnr"]},
+    "diffusers_scheduler": {"kind": ["prediction_type"], "zsnr": ["rescale_betas_zero_snr"], "flow_class_marker": ["FlowMatch"]}
+  },
+  "ModelProps": {
+    "hf_config": {"softcap": ["attn_logit_softcapping"], "sliding_window": ["sliding_window"], "window_enabled": ["use_sliding_window"], "tie": ["tie_word_embeddings"]},
+    "gguf": {"softcap": ["{arch}.attn_logit_softcapping"], "sliding_window": ["{arch}.attention.sliding_window"]}
+  },
+  "Rotary": {
+    "hf_config": {"theta": ["rope_theta"], "scaling": ["rope_scaling"], "parameters": ["rope_parameters"], "type": ["rope_type", "type"], "factor": ["factor"], "original_max_position": ["original_max_position_embeddings"]},
+    "gguf": {"theta": ["{arch}.rope.freq_base"], "type": ["{arch}.rope.scaling.type"], "factor": ["{arch}.rope.scaling.factor"], "original_max_position": ["{arch}.rope.scaling.original_context_length"]}
+  },
+  "Template": {
+    "hf_tokenizer_config": {"chat_template": ["chat_template"]},
+    "hf_files": {"chat_template": ["chat_template.jinja"]},
+    "gguf": {"chat_template": ["tokenizer.chat_template"]}
+  },
+  "LatentScale": {
+    "diffusers_vae": {"scale": ["scaling_factor"], "shift": ["shift_factor"]}
+  },
+  "Layout": {
+    "hf_quantization_config": {"method": ["quant_method"], "block": ["weight_block_size"], "group_size": ["group_size", "q_group_size"], "bits": ["bits", "w_bit"], "scale_format": ["scale_fmt"], "fmt": ["fmt"]}
+  }
+}

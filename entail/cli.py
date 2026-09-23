@@ -3,10 +3,13 @@
   entail doctor                          what is installed, whether the start-up hook is in place, what would run
   entail hook {install,uninstall,status} manage the start-up hook in this environment
   entail preflight --model DIR --engine {sglang,transformers,vllm} [--backend NAME | --list]
+  entail infer PATH [--out FILE]         a manifest draft: what a model file or folder declares, and empty slots
+  entail pin MANIFEST                    mark a reviewed manifest pinned, so its facts count as declarations
   entail version
 """
 import argparse
 import importlib.metadata as md
+import json
 import importlib.util
 import os
 import platform
@@ -85,6 +88,28 @@ def _hook(args):
     return 0
 
 
+def _infer(args):
+    from . import manifest
+    draft = manifest.infer(args.path)
+    text = json.dumps(manifest.to_json(draft), ensure_ascii=False, indent=1)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as out:
+            out.write(text + "\n")
+        print(f"wrote {args.out}: {sum(x.value is None for x in draft.facts)} empty slot(s) to review")
+    else:
+        print(text)
+    return 0
+
+
+def _pin(args):
+    from . import manifest
+    m = manifest.load(args.manifest)
+    empty = [f.name for f in m.facts if f.value is None]
+    manifest.save(manifest.pin(m), args.manifest)
+    print(f"pinned {args.manifest}" + (f"; still empty (stay unknown): {empty}" if empty else ""))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="entail", description="Keep what a value means intact across LLM "
                                  "inference-stack boundaries.")
@@ -93,6 +118,11 @@ def main(argv=None):
     h = sub.add_parser("hook", help="manage the start-up hook in this environment")
     h.add_argument("action", choices=["install", "uninstall", "status"])
     sub.add_parser("preflight", help="check a model directory against an engine's backends", add_help=False)
+    i = sub.add_parser("infer", help="write a manifest draft for a model file or folder")
+    i.add_argument("path")
+    i.add_argument("--out", help="write the draft here instead of printing it")
+    pn = sub.add_parser("pin", help="mark a reviewed manifest pinned")
+    pn.add_argument("manifest")
     sub.add_parser("version", help="print the version")
     args, rest = ap.parse_known_args(argv)
     if args.cmd == "preflight":
@@ -106,6 +136,10 @@ def main(argv=None):
         return 0
     if args.cmd == "doctor":
         return doctor(args)
+    if args.cmd == "infer":
+        return _infer(args)
+    if args.cmd == "pin":
+        return _pin(args)
     return _hook(args)
 
 

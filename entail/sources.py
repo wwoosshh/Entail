@@ -13,34 +13,35 @@ Must:
 Must not:
   - look at what an engine chose (adapters do that) or decide anything (contracts do that)
 
-Built so far (M1, because the verdict table needs them): `pick` and `merge`. The readers come in M2.1.
+`pick` and `merge` were built in M1 (the verdict table needs them); `read_all` and the readers in M2.1
+(readers.py, with key names and value spellings in data/aliases.json).
 """
 from dataclasses import dataclass, fields
-from typing import Dict, List, Protocol, Tuple
+from typing import Dict, List, Protocol, Sequence, Tuple
 
+from . import readers as _readers
 from .facts import Certainty, Fact, Source
 
 # Which source wins when two disagree (LIBRARY_DESIGN.md 11). A conflict is always recorded. "boundary" (a code
 # signature) ranks with the explicit declarations; kinds not listed ("engine", "data") rank last.
 DEFAULT_PRECEDENCE = ("user", "manifest", "boundary", "file", "config", "probe", "default")
 
-# Other names for the same fact, as data: {vocabulary name: [(source kind, key or pattern), ...]}. Filled in M2.1.
-ALIASES = {}
+ALIASES = _readers.ALIASES
+ReadResult = _readers.ReadResult
 
 
 class Reader(Protocol):
-    """One kind of artifact. Planned in M2.1: hf_config, safetensors_metadata, gguf, diffusers_configs,
-    quantization_config."""
+    """One kind of artifact: hf_config, hf_template, diffusers, safetensors, gguf (readers.py)."""
     name: str
 
     def applies_to(self, path: str) -> bool:
         ...
 
-    def read(self, path: str) -> List[Fact]:
+    def read(self, path: str) -> "ReadResult":
         ...
 
 
-READERS: List[Reader] = []
+READERS: List[Reader] = list(_readers.READERS)
 
 
 @dataclass(frozen=True)
@@ -106,9 +107,28 @@ def pick(candidates, precedence=DEFAULT_PRECEDENCE):
     return ordered[0], tuple(known)
 
 
-def read_all(path: str) -> List[Fact]:
-    """Every fact that any reader finds in the artifact at `path` (a file or a model folder)."""
-    raise NotImplementedError("M2.1: readers for HF configs, safetensors metadata, GGUF, diffusers, quantization")
+def read_all(path: str, manifest_dirs: Sequence[str] = ()) -> "ReadResult":
+    """Every fact any reader finds in the artifact at `path` (a file or a model folder), plus the facts of a manifest
+    for it when one is found in `manifest_dirs`. A reader that fails becomes a problem: reading never breaks the
+    caller (principle 12)."""
+    result = ReadResult()
+    for reader in READERS:
+        try:
+            if not reader.applies_to(path):
+                continue
+            result.extend(reader.read(path))
+        except Exception as e:  # noqa: BLE001 - reported, never raised
+            result.problems.append(f"{reader.name}: {path}: {type(e).__name__}: {e}")
+    if manifest_dirs:
+        from . import manifest as _manifest
+        try:
+            m = _manifest.find(path, manifest_dirs)
+        except Exception as e:  # noqa: BLE001
+            result.problems.append(f"manifest: {path}: {type(e).__name__}: {e}")
+            m = None
+        if m is not None:
+            result.facts.extend(m.facts)
+    return result
 
 
 def merge(facts: List[Fact], precedence=DEFAULT_PRECEDENCE):
