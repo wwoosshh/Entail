@@ -28,6 +28,10 @@ TARGETS = {
     # Patched as soon as the selector has run, so attention.py imports the wrapped name.
     "vllm.v1.attention.selector": ["entail.adapters.vllm_attention"],
     "vllm.v1.core.kv_cache_manager": ["entail.adapters.vllm_cache_contract"],
+    # The request boundary: the parser manager, the renderer and the chat server, each as soon as it has run.
+    "vllm.parser.parser_manager": ["entail.adapters.vllm_serve:install_parsers"],
+    "vllm.renderers.hf": ["entail.adapters.vllm_serve:install_render"],
+    "vllm.entrypoints.openai.chat_completion.serving": ["entail.adapters.vllm_serve:install_serving"],
     # ComfyUI: the LoRA check sits where LoRAs are applied; the node hook only adds the file name to the message.
     "comfy.sd": ["entail.adapters.comfyui"],
     "comfy.sample": ["entail.adapters.comfyui:install_sampling"],

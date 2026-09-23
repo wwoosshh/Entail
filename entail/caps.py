@@ -11,9 +11,10 @@ What the table is for, and what it is not:
   - `uses` says what a consumer will actually use of a declared value: the fields it honours keep the declared
     value, the fields it drops become None. That is the `chosen` side of a contract (contracts.decide compares).
   - A consumer or a field missing from the table is unknown, never honouring (LIBRARY_DESIGN.md 7).
-  - `route` names a consumer of the same group that honours every declared field, with measured evidence only:
-    a resolution sends the value to a consumer that has been seen to honour it, never to one we only believe does
-    (the table has been wrong from code reading before: vLLM FLEX_ATTENTION, sweep/RESULTS.md).
+  - `route` names a consumer of the same group that honours every declared field - or reads exactly the declared
+    value, as a tool parser reads one format (M5.3) - with measured evidence only: a resolution sends the value to a
+    consumer that has been seen to honour it, never to one we only believe does (the table has been wrong from code
+    reading before: vLLM FLEX_ATTENTION, sweep/RESULTS.md).
   - The rows are checked with data by `entail probe` (probes.py): run with the fact bound and removed; identical
     output means the consumer ignores it, and two control runs must agree first.
 
@@ -272,18 +273,25 @@ def chosen_fact(table: Table, consumer: str, declared_fact: Fact) -> Fact:
 _STRENGTH = (Certainty.UNKNOWN, Certainty.DEFAULTED, Certainty.INFERRED, Certainty.DECLARED, Certainty.VERIFIED)
 
 
+def _read(cell):
+    return tuple(cell.reads) if isinstance(cell.reads, list) else cell.reads
+
+
 def route(table: Table, group: str, declared, exclude: Tuple[str, ...] = (), measured_only: bool = True
           ) -> Optional[str]:
-    """The first consumer of `group` (in the table's preferred order) that honours every field `declared` fills,
-    with measured evidence for each. Returns its short name ("triton"), or None."""
+    """The first consumer of `group` (in the table's preferred order) that serves every field `declared` fills -
+    it honours the field, or reads exactly the declared value - with measured evidence for each. Returns its short
+    name ("triton"), or None."""
     name = type(declared).__name__
-    wanted = [f"{name}.{f.name}" for f in fields(declared) if getattr(declared, f.name) is not None]
+    wanted = [(f"{name}.{f.name}", getattr(declared, f.name)) for f in fields(declared)
+              if getattr(declared, f.name) is not None]
     for short in table.preferred(group):
         consumer = f"{group}.{short}"
         if short in exclude or consumer in exclude:
             continue
-        cells = [lookup(table, consumer, w) for w in wanted]
-        if all(c is not None and c.honours and (c.evidence == "measured" or not measured_only) for c in cells):
+        cells = [(lookup(table, consumer, w), v) for w, v in wanted]
+        if all(c is not None and (c.honours or (c.reads is not None and _read(c) == v))
+               and (c.evidence == "measured" or not measured_only) for c, v in cells):
             return short
     return None
 

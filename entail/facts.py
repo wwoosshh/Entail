@@ -1,4 +1,4 @@
-"""Fact vocabulary v2 and the fact envelope (LIBRARY_DESIGN.md 4.1 and 6; ROADMAP M1.1, M4.2).
+"""Fact vocabulary v3 and the fact envelope (LIBRARY_DESIGN.md 4.1 and 6; ROADMAP M1.1, M4.2, M5.3).
 
 A fact class is a small frozen dataclass. Every field that names a kind of thing takes its value from a closed set,
 and a value outside the set is an error (principle 1): a new kind of layout, prediction or rope type is added here,
@@ -9,9 +9,11 @@ six new classes (Rotary, LatentScale, Template, Epoch, Assumed, Origin), and the
 fact came from and how sure the library is of it.
 
 v2 (M4.2) adds two optional fields to Layout, for the weights a loader repacks: `orientation` (which axis holds the
-output features) and `scale_granularity` (how many values one scale covers). Nothing else changed, so a v1 fact is a
-v2 fact with those two fields open, and a fact written with v1 is still read (READABLE_VERSIONS); it may not state a
-field v1 did not have (ADDED_IN).
+output features) and `scale_granularity` (how many values one scale covers). v3 (M5.3) adds Template.tool_call_format,
+the format a model writes its tool calls in, under names that do not belong to any engine (each engine's parsers are
+mapped to them in data/caps.json). Each version only adds optional fields, so an older fact is a newer fact with
+them open, and a fact written with an older version is still read (READABLE_VERSIONS); it may not state a field its
+version did not have (ADDED_IN).
 
 A consumer states what it accepts either as one fact (must be equal), a tuple of facts (closed set: must be one of
 them) or a predicate (callable returning bool); see core.boundary.
@@ -20,9 +22,9 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Optional, Tuple
 
-VOCAB_VERSION = 2
-READABLE_VERSIONS = frozenset({1, 2})   # a later version only adds optional fields; what it adds is in ADDED_IN
-ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2}
+VOCAB_VERSION = 3
+READABLE_VERSIONS = frozenset({1, 2, 3})   # a later version only adds optional fields; what it adds is in ADDED_IN
+ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("Template", "tool_call_format"): 3}
 
 
 def _closed(cls_name, field, value, allowed, optional=True):
@@ -191,21 +193,26 @@ class LatentScale:
 
 
 REASONING_HISTORY = frozenset({"keep", "drop"})
+# v3: the formats a model writes tool calls in, named apart from any engine. Only formats whose parsers were checked
+# in both vLLM and SGLang are here (data/caps.json names the parsers): "hermes" is <tool_call>{json}</tool_call>,
+# "llama3_json" a JSON call after an optional <|python_tag|>, "pythonic" a list of Python calls.
+TOOL_CALL_FORMATS = frozenset({"hermes", "llama3_json", "pythonic"})
 
 
 @dataclass(frozen=True)
 class Template:
-    """What a request must look like for this model: its chat template, and whether earlier reasoning is sent back.
-
-    v1 is deliberately small; the tool-call format is added in M5.3 with names checked against the engines."""
+    """What a request must look like for this model: its chat template, whether earlier reasoning is sent back, and
+    (v3) the format it writes tool calls in."""
     chat_template_sha256: Optional[str] = None
     reasoning_history: Optional[str] = None
+    tool_call_format: Optional[str] = None   # v3
 
     def __post_init__(self):
         h = self.chat_template_sha256
         if h is not None and not (isinstance(h, str) and len(h) == 64 and all(c in "0123456789abcdef" for c in h)):
             raise ValueError(f"Template.chat_template_sha256: expected 64 lowercase hex digits, got {h!r}")
         _closed("Template", "reasoning_history", self.reasoning_history, REASONING_HISTORY)
+        _closed("Template", "tool_call_format", self.tool_call_format, TOOL_CALL_FORMATS)
 
 
 # --- REDUCTION ------------------------------------------------------------------------------------------------

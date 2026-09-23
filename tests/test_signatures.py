@@ -84,8 +84,8 @@ def test_a_v1_fact_is_read_under_v2_but_may_not_state_a_v2_field():
            "fact Layout was written with vocabulary v1, which has no Layout.orientation (added in v2)")
 
 
-def test_the_capability_table_written_for_v1_still_reads_and_may_not_use_v2_fields():
-    assert caps.load_table().rows   # data/caps.json is still marked vocabulary v1
+def test_a_capability_table_written_for_v1_still_reads_and_may_not_use_v2_fields():
+    assert caps.load_table().rows   # data/caps.json itself is marked v3 since M5.3 (the tool parser rows)
     d = tempfile.mkdtemp()
     path = os.path.join(d, "caps.json")
     row = {"consumer": "e.linear.k", "fact": "Layout.orientation", "honours": True, "evidence": "code", "ref": "x"}

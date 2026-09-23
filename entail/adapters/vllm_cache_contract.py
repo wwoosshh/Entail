@@ -3,9 +3,12 @@
 
   hook         vllm.v1.core.kv_cache_manager.KVCacheManager.allocate_slots: the scheduler, in Python, outside
                anything CUDA graphs capture.
-  read_choice  the tokens the request needs once the step runs (computed + new + lookahead) and, per KV cache group,
-               the slots its blocks hold (blocks x block size), the block size - vLLM allocates in blocks, not tokens -
-               and whether the group is windowed (a sliding window or a chunked-attention span holds less on purpose).
+  read_choice  the tokens the request needs once the step runs - computed, just hit in the prefix cache, cached by a
+               KV connector, new, lookahead (the layout allocate_slots documents) - and, per KV cache group, the slots
+               its blocks hold (blocks x block size), the block size - vLLM allocates in blocks, not tokens - and
+               whether the group is windowed (a sliding window or a chunked-attention span holds less on purpose).
+               Until M5.3 the prefix-cache and connector tokens were left out: a request whose prompt was a cache hit
+               was refused as holding more than it needs (a repeated prompt on a server; the M5.1 runs had none).
   handles      none: a request whose blocks do not cover its tokens cannot be repaired here.
 kv_contract decides (kv_needed, with the block size as the allocation unit); windowed groups are counted as skipped.
 """
@@ -17,6 +20,7 @@ versions = "0.30.0"
 BOUNDARY = "container:vllm.allocate_slots"
 CONSUMER = "vllm.kv_cache"
 _ORIG = None
+_POSITIONAL = ()   # allocate_slots' parameters after num_new_tokens, read from its signature at install
 
 
 def hooks():
@@ -35,7 +39,8 @@ def _windowed(single):
 def read_choice(manager, request, num_new_tokens, kw):
     """(tokens the request needs, [(group, slots held or None, block size or None, windowed)])."""
     need = int(getattr(request, "num_computed_tokens", 0)) + int(num_new_tokens) \
-        + int(kw.get("num_lookahead_tokens", 0))
+        + sum(int(kw.get(k) or 0) for k in ("num_new_computed_tokens", "num_external_computed_tokens",
+                                             "num_lookahead_tokens"))
     singles = list(getattr(getattr(manager, "coordinator", None), "single_type_managers", None) or [])
     groups = []
     for g, ids in enumerate(manager.get_block_ids(request.request_id)):
@@ -62,17 +67,21 @@ def _decide(manager, request, num_new_tokens, kw):
 
 def install():
     """Wrap allocate_slots. Returns 1, or 0 if already installed."""
-    global _ORIG
+    global _ORIG, _POSITIONAL
+    import inspect
+
     from vllm.v1.core.kv_cache_manager import KVCacheManager
 
     if _ORIG is not None:
         return 0
     _ORIG = KVCacheManager.allocate_slots
+    _POSITIONAL = tuple(inspect.signature(_ORIG).parameters)[3:]
 
     def allocate_slots(self, request, num_new_tokens, *a, **kw):
         out = _ORIG(self, request, num_new_tokens, *a, **kw)
         if out is not None and core.mode() in ("load", "debug"):   # None: nothing was allocated this step
-            kv_contract.guarded(BOUNDARY, CONSUMER, _decide, self, request, num_new_tokens, kw)
+            given = dict(zip(_POSITIONAL, a), **kw) if a else kw
+            kv_contract.guarded(BOUNDARY, CONSUMER, _decide, self, request, num_new_tokens, given)
         return out
 
     KVCacheManager.allocate_slots = allocate_slots

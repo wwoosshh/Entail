@@ -31,14 +31,17 @@ def raises(fn, text):
 
 def test_packaged_table():
     t = caps.load_table()
-    assert len(t.rows) == 30 and len({(r.consumer, r.fact) for r in t.rows}) == 30
+    assert len(t.rows) == 38 and len({(r.consumer, r.fact) for r in t.rows}) == 38   # 30 in M3, 8 parsers in M5.3
     assert {r.evidence for r in t.rows} == {"measured", "code"}
-    assert sum(r.evidence == "measured" for r in t.rows) == 22
+    assert sum(r.evidence == "measured" for r in t.rows) == 23   # 22 in M3; vLLM's hermes parser in M5.3
     assert t.preferred("sglang.attention") == ("triton",)
     assert t.preferred("transformers.attention") == ("eager", "flex_attention")
     assert caps.consumed(t, "sglang.attention") == ("ModelProps.softcap", "ModelProps.sliding_window")
     assert {caps.group_of(r.consumer) for r in t.rows} == {"transformers.attention", "transformers.paged_attention",
-                                                          "sglang.attention", "vllm.attention"}
+                                                          "sglang.attention", "vllm.attention", "vllm.tool_parser",
+                                                          "sglang.tool_parser"}
+    assert caps.consumed(t, "vllm.tool_parser") == ("Template.tool_call_format",)
+    assert t.preferred("vllm.tool_parser") == ("hermes", "llama3_json", "pythonic")
     assert t.preferred("transformers.paged_attention") == ()   # no paged kernel is measured to honour softcap
     assert probes.full_name("transformers", "paged|sdpa") == "transformers.paged_attention.sdpa"
     assert all(r.ref.strip() and r.version for r in t.rows)

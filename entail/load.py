@@ -11,6 +11,8 @@ them and stops the run on a blocking one.
                        holds (fields no file states count as defaults), and the user's explicit settings
   attention(...)       ModelProps (softcap, sliding window) against the backend's capabilities (caps.json);
                        resolution: route to a backend measured to honour them
+  tool_parser(...)     Template.tool_call_format against the format the server's tool parser reads (caps.json);
+                       resolution: route to a parser measured to read the declared format (M5.3)
   tie(...)             ModelProps.tie_word_embeddings: the declaration against the checkpoint bytes and the loader
   config_keys(...)     Coverage: every key of config.json is taken by the engine's config class, or its value
                        survives in a field the class knows (the rule measured in audits/W_MORE_FACTS.md)
@@ -168,11 +170,21 @@ def _declared_in_env(path) -> List[Fact]:
     return out
 
 
+ENV_MANIFESTS = "ENTAIL_MANIFESTS"   # folders of manifests (<sha256>.json), separated by os.pathsep
+
+
+def manifest_dirs_from_env() -> List[str]:
+    """The manifest folders named in ENTAIL_MANIFESTS: engines read declarations in processes they start themselves,
+    and the environment is what reaches them (like ENTAIL_DECLARED)."""
+    return [d for d in os.environ.get(ENV_MANIFESTS, "").split(os.pathsep) if d.strip()]
+
+
 def declared(model_path: Optional[str] = None, config=None, manifest_dirs: Sequence[str] = (),
              user: Sequence[Fact] = ()) -> Declared:
     """Everything declared about one model at load. With files, the files (and a pinned manifest) are the
     declaration and the engine's config object only adds what they leave open, as defaults. Without files (a config
-    built in code), the config object is the declaration."""
+    built in code), the config object is the declaration. Manifest folders not given come from ENTAIL_MANIFESTS."""
+    manifest_dirs = list(manifest_dirs) or manifest_dirs_from_env()
     out = Declared()
     file_facts, have_files = [], False
     if model_path and os.path.exists(os.path.expanduser(model_path)):
@@ -228,6 +240,31 @@ def attention(engine: str, backend: str, facts: Declared, table=None, policy: Op
     contract = Contract(f"load:{group}", consumer, ("ModelProps",), ("ModelProps",))
     return decide(contract, {"ModelProps": tuple(candidates)}, {"ModelProps": chosen}, policy,
                   resolutions={"ModelProps": [route] if can_switch else []})
+
+
+def tool_parser(engine: str, parser: Optional[str], facts: Declared, table=None, policy: Optional[Policy] = None,
+                can_switch: bool = True) -> List[Decision]:
+    """The tool parser a server runs with against the format the model declares it writes tool calls in (market case
+    L11: a parser that reads another format returns the calls as text, or wrong). A parser reads one format whatever
+    is declared (caps.json 'reads'). Resolution: switch to a parser measured to read the declared format; with none
+    measured, a mismatch is refused. Nothing is decided when no parser runs or the model declares no format."""
+    table = table or _caps.default_table()
+    group = f"{engine}.tool_parser"
+    candidates = _projected(facts, "Template", ("Template.tool_call_format",))
+    if not parser or not candidates:
+        return []
+    best, _ = _sources.pick(candidates)
+    consumer = f"{group}.{parser}"
+    if _caps.lookup(table, consumer, "Template.tool_call_format") is None:
+        chosen = Fact("Template", None, Source("engine", f"{consumer} [not in the capability table]"),
+                      Certainty.UNKNOWN)
+    else:
+        chosen = _caps.chosen_fact(table, consumer, best)
+    route = Resolution("switch to a tool parser measured to read the declared format", "switch_tool_parser",
+                       target=lambda d, c: _caps.route(table, group, d.value, exclude=(parser,)))
+    contract = Contract(f"load:{group}", consumer, ("Template",), ("Template",))
+    return decide(contract, {"Template": tuple(candidates)}, {"Template": chosen}, policy,
+                  resolutions={"Template": [route] if can_switch else []})
 
 
 def tie(engine: str, facts: Declared, model_path: Optional[str] = None, loader_ties: Optional[bool] = None,
