@@ -1,19 +1,27 @@
-"""observe: what the data itself shows, read deterministically from the files (LIBRARY_DESIGN.md principle 5).
+"""observe: what the data itself shows, read deterministically (LIBRARY_DESIGN.md principle 5).
 
-A declaration is checked against the data before anything trusts it: tensor names, dtypes and bytes, never a
-behaviour probe. Every function returns a Fact with Source kind "data" and certainty VERIFIED, or None when the
-data does not settle the question (then nothing is claimed). Only safetensors headers and a few element bytes are
-read; no tensor is loaded and torch is not needed.
+A declaration is checked against the data before anything trusts it: tensor names, dtypes, strides and bytes, never
+a behaviour probe. What is claimed is a Fact with Source kind "data" and certainty VERIFIED; when the data does not
+settle the question nothing is claimed. From the files, only safetensors headers and a few element bytes are read;
+no tensor is loaded and torch is not needed:
 
   tie(path)            ModelProps.tie_word_embeddings: no lm_head.weight means the head is the embedding; a head
                        whose shape, dtype or sampled bytes differ from the embedding is not tied
   scale_format(path)   Layout.scale_format of block-quantized weights: the dtype of their scale tensors
+
+A value already in memory - a weight a loader has written (M4.2) - is read from the tensor it is given:
+  weight_layout(...)   Layout of a weight matrix: dtype, dense or strided, which axis holds the output features (from
+                       the layer's own sizes), and how many values one scale covers (from its scale tensor); with
+                       what it could not read, so that is reported rather than passed
+  sample_values(...)   a few values spread over a tensor, to compare after a step that declares where it moves them
+  moved(...)           which of those values are not where the declared move puts them
+These only index the tensor; torch is imported when a sample is taken, never at import.
 """
 import json
 import os
 import struct
 
-from .facts import Certainty, Fact, Layout, ModelProps, Source
+from .facts import DTYPES, Certainty, Fact, Layout, ModelProps, Source
 
 ROWS = 16    # rows sampled when comparing the head with the embedding
 COLS = 8     # elements per sampled row
@@ -124,3 +132,107 @@ def scale_format(path, kind="fp8_block"):
         fmt, how = "ue8m0", f"all {dtype}, every value a power of two"
     return Fact("Layout", Layout(kind, scale_format=fmt),
                 Source("data", f"{path}: {len(scales)} scale tensors, {how}"), Certainty.VERIFIED)
+
+
+# --- values in memory (M4.2) -------------------------------------------------------------------------------------
+
+# Element dtypes that hold one value per element, so dense and strided say all there is to say about the storage.
+# Integer tensors can hold packed values (two int4 in a byte, block bytes of q8_0): the tensor does not show which.
+ONE_VALUE_PER_ELEMENT = frozenset({"float32", "float16", "bfloat16", "float8_e4m3fn", "float8_e5m2"})
+SAMPLE_K = 16   # values sampled per weight: which tensor it is, where shape and dtype only say what kind
+
+
+def _dtype(tensor):
+    return str(getattr(tensor, "dtype", "")).replace("torch.", "")
+
+
+def _granularity(scale, out_features):
+    """How many values one scale covers, from the scale tensor's own shape (None when its shape does not say)."""
+    if scale is None:
+        return "unscaled"
+    shape = tuple(scale.shape)
+    n = 1
+    for s in shape:
+        n *= s
+    if n == 1:
+        return "per_tensor"
+    if out_features and n == out_features and sum(1 for s in shape if s != 1) == 1:
+        return "per_channel"
+    if len(shape) == 2 and out_features in shape:
+        return "per_group"
+    if len(shape) == 2:
+        return "per_block"
+    return None
+
+
+def weight_layout(weight, in_features=None, out_features=None, scale=None, where="weight"):
+    """What a weight matrix shows about its layout: (Fact or None, what could not be read).
+
+    The sizes are the layer's own (its in and out features); without them the orientation is not read. A square
+    weight does not show its orientation either (a value sample does: see moved). A shape that is neither (out, in)
+    nor (in, out) is reported, not turned into a value. `scale` is the layer's scale tensor, None when it has none."""
+    dtype = _dtype(weight)
+    if dtype not in DTYPES:
+        return None, f"{where}: dtype {dtype} is not in the vocabulary"
+    if dtype not in ONE_VALUE_PER_ELEMENT:
+        return None, f"{where}: a {dtype} tensor may hold packed values; its layout cannot be read from the tensor"
+    shape = tuple(weight.shape)
+    if len(shape) != 2:
+        return None, f"{where}: not a matrix (shape {shape})"
+    orientation, problem = None, None
+    if in_features and out_features:
+        as_out_in, as_in_out = shape == (out_features, in_features), shape == (in_features, out_features)
+        if as_out_in and not as_in_out:
+            orientation = "out_in"
+        elif as_in_out and not as_out_in:
+            orientation = "in_out"
+        elif not as_out_in:
+            problem = (f"{where}: shape {shape} is neither (out, in) = {(out_features, in_features)} nor (in, out) "
+                       f"= {(in_features, out_features)}")
+    else:
+        problem = f"{where}: the layer gives no in and out features, so the orientation was not read"
+    kind = "dense" if weight.is_contiguous() else "strided"
+    value = Layout(kind, dtype=dtype, orientation=orientation, scale_granularity=_granularity(scale, out_features))
+    scale_shape = "no scale" if scale is None else f"scale {tuple(scale.shape)}"
+    return Fact("Layout", value, Source("data", f"{where}: shape {shape}, strides {tuple(weight.stride())}, "
+                                                f"{scale_shape}"), Certainty.VERIFIED), problem
+
+
+def sample_values(tensor, k=SAMPLE_K):
+    """k values spread evenly over a tensor, as floats, with where they were taken (flat indices), its shape and
+    dtype. None for an empty tensor."""
+    import torch
+
+    n = tensor.numel()
+    if n == 0:
+        return None
+    # integer arithmetic on purpose: linspace computes in float32, and past 2**24 elements it can round an index up
+    # past the end of the tensor, which on CUDA is a device-side assert that kills the process.
+    step = max(1, n // k)
+    idx = (torch.arange(k, dtype=torch.long, device=tensor.device) * step).clamp_(max=n - 1)
+    vals = _at(tensor, idx).to(torch.float32).tolist()
+    return {"idx": idx, "vals": vals, "shape": tuple(tensor.shape), "dtype": _dtype(tensor)}
+
+
+def _at(tensor, idx):
+    """The values at flat (row-major) indices. A matrix is indexed by row and column, so a strided weight (fp8
+    keeps the transpose) is not copied whole to take sixteen values."""
+    t = tensor.detach()
+    if t.dim() == 2:
+        return t[idx // t.shape[1], idx % t.shape[1]]
+    return t.reshape(-1).index_select(0, idx)
+
+
+def moved(tensor, before, move="identity"):
+    """(values sampled, values found where `move` puts them, [what moved]) for a sample taken before a step.
+    "identity": the step leaves every value where it was, so shape, dtype and each sampled value are unchanged; a
+    tensor whose shape or dtype changed has none of them where they were."""
+    if move != "identity":
+        raise ValueError(f"observe.moved: no index mapping for the move {move!r}")
+    k = len(before["vals"])
+    if tuple(tensor.shape) != before["shape"] or _dtype(tensor) != before["dtype"]:
+        return k, 0, [f"it went from {before['shape']} {before['dtype']} to {tuple(tensor.shape)} {_dtype(tensor)}"]
+    now = _at(tensor, before["idx"]).float().tolist()
+    left = [f"flat index {int(before['idx'][i])}: {a:.6g} -> {b:.6g}"
+            for i, (a, b) in enumerate(zip(before["vals"], now)) if a != b and not (a != a and b != b)]
+    return k, k - len(left), left

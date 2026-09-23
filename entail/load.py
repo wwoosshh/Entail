@@ -20,6 +20,10 @@ them and stops the run on a blocking one.
                        the user wrote on the object (declare_on); a base lost on the way shows here
   layout(...)          Layout: the declared storage format against what the consumer reads and what the data shows
   weights_taken(...)   Coverage: the checkpoint values the loader was given against the ones that landed (fd-shift)
+  weights_written(...) Layout and Coverage at a boundary entail wraps in engine code (M4.2): what a step declares
+                       it leaves in each weight (data/signatures.json) against what the tensor shows, and the values
+                       sampled before it (sample_weights) against where it declares it moves them; a confirmed
+                       layout goes onto the weight as a fact, so it travels with the value
   model_contracts(...) tie, rotary_held and layout together, for an engine's hook once the model is built
   cannot_check(...)    a boundary the adapter could not check, reported as such (never a silent pass)
   safely(...)          runs an adapter's reading and deciding so that an error inside entail never breaks the run
@@ -36,6 +40,7 @@ from . import caps as _caps
 from . import observe as _observe
 from . import readers as _readers
 from . import record as _record
+from . import signatures as _signatures
 from . import sources as _sources
 from .contracts import RULES, Contract, Decision, Resolution, Verdict, agrees, decide
 from .facts import Certainty, Fact, ModelProps, Source
@@ -383,6 +388,163 @@ def weights_taken(engine: str, where: str, compared: int, left: Sequence[str], p
     contract = Contract(f"load:{engine}.weights", f"{engine}.loader", ("Coverage",), ("Coverage",))
     return decide(contract, {"Coverage": declared_fact}, {"Coverage": chosen}, policy)
 
+
+@dataclass(frozen=True)
+class Weight:
+    """One weight a boundary entail wraps has written, as an adapter read it (weights_written)."""
+    layer: str                          # e.g. "model.layers.0.self_attn.qkv_proj"
+    producer: str                       # engine.role.name of the step that wrote it, as in data/signatures.json
+    tensor: object = None               # the weight; None when the layer holds none
+    in_features: Optional[int] = None   # the layer's own sizes, the reference for the orientation
+    out_features: Optional[int] = None
+    scale: object = None                # the layer's scale tensor; None when it has none
+
+
+def sample_weights(weights: Sequence[Weight], table=None) -> Dict[str, dict]:
+    """Before a signed step runs: a few values of every weight whose producer declares where the step moves them
+    (layer -> sample), for weights_written to compare afterwards."""
+    table = table or _signatures.default_table()
+    out = {}
+    for w in weights:
+        sig = table.lookup(w.producer)
+        if sig is not None and sig.moves and w.tensor is not None:
+            s = _observe.sample_values(w.tensor)
+            if s is not None:
+                out[w.layer] = s
+    return out
+
+
+def weights_written(boundary: str, weights: Sequence[Weight], before: Optional[Dict[str, dict]] = None,
+                    policy: Optional[Policy] = None, table=None) -> List[Decision]:
+    """What a step entail wraps left in each weight, against the step's signature (data/signatures.json; M4.2).
+
+    Per weight, with the reading step (the producer's kernel) as the consumer:
+      Layout    the signature against what the tensor shows (observe.weight_layout): the data contradicting it is
+                refused (policy on_false_declaration); with use_data, a strided weight the kernel reads packed is
+                made contiguous (handle "layout.contiguous", given every layer it repairs)
+      Coverage  the values sampled before the step (sample_weights) against where the signature says it moves them
+    A confirmed layout goes onto the weight as a fact whose source is the signature, filled with what the data adds,
+    so it travels with the value. Passes are counted, one decision per producer and fact (a model has hundreds of
+    weights); anything else is one decision per producer, fact, verdict and rule, naming the first weights and how
+    many there are (a resolution's target is every weight it repairs). A producer with no signature, a weight that
+    cannot be read, or one with no sample is reported (cannot_check), never passed; producers the table lists under
+    not_values are left out, with their reason in the table."""
+    from .boundaries import CONVERTERS   # the value converters of code boundaries, offered per call (M4.1 (3))
+    from .core import tag
+    from .coverage import Coverage
+
+    table = table or _signatures.default_table()
+    policy = policy or Policy()
+    before = before or {}
+    found, passed, unchecked = [], {}, {}   # (layer, decision); (producer, name) -> passes; (..., why) -> layers
+
+    def not_checked(producer, name, why, layer):
+        unchecked.setdefault((producer, name, why), []).append(layer)
+
+    for w in weights:
+        sig = table.lookup(w.producer)
+        if sig is None:
+            if table.why_not(w.producer) is None and w.tensor is not None:
+                not_checked(w.producer, "Layout", f"{w.producer} has no signature in data/signatures.json, so what "
+                                                  f"its step wrote was not checked", w.layer)
+            continue
+        if w.tensor is None:
+            not_checked(w.producer, "Layout", f"the layer holds no {sig.value}", w.layer)
+            continue
+        where = f"{w.layer}.{sig.value}"
+        decisions = []
+        declared, taken = sig.declared("Layout"), sig.taken("Layout")
+        if declared is not None:
+            seen, problem = _observe.weight_layout(w.tensor, w.in_features, w.out_features, w.scale, where)
+            contract = Contract(boundary, w.producer, ("Layout",))
+            if seen is None:
+                not_checked(w.producer, "Layout", problem, w.layer)
+            elif problem and w.in_features and w.out_features and declared.value.orientation is not None:
+                # the shape fits neither orientation: nothing the declaration could mean, and nothing to convert
+                decisions.append(Decision(contract, "Layout", Verdict.REFUSED, RULES["false_declaration"],
+                                          declared=declared, chosen=taken, observed=seen, blocking=True,
+                                          note=f"{w.layer}: {problem}"))
+            else:
+                if problem:
+                    not_checked(w.producer, "Layout", problem, w.layer)
+                offered = [Resolution(r.name, r.handle, r.when, target=lambda d, c, layer=w.layer: layer)
+                           for r, _ in CONVERTERS.get("Layout", [])]
+                # the kernel takes what the signature states, and whatever the weight holds where it states nothing
+                # (the model's dtype, for an unquantised weight): as in `layout`, the consumer's side is filled too
+                taken = replace(taken, value=type(taken.value)(**{
+                    f.name: getattr(taken.value, f.name) if getattr(taken.value, f.name) is not None
+                    else getattr(seen.value, f.name) for f in fields(taken.value)}))
+                (d,) = decide(contract, {"Layout": declared}, {"Layout": taken}, policy, observed={"Layout": seen},
+                              resolutions={"Layout": offered})
+                decisions.append(d)
+                if d.verdict is Verdict.PASS:
+                    tag(w.tensor, d.declared)
+                elif d.verdict is Verdict.RESOLVED:
+                    tag(w.tensor, replace(taken, source=Source("boundary", f"{taken.source.where} ({d.resolution})")))
+        if sig.moves:
+            sample = before.get(w.layer)
+            if sample is None:
+                not_checked(w.producer, "Coverage", f"no values were sampled before {sig.writes}, so where it moved "
+                                                    f"them was not checked", w.layer)
+            else:
+                k, kept, left = _observe.moved(w.tensor, sample, sig.moves)
+                promised = Fact("Coverage", Coverage(k, k, ()),
+                                Source("boundary", f"{w.producer}.{sig.writes}.moves {sig.moves}"), Certainty.DECLARED)
+                wanted = Fact("Coverage", Coverage(k, k, ()),
+                              Source("boundary", f"{w.producer}.{sig.reads}.takes.{sig.value}"), Certainty.DECLARED)
+                seen = Fact("Coverage", Coverage(k, kept, tuple(left)),
+                            Source("data", f"{where}: {k} values sampled before {sig.writes}"), Certainty.VERIFIED)
+                (d,) = decide(Contract(boundary, w.producer, ("Coverage",)), {"Coverage": promised},
+                              {"Coverage": wanted}, policy, observed={"Coverage": seen})
+                decisions.append(d)
+        for d in decisions:
+            if d.verdict is Verdict.PASS:
+                passed[(w.producer, d.name)] = passed.get((w.producer, d.name), 0) + 1
+            else:
+                found.append((w.layer, d))
+    summary = []
+    for (producer, name), n in sorted(passed.items()):
+        sig = table.lookup(producer)
+        if name == "Layout":
+            declared, note = sig.declared("Layout"), f"{n} weight(s), each checked against its data"
+        else:
+            declared = None
+            note = f"{n} weight(s): the values sampled before {sig.writes} are where '{sig.moves}' puts them"
+        summary.append(Decision(Contract(boundary, producer, (name,)), name, Verdict.PASS, RULES["match"],
+                                declared=declared, note=note))
+    for (producer, name, why), layers in sorted(unchecked.items()):
+        summary.append(cannot_check(boundary, producer, name, f"{len(layers)} weight(s) (first: {layers[0]}): {why}",
+                                    policy))
+    groups = {}
+    for layer, d in found:
+        groups.setdefault((d.contract.consumer, d.name, d.verdict, d.rule, d.handle, d.blocking), []).append((layer, d))
+    for members in groups.values():
+        layers, first = [m[0] for m in members], members[0][1]
+        shown = "; ".join(f"{layer}: {_written_detail(d)}" for layer, d in members[:3])
+        more = f"; and {len(members) - 3} more" if len(members) > 3 else ""
+        kw = dict(note=f"{len(members)} weight(s): {shown}{more}")
+        if first.verdict is Verdict.RESOLVED:   # one repair, carried out on every weight it names
+            name = next(r.name for r, _ in CONVERTERS.get(first.name, []) if r.handle == first.handle)
+            kw.update(target=tuple(layers), resolution=f"{name} ({len(layers)} weight(s))")
+        summary.append(replace(first, **kw))
+    return summary
+
+
+def _written_detail(d: Decision) -> str:
+    """What one weight showed, for the note of a grouped decision: the fields where the data and the signature
+    differ, the values that moved, or the reason the decision already gives."""
+    o = d.observed.value if d.observed is not None else None
+    if d.name == "Coverage" and o is not None:
+        return f"{o.total - o.taken} of {o.total} sampled values moved (first: {o.left[0] if o.left else '?'})"
+    if d.note:
+        return d.note.split(": ", 1)[-1]
+    ref = d.chosen if d.verdict is Verdict.RESOLVED else d.declared
+    if o is None or ref is None or ref.value is None:
+        return d.rule
+    diff = [f"{f.name} {getattr(ref.value, f.name)} -> {getattr(o, f.name)}" for f in fields(o)
+            if getattr(ref.value, f.name) is not None and getattr(o, f.name) is not None
+            and getattr(ref.value, f.name) != getattr(o, f.name)]
+    return ", ".join(diff) or d.rule
 
 def rotary_held(engine: str, facts: Declared, config, policy: Optional[Policy] = None) -> List[Decision]:
     """The RoPE the model will be built with - the config object the engine holds - against the declared one: the

@@ -26,6 +26,8 @@ def test_closed_sets_reject_with_the_reason():
         (lambda: Layout("fp8_block", scale_format="fp64"), "Layout.scale_format: unknown value 'fp64'"),
         (lambda: Layout("dense", dtype="float7"), "Layout.dtype: unknown value 'float7'"),
         (lambda: Layout("dense", block=(0,)), "Layout.block: expected a tuple of positive ints, got (0,)"),
+        (lambda: Layout("dense", orientation="sideways"), "Layout.orientation: unknown value 'sideways'"),
+        (lambda: Layout("dense", scale_granularity="per_row"), "Layout.scale_granularity: unknown value 'per_row'"),
         (lambda: Quantized("float7"), "Quantized.dtype: unknown value 'float7'"),
         (lambda: Quantized("float8_e4m3fn", scale=0), "Quantized.scale: expected > 0, got 0"),
         (lambda: Positions("relative"), "Positions.frame: unknown value 'relative'"),
@@ -72,7 +74,7 @@ def test_every_name_has_a_class_and_all_ten_kinds_are_covered():
     assert set(VOCABULARY.values()) == FACT_KINDS, set(VOCABULARY.values()) ^ FACT_KINDS
     for name in VOCABULARY:
         assert vocabulary_class(name).__name__ == name
-    raises(lambda: vocabulary_class("Colour"), "unknown fact name 'Colour'; vocabulary v1 has")
+    raises(lambda: vocabulary_class("Colour"), "unknown fact name 'Colour'; vocabulary v2 has")
 
 
 def test_the_envelope_checks_itself():
@@ -81,8 +83,9 @@ def test_the_envelope_checks_itself():
     assert f.kind == "PROPERTY" and f.vocab_version == VOCAB_VERSION and str(src).startswith("file: ")
     Fact("Prediction", None, src, Certainty.UNKNOWN)
     raises(lambda: Fact("Colour", Prediction("v"), src, Certainty.DECLARED), "unknown fact name 'Colour'")
-    raises(lambda: Fact("Prediction", Prediction("v"), src, Certainty.DECLARED, vocab_version=2),
-           "fact Prediction was written with vocabulary v2; this library reads v1")
+    raises(lambda: Fact("Prediction", Prediction("v"), src, Certainty.DECLARED, vocab_version=9),
+           "fact Prediction was written with vocabulary v9; this library reads v1, v2")
+    assert Fact("Prediction", Prediction("v"), src, Certainty.DECLARED, vocab_version=1).vocab_version == 1
     raises(lambda: Fact("Prediction", Prediction("v"), src, "declared"), "Fact.certainty: expected a Certainty")
     raises(lambda: Fact("Prediction", None, src, Certainty.DECLARED),
            "a fact has no value exactly when its certainty is unknown (value None, certainty declared)")

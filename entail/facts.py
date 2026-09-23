@@ -1,12 +1,17 @@
-"""Fact vocabulary v1 and the fact envelope (LIBRARY_DESIGN.md 4.1 and 6; ROADMAP M1.1).
+"""Fact vocabulary v2 and the fact envelope (LIBRARY_DESIGN.md 4.1 and 6; ROADMAP M1.1, M4.2).
 
 A fact class is a small frozen dataclass. Every field that names a kind of thing takes its value from a closed set,
 and a value outside the set is an error (principle 1): a new kind of layout, prediction or rope type is added here,
 with a vocabulary version bump, never passed through silently. Numeric fields are checked for type and range.
 
-The classes keep the names and fields they had in v0, so existing code keeps working; what v1 adds is the checks,
+The classes keep the names and fields they had in v0, so existing code keeps working; what v1 added is the checks,
 six new classes (Rotary, LatentScale, Template, Epoch, Assumed, Origin), and the envelope `Fact`, which says where a
 fact came from and how sure the library is of it.
+
+v2 (M4.2) adds two optional fields to Layout, for the weights a loader repacks: `orientation` (which axis holds the
+output features) and `scale_granularity` (how many values one scale covers). Nothing else changed, so a v1 fact is a
+v2 fact with those two fields open, and a fact written with v1 is still read (READABLE_VERSIONS); it may not state a
+field v1 did not have (ADDED_IN).
 
 A consumer states what it accepts either as one fact (must be equal), a tuple of facts (closed set: must be one of
 them) or a predicate (callable returning bool); see core.boundary.
@@ -15,7 +20,9 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Optional, Tuple
 
-VOCAB_VERSION = 1
+VOCAB_VERSION = 2
+READABLE_VERSIONS = frozenset({1, 2})   # a later version only adds optional fields; what it adds is in ADDED_IN
+ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2}
 
 
 def _closed(cls_name, field, value, allowed, optional=True):
@@ -43,16 +50,23 @@ LAYOUT_PACKINGS = frozenset({"interleaved", "split"})
 SCALE_FORMATS = frozenset({"fp32", "bf16", "fp16", "ue8m0", "e4m3"})
 DTYPES = frozenset({"float32", "float16", "bfloat16", "float8_e4m3fn", "float8_e5m2", "int8", "uint8", "int4",
                     "uint4"})
+# v2: a weight matrix is (out_features, in_features) - what torch.nn.functional.linear reads - or the transpose.
+ORIENTATIONS = frozenset({"out_in", "in_out"})
+# v2: how many values one scale covers. "unscaled": the stored values are used as they are.
+SCALE_GRANULARITIES = frozenset({"unscaled", "per_tensor", "per_channel", "per_group", "per_block"})
 
 
 @dataclass(frozen=True)
 class Layout:
-    """How a value is stored: its kind, packing and scale format."""
+    """How a value is stored: its kind, packing and scale format; for a weight matrix, which axis is which and how
+    many values share a scale (v2)."""
     kind: str
     dtype: Optional[str] = None
     block: Optional[Tuple[int, ...]] = None
     packing: Optional[str] = None       # "interleaved" | "split" (q8_0)
     scale_format: Optional[str] = None  # "fp32" | "ue8m0" | ...
+    orientation: Optional[str] = None        # v2: "out_in" | "in_out"
+    scale_granularity: Optional[str] = None  # v2: "unscaled" | "per_tensor" | "per_channel" | ...
 
     def __post_init__(self):
         if self.kind not in LAYOUT_KINDS:
@@ -60,6 +74,8 @@ class Layout:
         _closed("Layout", "dtype", self.dtype, DTYPES)
         _closed("Layout", "packing", self.packing, LAYOUT_PACKINGS)
         _closed("Layout", "scale_format", self.scale_format, SCALE_FORMATS)
+        _closed("Layout", "orientation", self.orientation, ORIENTATIONS)
+        _closed("Layout", "scale_granularity", self.scale_granularity, SCALE_GRANULARITIES)
         if self.block is not None and not (isinstance(self.block, tuple) and self.block
                                            and all(isinstance(b, int) and not isinstance(b, bool) and b > 0
                                                    for b in self.block)):
@@ -358,9 +374,13 @@ class Fact:
     def __post_init__(self):
         if self.name not in VOCABULARY:
             raise ValueError(f"unknown fact name {self.name!r}; vocabulary v{VOCAB_VERSION} has {sorted(VOCABULARY)}")
-        if self.vocab_version != VOCAB_VERSION:
+        if self.vocab_version not in READABLE_VERSIONS:
             raise ValueError(f"fact {self.name} was written with vocabulary v{self.vocab_version}; "
-                             f"this library reads v{VOCAB_VERSION}")
+                             f"this library reads v{', v'.join(str(v) for v in sorted(READABLE_VERSIONS))}")
+        for (name, field), version in ADDED_IN.items():
+            if name == self.name and self.vocab_version < version and getattr(self.value, field, None) is not None:
+                raise ValueError(f"fact {self.name} was written with vocabulary v{self.vocab_version}, which has no "
+                                 f"{name}.{field} (added in v{version})")
         if not isinstance(self.certainty, Certainty):
             raise ValueError(f"Fact.certainty: expected a Certainty, got {self.certainty!r}")
         if not isinstance(self.source, Source):

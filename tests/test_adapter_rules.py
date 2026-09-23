@@ -17,10 +17,8 @@ import os
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADAPTERS = os.path.join(os.path.dirname(HERE), "entail", "adapters")
 V2 = ("transformers_adapter", "transformers_config", "sglang_adapter", "vllm_attention", "vllm_loader",
-      "vllm_source", "rope_alias")
+      "vllm_source", "rope_alias", "vllm_layout")
 LEGACY = {   # not yet on the v2 interface: where they move, and why they have not yet
-    "vllm_layout": "M4.2: weight orientation and scale granularity are not in vocabulary v1; the check becomes a "
-                   "boundary signature on the loader",
     "cache_contract": "M5.1: the KV rules move to the core, the engines' translations stay",
     "vllm_cache_contract": "M5.1", "sglang_cache_contract": "M5.1",
     "comfyui": "M6.2", "diffusers_adapter": "M6.2",

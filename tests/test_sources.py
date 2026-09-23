@@ -9,8 +9,8 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 from entail import gguf, sources  # noqa: E402
-from entail.facts import (PREDICTION_KINDS, ROPE_TYPES, VOCABULARY, Certainty, LatentScale, Layout,  # noqa: E402
-                          ModelProps, Prediction, Rotary, Template)
+from entail.facts import (PREDICTION_KINDS, ROPE_TYPES, VOCAB_VERSION, VOCABULARY, Certainty,  # noqa: E402
+                          LatentScale, Layout, ModelProps, Prediction, Rotary, Template)
 from entail.readers import ALIASES, sha256_text  # noqa: E402
 
 
@@ -63,7 +63,8 @@ def test_hf_config_gemma2_qwen3_llama32():
         "factor": 32.0, "high_freq_factor": 4.0, "low_freq_factor": 1.0, "original_max_position_embeddings": 8192,
         "rope_type": "llama3"}}}))
     assert got == {("Rotary", Rotary("llama3", 500000.0, 32.0, 8192))}, got
-    assert any("RoPE keys ['high_freq_factor', 'low_freq_factor'] are not in vocabulary v1" in p for p in r.problems)
+    assert any(f"RoPE keys ['high_freq_factor', 'low_freq_factor'] are not in vocabulary v{VOCAB_VERSION}" in p
+               for p in r.problems)
 
 
 def test_hf_config_rope_parameters_and_the_old_names():
@@ -80,7 +81,7 @@ def test_hf_config_rope_parameters_and_the_old_names():
     assert not [f for f in r.facts if f.name == "Rotary"]
     assert any("RoPE set per layer type (['full_attention', 'sliding_attention'])" in p for p in r.problems)
     _, r = facts_of(folder({"config.json": {"rope_scaling": {"rope_type": "mrope"}, "rope_theta": 1e6}}))
-    assert any("rope type 'mrope' is not in vocabulary v1" in p for p in r.problems), r.problems
+    assert any(f"rope type 'mrope' is not in vocabulary v{VOCAB_VERSION}" in p for p in r.problems), r.problems
 
 
 def test_hf_config_nested_text_config_and_bad_values():
@@ -98,9 +99,11 @@ def test_hf_config_quantization_layouts():
          Layout("fp8_block", dtype="float8_e4m3fn", block=(128, 128), scale_format="ue8m0"), None),
         ({"quant_method": "awq", "bits": 4, "group_size": 128}, Layout("int4_packed", block=(128,)), None),
         ({"quant_method": "gptq", "bits": 4, "group_size": -1}, Layout("int4_packed"), None),
-        ({"quant_method": "fp8", "fmt": "e4m3"}, None, "per-tensor fp8 (no weight_block_size) is not in vocabulary v1"),
-        ({"quant_method": "gptq", "bits": 8, "group_size": 128}, None, "gptq with 8 bits is not in vocabulary v1"),
-        ({"quant_method": "bitsandbytes"}, None, "quantization method 'bitsandbytes' is not in vocabulary v1"),
+        ({"quant_method": "fp8", "fmt": "e4m3"}, None, "per-tensor fp8 (no weight_block_size) is not read as a Layout"),
+        ({"quant_method": "gptq", "bits": 8, "group_size": 128}, None,
+         f"gptq with 8 bits is not in vocabulary v{VOCAB_VERSION}"),
+        ({"quant_method": "bitsandbytes"}, None,
+         f"quantization method 'bitsandbytes' is not in vocabulary v{VOCAB_VERSION}"),
     ]
     for qc, layout, problem in cases:
         got, r = facts_of(folder({"config.json": {"quantization_config": qc}}))
@@ -132,7 +135,7 @@ def test_diffusers_folder():
                               "vae/config.json": {"scaling_factor": 1.5305, "shift_factor": 0.0609}}))
     assert got == {("Prediction", Prediction("flow")), ("LatentScale", LatentScale(1.5305, 0.0609))}, got
     _, r = facts_of(folder({"scheduler/scheduler_config.json": {"prediction_type": "velocity"}}))
-    assert not r.facts and "prediction type 'velocity' is not in vocabulary v1" in r.problems[0]
+    assert not r.facts and f"prediction type 'velocity' is not in vocabulary v{VOCAB_VERSION}" in r.problems[0]
 
 
 def test_safetensors_header():
@@ -145,7 +148,7 @@ def test_safetensors_header():
     _, conflicts = sources.merge(r.facts)
     assert len(r.facts) == 2 and len(conflicts) == 1   # the file contradicts itself: both statements are kept
     _, r = facts_of(safetensors(["x"], {"modelspec.prediction_type": "velocity"}))
-    assert not r.facts and "prediction type 'velocity' is not in vocabulary v1" in r.problems[0]
+    assert not r.facts and f"prediction type 'velocity' is not in vocabulary v{VOCAB_VERSION}" in r.problems[0]
     got, r = facts_of(safetensors(["lora_unet_a.lora_down.weight"], {"ss_base_model_version": "sdxl_base_v1-0"}))
     assert got == set() and not r.problems
     fd, bad = tempfile.mkstemp(suffix=".safetensors")

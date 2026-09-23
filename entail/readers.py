@@ -11,7 +11,7 @@ Rules every reader follows:
   - A fact is emitted only for what the artifact states; nothing is filled in from defaults.
   - Every fact names the file and the keys it was read from (Source.where), so the ledger can say where a value
     came from. Two statements of the same thing are two facts; `sources.merge` finds a disagreement.
-  - A stated value that vocabulary v1 cannot represent (a rope type it does not know, per-layer RoPE, a
+  - A stated value that the vocabulary cannot represent (a rope type it does not know, per-layer RoPE, a
     quantization method it has no layout for) becomes a problem in the result, never a silent omission.
   - Key names and value spellings come from data/aliases.json.
 """
@@ -194,7 +194,8 @@ def read_hf_dict(cfg, label, source_kind="config", from_object=False):
                 _emit(r, "Layout", lambda: Layout("fp8_block", dtype=_VALUES["fp8_format"].get(fmt),
                                                   block=tuple(block), scale_format=scale), source_kind, where)
             else:
-                r.problems.append(f"{where}: per-tensor fp8 (no weight_block_size) is not in vocabulary v1")
+                r.problems.append(f"{where}: per-tensor fp8 (no weight_block_size) is not read as a Layout; only "
+                                  f"block-scaled fp8 is (LIBRARY_DESIGN.md 11, M4.2 (3))")
         elif method in ("awq", "gptq"):
             _, bits = _first(qc, qk["bits"])
             _, gs = _first(qc, qk["group_size"])
@@ -202,9 +203,9 @@ def read_hf_dict(cfg, label, source_kind="config", from_object=False):
                 block = (gs,) if isinstance(gs, int) and gs > 0 else None
                 _emit(r, "Layout", lambda: Layout("int4_packed", block=block), source_kind, where)
             else:
-                r.problems.append(f"{where}: {method} with {bits} bits is not in vocabulary v1")
+                r.problems.append(f"{where}: {method} with {bits} bits is not in vocabulary v{VOCAB_VERSION}")
         else:
-            r.problems.append(f"{where}: quantization method {method!r} is not in vocabulary v1")
+            r.problems.append(f"{where}: quantization method {method!r} is not in vocabulary v{VOCAB_VERSION}")
     return r
 
 
@@ -248,7 +249,8 @@ class HfTemplate:
                     _emit(r, "Template", lambda: Template(sha256_text(named["default"])), "config", where + "[default]")
                 others = sorted(n for n in named if n != "default")
                 if others:
-                    r.problems.append(f"{where}: named templates {others} besides 'default' are not in vocabulary v1")
+                    r.problems.append(f"{where}: named templates {others} besides 'default' are not in "
+                                      f"vocabulary v{VOCAB_VERSION}")
                 if "default" not in named:
                     r.problems.append(f"{where}: a list of templates without a 'default' one")
         for name in ALIASES["Template"]["hf_files"]["chat_template"]:
@@ -281,7 +283,7 @@ class DiffusersConfig:
             if kind is None and any(m in str(cfg.get("_class_name", "")) for m in sk["flow_class_marker"]):
                 kind, used = "flow", ["_class_name"]
             if kind is None and key:
-                r.problems.append(f"{sched}#{key}: prediction type {raw!r} is not in vocabulary v1")
+                r.problems.append(f"{sched}#{key}: prediction type {raw!r} is not in vocabulary v{VOCAB_VERSION}")
             zkey, z = _first(cfg, sk["zsnr"])
             if kind:
                 zsnr = z if isinstance(z, bool) else None
@@ -342,7 +344,8 @@ class SafetensorsMeta:
             if kind:
                 statements.append((kind, f"__metadata__.{key}"))
             else:
-                r.problems.append(f"{path}#__metadata__.{key}: prediction type {raw!r} is not in vocabulary v1")
+                r.problems.append(f"{path}#__metadata__.{key}: prediction type {raw!r} is not in vocabulary "
+                                  f"v{VOCAB_VERSION}")
         key, raw = _first(meta, mk["v_flag"])
         if key and flag(raw) is not None:
             statements.append(("v" if flag(raw) else "eps", f"__metadata__.{key}"))

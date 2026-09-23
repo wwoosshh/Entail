@@ -24,7 +24,7 @@ import os
 from dataclasses import dataclass, fields
 from typing import Dict, List, Optional, Tuple
 
-from .facts import VOCAB_VERSION, Certainty, Fact, Source, vocabulary_class
+from .facts import ADDED_IN, READABLE_VERSIONS, VOCAB_VERSION, Certainty, Fact, Source, vocabulary_class
 
 EVIDENCE = ("measured", "code", "documented")
 # How sure a consumer's use is, by the weakest evidence behind it (Certainty, LIBRARY_DESIGN.md principle 3).
@@ -146,9 +146,14 @@ def load_table(path: Optional[str] = None) -> Table:
         data = json.load(f)
     if data.get("schema") != SCHEMA:
         raise ValueError(f"caps: {path}: schema {data.get('schema')!r}, this library reads {SCHEMA}")
-    if data.get("vocab_version") != VOCAB_VERSION:
+    if data.get("vocab_version") not in READABLE_VERSIONS:
         raise ValueError(f"caps: {path}: written for vocabulary v{data.get('vocab_version')}, this library reads "
-                         f"v{VOCAB_VERSION}")
+                         f"v{', v'.join(str(v) for v in sorted(READABLE_VERSIONS))} (v{VOCAB_VERSION} is current)")
+    for row in data.get("rows", []):
+        added = ADDED_IN.get(tuple(str(row.get("fact", "")).split(".", 1)))
+        if added is not None and data["vocab_version"] < added:
+            raise ValueError(f"caps: {path}: {row['fact']} is not in vocabulary v{data['vocab_version']} "
+                             f"(added in v{added})")
     return from_rows(data.get("rows", []), data.get("prefer", {}), path)
 
 

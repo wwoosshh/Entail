@@ -1,0 +1,24 @@
+{
+ "schema": 1,
+ "vocab_version": 2,
+ "about": "Signatures of the boundaries entail wraps in engine code (LIBRARY_DESIGN.md 4.6; ROADMAP M4.2). One row per producer, named engine.role.name: the step `writes` leaves the value `value` holding these facts, the step `reads` takes it so, and `moves` says where the step puts the values it was given. evidence: measured (healthy runs and planted defects on the engine) or code (read, not run).",
+ "rows": [
+  {"producer": "vllm.quant_method.UnquantizedLinearMethod",
+   "writes": "process_weights_after_loading", "reads": "apply", "value": "weight",
+   "facts": {"Layout": {"kind": "dense", "orientation": "out_in"}},
+   "moves": "identity",
+   "evidence": "measured", "version": "0.30.0",
+   "ref": "apply calls torch.nn.functional.linear, which reads (out, in); the weight is final when the checkpoint has been read. entail/audits/D_LEDGER.md results 3, 4, 4-1: 144 layers of a healthy Qwen3-4B pass; rows rolled by one, transposed weights and strided views are caught"},
+  {"producer": "vllm.quant_method.Fp8PerTensorOnlineLinearMethod",
+   "writes": "process_weights_after_loading", "reads": "apply", "value": "weight",
+   "facts": {"Layout": {"kind": "strided", "dtype": "float8_e4m3fn", "orientation": "in_out",
+                        "scale_granularity": "per_tensor"}},
+   "moves": "identity",
+   "evidence": "measured", "version": "0.30.0",
+   "ref": "quantization/online/fp8.py quantises while the checkpoint is read and stores qweight.t() - shape (in, out), strides (1, in) - with one scale; its kernel reads it so. entail/audits/D_LEDGER.md results 3, 4-1: 144 layers of a healthy Qwen3-4B pass (a first version that declared it dense produced 144 complaints on a healthy server)"}
+ ],
+ "not_values": {
+  "vllm.quant_method.UnquantizedEmbeddingMethod": "an embedding table: its sizes are vocabulary and hidden size, not in and out features",
+  "vllm.quant_method.Fp8KVCacheMethod": "holds the KV cache scales of an attention layer; there is no weight"
+ }
+}
