@@ -619,8 +619,15 @@ def rotary_held(engine: str, facts: Declared, config, policy: Optional[Policy] =
             "the config the engine holds has no RoPE parameters vocabulary v1 can read"
         return [cannot_check(boundary, consumer, "Rotary", why, policy)]
     contract = Contract(boundary, consumer, ("Rotary",), ("Rotary",))
-    return decide(contract, {"Rotary": tuple(declared_rot)},
-                  {"Rotary": replace(held[0], certainty=Certainty.VERIFIED)}, policy)
+    out = decide(contract, {"Rotary": tuple(declared_rot)},
+                 {"Rotary": replace(held[0], certainty=Certainty.VERIFIED)}, policy)
+    # a declared key the vocabulary cannot carry is not compared: said here, where the RoPE is decided, rather than
+    # left in the readers' problems (M9.1, S1: llama3's frequency factors, before v4)
+    left = [p for p in facts.problems if "RoPE keys" in p]
+    if left and declared_rot:
+        out = list(out) + [cannot_check(boundary, consumer, "Rotary", "; ".join(left) + "; so they are not compared",
+                                        policy)]
+    return out
 
 
 def model_contracts(engine: str, model_path: Optional[str], config, loader_ties: Optional[bool],

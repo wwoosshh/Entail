@@ -12,7 +12,8 @@ keeps the numbers, as a KvExtent; the rules are here, once:
   kv_needed   the slots held are the slots the tokens need: equal, or within one allocation unit when the engine
               allocates in units (vLLM blocks). A sliding window is allowed to hold less
   kv_shrank   nothing held shrank since the last check of the same sequence, unless a window caps it
-  kv_layers   the layers of one cache agree on their length within a round of updates (a window may be shorter)
+  kv_layers   the layers of one cache agree on their length within a round of updates: every layer a round updates
+              holds what the first one it updated holds (a window may be shorter)
   kv_request  after a request, every layer of its cache holds the tokens the request wrote (checked once, outside
               any captured region: on a compiled path that is the only place a check may live)
 
@@ -102,6 +103,12 @@ def _evaluate(e: KvExtent):
 
 
 _stats, _tick, _passed = _tally.counts, _tally.tick, _tally.passed
+_KEYS: Dict[str, tuple] = {}   # boundary -> its (boundary, rule) keys for kv_needed, kv_shrank, kv_layers
+
+
+def _keys(boundary):
+    k = _KEYS[boundary] = ((boundary, "kv_needed"), (boundary, "kv_shrank"), (boundary, "kv_layers"))
+    return k
 
 
 def _side(where, text, value):
@@ -181,7 +188,9 @@ def _books(owner):
         _BOOKS = ByObject()
     books = _BOOKS.get(owner)
     if books is None:
-        books = {"lengths": {}, "counts": {}, "windowed": set(), "device": {}}
+        # lengths: layer -> its length after its last update; prev: the layer updated last (a layer at or before it
+        # starts a new round); target: what the layers without a window hold in this round
+        books = {"lengths": {}, "windowed": set(), "device": {}, "prev": -1, "target": None}
         if not _BOOKS.set(owner, books):
             return None   # an owner that takes no weak reference: nothing is remembered for it
     return books
@@ -197,40 +206,56 @@ def grew(boundary: str, consumer: str, owner, where: str, layer: int, before, af
 
     kv_needed: after == before + added (a window may hold less); kv_shrank: nothing was dropped since this layer's
     last update (its length then, plus what was added now); kv_layers: the layers of this cache - not of any other -
-    hold {after, after - added} in the middle of a round. Lengths kept in device tensors are compared on the device
-    and read by flush(). This runs per layer per step: on the way that holds, no text and no fact is made."""
-    books = _books(owner)
-    if _is_tensor(before) or _is_tensor(after):
-        _defer(boundary, books, layer, before, after, added)
-        return
-    after, needed = int(after), int(before) + added
-    last = None if books is None else books["lengths"].get(layer)
+    that a round updates hold what the first of them holds. Lengths kept in device tensors are compared on the device
+    and read by flush(). This runs per layer per step, and in an eager decode the host's time is the step's time:
+    when every rule holds - nearly always - the passes go straight into the tallies, with no list, text or fact made
+    (M9.3; before, this way cost 1.041x on Qwen3-4B). The rules themselves are _rules, on the way that breaks."""
+    entry = None if _BOOKS is None else _BOOKS._d.get(id(owner))   # _books(owner), without two calls
+    books = entry[1] if entry is not None and entry[0]() is owner else _books(owner)
+    if type(after) is not int or type(before) is not int:
+        if _is_tensor(before) or _is_tensor(after):
+            _defer(boundary, books, layer, before, after, added)
+            return
+        after, before = int(after), int(before)
+    needed = before + added
+    lengths = None if books is None else books["lengths"]
+    last = None if lengths is None else lengths.get(layer)
     previous = None if last is None else last + added
-    broken, checked = _rules(after, needed, window=window, previous=previous)
-    _stats(boundary)["checks"] += 1
-    _passed(boundary, [r for r in checked if r not in {b[0] for b in broken}] if broken else checked)
-    _tick(boundary)
-    if broken:
+    capped = window is not None and needed > window   # a window caps on purpose: no length rule applies
+    keys = _KEYS.get(boundary) or _keys(boundary)
+    if capped or (after == needed and (previous is None or after >= previous)):
+        s = STATS.get(boundary) or _stats(boundary)
+        s["checks"] += 1
+        if not capped:
+            PASSES[keys[0]] = PASSES.get(keys[0], 0) + 1
+            if previous is not None:
+                PASSES[keys[1]] = PASSES.get(keys[1], 0) + 1
+        n = s["checks"] + s["skipped"] + s["deferred"]
+        if n & (n - 1) == 0:   # tally.tick, inline
+            _tally.write_summary({boundary: _tally.stats(boundary)})
+    else:
+        broken, checked = _rules(after, needed, window=window, previous=previous)
+        _stats(boundary)["checks"] += 1
+        _passed(boundary, [r for r in checked if r not in {b[0] for b in broken}])
+        _tick(boundary)
         _refuse(boundary, consumer, f"{where} {type(owner).__name__} layer {layer}",
                 KvExtent(held=after, needed=needed, window=window, previous=previous), broken, owner=owner)
     if books is None:
         return
-    books["lengths"][layer] = after
+    lengths[layer] = after
+    if layer <= books["prev"]:   # a new round of updates
+        books["target"] = None
+    books["prev"] = layer
     if window is not None:
         books["windowed"].add(layer)
         return   # a window caps on purpose; it takes no part in the agreement
-    counts = books["counts"]   # length -> how many of this cache's layers hold it
-    if last is not None:
-        if counts.get(last, 0) > 1:
-            counts[last] -= 1
-        else:
-            counts.pop(last, None)
-    counts[after] = counts.get(after, 0) + 1
-    if all(n == after or n == after - added for n in counts):
-        _passed(boundary, ["kv_layers"])
+    target = books["target"]
+    if target is None:           # the first layer without a window this round: what the others must hold
+        books["target"] = after
+    if target is None or after == target:
+        PASSES[keys[2]] = PASSES.get(keys[2], 0) + 1
         return
-    odd = {i: n for i, n in books["lengths"].items()
-           if i not in books["windowed"] and n != after and n != after - added}
+    odd = {i: n for i, n in lengths.items() if i not in books["windowed"] and n != after}
     shown = dict(sorted(odd.items())[:4])
     _first, n = sorted(odd.items())[0]
     _refuse(boundary, consumer, f"{where} {type(owner).__name__} layer {layer}", KvExtent(held=n), [(
@@ -299,6 +324,7 @@ def request(boundary: str, consumer: str, where: str, lengths: Dict[int, Tuple[i
 # --- counts, summaries and guards: shared with the other per-step boundaries (tally.py) ---------------------------
 
 inside_capture = _tally.inside_capture
+BROKEN = _tally._BROKEN   # the boundaries entail itself failed at (the same set), for an adapter's per-step guard
 
 
 def guarded(boundary: str, consumer: str, work, *args, **kwargs):

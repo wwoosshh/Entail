@@ -251,6 +251,28 @@ def test_rotary_held_against_the_files_and_the_users_write():
     shutil.rmtree(d)
 
 
+def test_rotary_held_carries_llama3s_frequencies_and_says_what_it_cannot():
+    """Vocabulary v4 (M9.3): llama3's frequency factors are compared, so an engine that lost one is caught; a key the
+    vocabulary still cannot carry (yarn's beta_fast) is reported at the RoPE boundary as not compared, where before
+    it only sat in the readers' problems (M9.1, S1)."""
+    full = {"rope_type": "llama3", "factor": 32.0, "original_max_position_embeddings": 8192,
+            "low_freq_factor": 1.0, "high_freq_factor": 4.0}
+    d = model_folder(dict(LLAMA32, rope_scaling=full))
+    kept = Held(rope_parameters=dict(full, rope_theta=500000.0))
+    assert only(load.rotary_held("vllm", load.declared(d, kept), kept, LOAD)).verdict is Verdict.PASS
+    lost = Held(rope_parameters=dict({k: v for k, v in full.items() if k != "high_freq_factor"}, rope_theta=500000.0))
+    r = only(load.rotary_held("vllm", load.declared(d, lost), lost, LOAD))
+    assert r.verdict is Verdict.REFUSED and r.chosen.value.high_freq_factor is None, r
+    shutil.rmtree(d)
+    yarn = {"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32768, "beta_fast": 32.0}
+    d = model_folder({"rope_theta": 1e6, "rope_scaling": yarn})
+    held = Held(rope_parameters=dict(yarn, rope_theta=1e6))
+    ds = load.rotary_held("vllm", load.declared(d, held), held, LOAD)
+    assert [x.verdict for x in ds] == [Verdict.PASS, Verdict.UNKNOWN], ds
+    assert "beta_fast" in ds[1].note and "not compared" in ds[1].note and not ds[1].blocking, ds[1]
+    shutil.rmtree(d)
+
+
 def test_the_users_write_reaches_a_process_that_gets_the_config_pickled():
     """vLLM builds the config in one process and runs the model in its engine core, which gets the config pickled:
     the user's declaration travels by model folder in the environment (ENTAIL_DECLARED)."""

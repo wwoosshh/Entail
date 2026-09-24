@@ -132,6 +132,8 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
   declares against the sampler and the VAE, and a LoRA's modules against the model it is applied to
 - on vLLM's OpenAI server, per request: a chat template other than the declared one, reasoning history dropped
   where the model declares it is kept, and request fields or template settings that nothing reads
+- where transformers applies a chat template - a script's `apply_chat_template`, SGLang's server - the template
+  and the reasoning history the same way, and SGLang's own conversation templates (`--chat-template chatml`)
 - in debug mode, the boundaries you declare in your own code (`@entail.boundary`: what each argument means);
   a strided layout, a quantized value and chunk-relative positions are converted where the reader needs it
 
@@ -203,14 +205,15 @@ For 1.0 every measurement of the development milestones was run again on the fin
 
 - **Healthy runs** (Qwen3-4B, Llama-3.2-3B-Instruct and gemma-2-2b-it on transformers, vLLM and SGLang, each
   engine's defaults): no false alarm. Two repairs, both where a backend drops Gemma 2's soft-capping. Every fact
-  the model folders declare for loading reached a decision.
+  the model folders declare reached a decision where it was used, the chat template included.
 - **31 test problems** (16 reproduction cases, 8 field cases, 7 simulated market incidents): each defect was
   repaired; where no repair exists, it was reported at the boundary and fact where it happened while the run
   went on, or stopped with `ENTAIL_ON_BROKEN=stop`. No fixed version was flagged. (The two ComfyUI cases were
   measured before 1.0 and not run again.)
 - **Cost:** at load, 0.3-2.6% of the load time. Always on, vLLM's CUDA-graph path 0.999-1.000x (two runs without
-  entail: 0.997-0.999x). About 60 us per request on vLLM's server. The diagnosis mode 1.74x (eager) and 1.85x
-  (sdpa). With `ENTAIL` unset, 0.27 ms per Python start and no module imported.
+  entail: 0.997-0.999x), transformers' dynamic KV cache 1.017-1.022x of an eager decode. About 60 us per request on
+  vLLM's server. The diagnosis mode 1.74x (eager) and 1.85x (sdpa). With `ENTAIL` unset, 0.2-0.3 ms per Python start
+  and no module imported.
 - **Next to post-hoc detection:** GSM8K (500 problems, greedy) caught the RoPE loss above and a planted weight
   shift, but not a backend that drops Gemma 2's soft-capping: SGLang `torch_native` 313 against `triton` 316
   (McNemar p = 0.66); measured before 1.0, transformers `sdpa` against `eager` 337 against 339 (2B) and 442
@@ -221,12 +224,13 @@ For 1.0 every measurement of the development milestones was run again on the fin
 
 ## Known gaps
 
-- The chat template is compared with the declared one on vLLM's OpenAI server only. transformers'
-  `apply_chat_template` and SGLang's server use it without a check.
-- RoPE fields outside the vocabulary (Llama 3's `low_freq_factor` and `high_freq_factor`) are read but not
-  compared, and nothing says so while the model runs.
-- The always-on KV contract on transformers' dynamic cache costs about 4% of decode time (target: 2%). On vLLM's
+- The always-on KV contract on transformers' dynamic cache is at the edge of its target: 1.017-1.022x of an eager
+  decode of Qwen3-4B, depending on how the runs are paired (target 1.02x; 1.041x before these fixes). On vLLM's
   CUDA-graph path it is within noise.
+- A multimodal processor's `apply_chat_template` is not checked. A request SGLang's server refuses under
+  `ENTAIL_ON_BROKEN=stop` gets SGLang's own error (500); vLLM's server answers 400.
+- RoPE keys the vocabulary does not carry (yarn's `beta_fast`, longrope's factor lists) are reported as not
+  compared.
 - One GPU. The reduction contracts (a value summed twice across ranks) were measured with one process standing
   in for two ranks.
 

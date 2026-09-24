@@ -98,6 +98,10 @@ def _active():
     return core.mode() in ("load", "debug") and not kv_contract.inside_capture()
 
 
+def _raise(e):
+    raise e
+
+
 def install():
     """Wrap the four places. Returns 1, or 0 if already installed."""
     global _ORIG
@@ -112,12 +116,31 @@ def install():
              "flex": ALL_ATTENTION_FUNCTIONS.get("flex_attention")}
 
     def update(self, key_states, value_states, layer_idx, *args, **kwargs):
-        if not _active():
+        # every layer, every step: the guards of kv_contract.guarded are written out here, not called twice (M9.3)
+        if core.mode() not in ("load", "debug") or BOUNDARY in kv_contract.BROKEN or kv_contract.inside_capture():
             return _ORIG["update"](self, key_states, value_states, layer_idx, *args, **kwargs)
-        before = kv_contract.guarded(BOUNDARY, CONSUMER, read_choice, self, layer_idx, True)
+        try:   # read_choice, inline: a layer's length before the update (0 for a layer not made yet)
+            layers = self.layers
+            before = layers[layer_idx].get_seq_length() if layer_idx < len(layers) else 0
+            if type(before) is not int:
+                before = before.clone()   # a static layer's device counter, incremented in place by the update
+        except Exception:  # noqa: BLE001 - a layer that cannot say its length: read_choice reads its keys
+            before = kv_contract.guarded(BOUNDARY, CONSUMER, read_choice, self, layer_idx, True)
+            before = None if before is None else before[0]
         out = _ORIG["update"](self, key_states, value_states, layer_idx, *args, **kwargs)
         if before is not None:
-            kv_contract.guarded(BOUNDARY, CONSUMER, _decide, self, layer_idx, before[0], int(key_states.shape[-2]))
+            try:
+                layer = self.layers[layer_idx]
+                after = layer.get_seq_length()
+                w = getattr(layer, "sliding_window", None)
+                kv_contract.grew(BOUNDARY, CONSUMER, self, "transformers", layer_idx, before, after,
+                                 int(key_states.shape[-2]), w if type(w) is int and w > 0 else None)
+                if type(after) is not int:   # a counter kept in a tensor was incremented in place
+                    epochs.advance(self, _counter(self, layer_idx))
+            except core.RoleError:
+                raise
+            except Exception as e:  # noqa: BLE001 - reported once, as this boundary not being checked
+                kv_contract.guarded(BOUNDARY, CONSUMER, _raise, e)
         return out
 
     def get_query_offset(self, layer_idx=0):

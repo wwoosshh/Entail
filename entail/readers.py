@@ -106,13 +106,16 @@ def _rotary(result, spec, theta, theta_key, where, source_kind="config"):
         return
     _, factor = _first(spec, keys["factor"])
     _, omp = _first(spec, keys["original_max_position"])
-    carried = set(keys["type"] + keys["factor"] + keys["original_max_position"] + keys["theta"])
+    _, low = _first(spec, keys["low_freq_factor"])
+    _, high = _first(spec, keys["high_freq_factor"])
+    carried = set(keys["type"] + keys["factor"] + keys["original_max_position"] + keys["theta"]
+                  + keys["low_freq_factor"] + keys["high_freq_factor"])
     left = sorted(k for k, v in spec.items() if k not in carried and v is not None)
-    if left:   # e.g. llama3's high_freq_factor: stated, but v1 has no field for it; say so instead of dropping it
+    if left:   # e.g. yarn's beta_fast: stated, but the vocabulary has no field for it; say so instead of dropping it
         result.problems.append(f"{where}: RoPE keys {left} are not in vocabulary v{VOCAB_VERSION}; the Rotary fact "
                                f"does not carry them")
-    _emit(result, "Rotary", lambda: Rotary(rope_type, theta=theta, factor=factor, original_max_position=omp),
-          source_kind, where)
+    _emit(result, "Rotary", lambda: Rotary(rope_type, theta=theta, factor=factor, original_max_position=omp,
+                                           low_freq_factor=low, high_freq_factor=high), source_kind, where)
 
 
 def _props(result, props, used, source_kind, file):

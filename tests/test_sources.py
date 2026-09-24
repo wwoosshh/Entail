@@ -58,13 +58,17 @@ def test_hf_config_gemma2_qwen3_llama32():
     got, _ = facts_of(folder({"config.json": {"sliding_window": 32768, "use_sliding_window": False,
                                               "rope_theta": 1000000, "rope_scaling": None, "tie_word_embeddings": True}}))
     assert got == {("ModelProps", ModelProps(tie_word_embeddings=True)), ("Rotary", Rotary(theta=1000000))}, got
-    # Llama 3.2: llama3 scaling; the keys v1 cannot carry are named, not dropped
+    # Llama 3.2: llama3 scaling, its frequency factors carried since vocabulary v4 (M9.3)
     got, r = facts_of(folder({"config.json": {"rope_theta": 500000.0, "rope_scaling": {
         "factor": 32.0, "high_freq_factor": 4.0, "low_freq_factor": 1.0, "original_max_position_embeddings": 8192,
         "rope_type": "llama3"}}}))
-    assert got == {("Rotary", Rotary("llama3", 500000.0, 32.0, 8192))}, got
-    assert any(f"RoPE keys ['high_freq_factor', 'low_freq_factor'] are not in vocabulary v{VOCAB_VERSION}" in p
-               for p in r.problems)
+    assert got == {("Rotary", Rotary("llama3", 500000.0, 32.0, 8192, low_freq_factor=1.0, high_freq_factor=4.0))}, got
+    assert not any("RoPE keys" in p for p in r.problems), r.problems
+    # a key the vocabulary still cannot carry is named, not dropped
+    got, r = facts_of(folder({"config.json": {"rope_theta": 1e6, "rope_scaling": {
+        "rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32768, "beta_fast": 32.0}}}))
+    assert got == {("Rotary", Rotary("yarn", 1e6, 4.0, 32768))}, got
+    assert any(f"RoPE keys ['beta_fast'] are not in vocabulary v{VOCAB_VERSION}" in p for p in r.problems), r.problems
 
 
 def test_hf_config_rope_parameters_and_the_old_names():

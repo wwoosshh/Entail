@@ -1,4 +1,4 @@
-"""Fact vocabulary v3 and the fact envelope (LIBRARY_DESIGN.md 4.1 and 6; ROADMAP M1.1, M4.2, M5.3).
+"""Fact vocabulary v4 and the fact envelope (LIBRARY_DESIGN.md 4.1 and 6; ROADMAP M1.1, M4.2, M5.3, M9.3).
 
 A fact class is a small frozen dataclass. Every field that names a kind of thing takes its value from a closed set,
 and a value outside the set is an error (principle 1): a new kind of layout, prediction or rope type is added here,
@@ -11,7 +11,9 @@ fact came from and how sure the library is of it.
 v2 (M4.2) adds two optional fields to Layout, for the weights a loader repacks: `orientation` (which axis holds the
 output features) and `scale_granularity` (how many values one scale covers). v3 (M5.3) adds Template.tool_call_format,
 the format a model writes its tool calls in, under names that do not belong to any engine (each engine's parsers are
-mapped to them in data/caps.json). Each version only adds optional fields, so an older fact is a newer fact with
+mapped to them in data/caps.json). v4 (M9.3) adds Rotary.low_freq_factor and high_freq_factor, llama3's scaling: the
+readers named them as not carried, and nothing said so while the model ran (M9.1, S1). Each version only adds
+optional fields, so an older fact is a newer fact with
 them open, and a fact written with an older version is still read (READABLE_VERSIONS); it may not state a field its
 version did not have (ADDED_IN).
 
@@ -22,9 +24,10 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Optional, Tuple
 
-VOCAB_VERSION = 3
-READABLE_VERSIONS = frozenset({1, 2, 3})   # a later version only adds optional fields; what it adds is in ADDED_IN
-ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("Template", "tool_call_format"): 3}
+VOCAB_VERSION = 4
+READABLE_VERSIONS = frozenset({1, 2, 3, 4})   # a later version only adds optional fields; what it adds is in ADDED_IN
+ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("Template", "tool_call_format"): 3,
+            ("Rotary", "low_freq_factor"): 4, ("Rotary", "high_freq_factor"): 4}
 
 
 def _closed(cls_name, field, value, allowed, optional=True):
@@ -115,17 +118,22 @@ class Positions:
 
 @dataclass(frozen=True)
 class Rotary:
-    """The rotary position embedding a model was trained with: its type, base and scaling."""
+    """The rotary position embedding a model was trained with: its type, base and scaling. low_freq_factor and
+    high_freq_factor are llama3's (v4): the wavelengths it leaves alone and the ones it scales by `factor`."""
     rope_type: str = "default"
     theta: Optional[float] = None
     factor: Optional[float] = None
     original_max_position: Optional[int] = None
+    low_freq_factor: Optional[float] = None
+    high_freq_factor: Optional[float] = None
 
     def __post_init__(self):
         _closed("Rotary", "rope_type", self.rope_type, ROPE_TYPES, optional=False)
         _number("Rotary", "theta", self.theta, 0, strict=True)
         _number("Rotary", "factor", self.factor, 0, strict=True)
         _number("Rotary", "original_max_position", self.original_max_position, 0, integer=True, strict=True)
+        _number("Rotary", "low_freq_factor", self.low_freq_factor, 0, strict=True)
+        _number("Rotary", "high_freq_factor", self.high_freq_factor, 0, strict=True)
 
 
 # --- RANGE (KvExtent lives in kv_contract.py) -------------------------------------------------------------------

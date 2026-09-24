@@ -118,6 +118,7 @@ vLLM과 SGLang은 모델을 자기가 새로 띄운 프로세스에서 돌린다
 - KV 캐시 계약을 본다. 요청이 필요한 만큼 가지고 있는지, 줄어든 것이 없는지다. transformers, vLLM 페이지 캐시, SGLang에서 돈다.
 - 이미지 모델(ComfyUI, diffusers): 체크포인트, 폴더, 선언 파일이 선언한 예측 방식과 잠재 배율을 샘플러와 VAE에 대조하고, LoRA의 모듈이 붙인 모델에 닿는지 본다.
 - vLLM의 OpenAI 서버에서 요청마다: 선언과 다른 채팅 템플릿, 모델이 유지한다고 선언한 사고 기록을 뺀 요청, 아무도 읽지 않는 요청 필드와 템플릿 설정을 본다.
+- transformers가 채팅 템플릿을 적용하는 자리(스크립트의 `apply_chat_template`, SGLang 서버)에서도 템플릿과 사고 기록을 같은 방식으로 보고, SGLang 자신의 대화 템플릿(`--chat-template chatml`)도 본다.
 - 디버그 모드에서는 사용자가 자기 코드에 선언한 경계(`@entail.boundary`: 인자마다의 뜻)를 본다. strided 배치, 양자화된 값, 청크 상대 위치는 읽는 쪽이 필요한 형태로 바꿔 넘긴다.
 
 ### 그래도 출력이 틀리면
@@ -164,17 +165,17 @@ logits = step()["logits"]                                                       
 
 1.0을 내면서 개발 단계의 측정을 모두 최종 코드로 다시 쟀다. 장비는 RTX 4070 Ti 한 장이다.
 
-- **정상 실행**(Qwen3-4B, Llama-3.2-3B-Instruct, gemma-2-2b-it을 transformers, vLLM, SGLang의 기본 설정으로): 오탐이 없었다. 해소는 두 번이었고, 둘 다 백엔드가 Gemma 2의 soft-capping을 버리는 자리였다. 모델 폴더가 적재에 쓰라고 선언한 사실은 모두 판정 자리에 닿았다.
+- **정상 실행**(Qwen3-4B, Llama-3.2-3B-Instruct, gemma-2-2b-it을 transformers, vLLM, SGLang의 기본 설정으로): 오탐이 없었다. 해소는 두 번이었고, 둘 다 백엔드가 Gemma 2의 soft-capping을 버리는 자리였다. 모델 폴더가 선언한 사실은 쓰인 자리에서 모두 판정 자리에 닿았다. 채팅 템플릿도 포함된다.
 - **시험 문제 31건**(재현 사례 16, 실제 환경 사례 8, 모사한 시장 사례 7): 결함마다 고쳐졌다. 고칠 방법이 없는 결함은 그것이 일어난 경계와 사실을 짚어 알리고 실행을 이었고, `ENTAIL_ON_BROKEN=stop`이면 멈췄다. 수정 판을 잘못 짚은 것은 없었다. (ComfyUI 사례 둘은 1.0 전에 쟀고 다시 돌리지 않았다.)
-- **비용:** 적재 때 적재 시간의 0.3~2.6%. 상시 모드에서 vLLM의 CUDA Graph 경로는 0.999~1.000배(entail 없이 두 번 돌린 대조는 0.997~0.999배). vLLM 서버에서 요청마다 약 60 µs. 진단 모드는 1.74배(eager), 1.85배(sdpa). `ENTAIL`을 켜지 않으면 파이썬 시작마다 0.27 ms이고 불러오는 모듈이 없다.
+- **비용:** 적재 때 적재 시간의 0.3~2.6%. 상시 모드에서 vLLM의 CUDA Graph 경로는 0.999~1.000배(entail 없이 두 번 돌린 대조는 0.997~0.999배), transformers 동적 KV 캐시는 eager 디코드의 1.017~1.022배. vLLM 서버에서 요청마다 약 60 µs. 진단 모드는 1.74배(eager), 1.85배(sdpa). `ENTAIL`을 켜지 않으면 파이썬 시작마다 0.2~0.3 ms이고 불러오는 모듈이 없다.
 - **사후 탐지와 나란히:** GSM8K(500문항, 탐욕 디코딩)는 위의 RoPE 손실과 심어 둔 가중치 밀림은 잡았다. 그러나 Gemma 2의 soft-capping을 버리는 백엔드는 잡지 못했다. SGLang `torch_native` 313 대 `triton` 316(McNemar p = 0.66)이었고, 1.0 전에 잰 transformers `sdpa` 대 `eager`는 337 대 339(2B), 442 대 443(9B)이었다. 정상 실행과 출력을 비교하면 드러났다(500문항 가운데 198문항이 다름, 정상 실행 둘 사이에서는 0). 다만 그런 정상 실행이 있을 때의 이야기다. entail은 적재 때 고친다.
 - **위치 짚기:** 심어 둔 결함 11건을 모두 짚었다.
 
 ## 알려진 빈틈
 
-- 채팅 템플릿을 선언과 대조하는 곳은 vLLM의 OpenAI 서버뿐이다. transformers의 `apply_chat_template`과 SGLang 서버는 검사 없이 쓴다.
-- 어휘에 없는 RoPE 필드(Llama 3의 `low_freq_factor`, `high_freq_factor`)는 읽기만 하고 대조하지 않으며, 실행 중에 그렇다고 알리지도 않는다.
-- transformers 동적 캐시에서 상시 KV 계약의 비용은 디코드 시간의 약 4%다(목표 2%). vLLM의 CUDA Graph 경로에서는 잡음 안이다.
+- transformers 동적 캐시의 상시 KV 계약은 목표의 경계에 있다. Qwen3-4B eager 디코드의 1.017~1.022배이고, 실행을 짝짓는 방식에 따라 다르다(목표 1.02배, 이번 수정 전 1.041배). vLLM의 CUDA Graph 경로에서는 잡음 안이다.
+- 멀티모달 프로세서의 `apply_chat_template`은 검사하지 않는다. `ENTAIL_ON_BROKEN=stop`에서 SGLang 서버가 거부한 요청은 SGLang 자신의 오류(500)를 받는다. vLLM 서버는 400으로 답한다.
+- 어휘에 없는 RoPE 키(yarn의 `beta_fast`, longrope의 계수 목록)는 대조하지 않았다고 알린다.
 - GPU 한 장이다. 합산 계약(여러 랭크에서 두 번 합산한 값)은 한 프로세스가 두 랭크를 대신해서 쟀다.
 
 ## 설정

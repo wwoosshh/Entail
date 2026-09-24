@@ -8,9 +8,10 @@ used, under one policy and in one record. Everything listed was measured on the 
 (one RTX 4070 Ti); the README's "How it was measured" and "Known gaps" give the results and the limits.
 
 **Facts and verdicts**
-- A closed vocabulary of what a value means (version 3): layout and quantization, RoPE and position frames, valid
-  ranges and KV extents, model properties, prediction type and latent scale, chat template, key coverage, reduction
-  state, epochs, assumptions and precedence. Each fact carries where it came from and how certain it is.
+- A closed vocabulary of what a value means (version 4): layout and quantization, RoPE (with llama3's frequency
+  factors) and position frames, valid ranges and KV extents, model properties, prediction type and latent scale,
+  chat template, key coverage, reduction state, epochs, assumptions and precedence. Each fact carries where it came
+  from and how certain it is.
 - Five verdicts at every boundary: `pass`, `resolved`, `broken`, `refused`, `unknown`.
 
 **Where facts come from**
@@ -21,13 +22,16 @@ used, under one policy and in one record. Everything listed was measured on the 
 - Which consumer honours which fact is a table with its evidence; only measured entries are used for repairs.
 
 **Where they are compared**
-- At load: attention properties against each backend, RoPE, config keys nobody reads, tied embeddings against the
-  checkpoint, vLLM's weights after repacking against the signatures of the steps that repack them, weights against the
-  checkpoint file (`ENTAIL_SOURCE=1`).
+- At load: attention properties against each backend, RoPE (a declared key the vocabulary cannot carry is reported
+  as not compared), config keys nobody reads, tied embeddings against the checkpoint, vLLM's weights after
+  repacking against the signatures of the steps that repack them, weights against the checkpoint file
+  (`ENTAIL_SOURCE=1`).
 - In containers: the KV cache contract on transformers, vLLM and SGLang; buffers read after an in-place write; CUDA
   graphs and compiled code reused for inputs they were not made for.
 - Per request, on vLLM's OpenAI server: the chat template, the reasoning history and tool-call format a model
-  declares, request fields and template settings nothing reads. The core also has a rule for the context a prompt
+  declares, request fields and template settings nothing reads. Where transformers applies a chat template - a
+  script's `apply_chat_template`, SGLang's server - the template and the reasoning history; and SGLang's server
+  when it renders with a conversation template of its own. The core also has a rule for the context a prompt
   needs against what the model declares; no engine adapter calls it yet.
 - In code, in debug mode: `@entail.boundary` declares what each argument means; strided layouts, quantized values and
   chunk-relative positions are converted where the reader needs them.

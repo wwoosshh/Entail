@@ -32,6 +32,10 @@ TARGETS = {
     "vllm.parser.parser_manager": ["entail.adapters.vllm_serve:install_parsers"],
     "vllm.renderers.hf": ["entail.adapters.vllm_serve:install_render"],
     "vllm.entrypoints.openai.chat_completion.serving": ["entail.adapters.vllm_serve:install_serving"],
+    # The chat template where transformers' tokenizers apply it (a script's, SGLang's server; M9.3), and SGLang's
+    # server when it renders with a conversation template of its own instead.
+    "transformers.tokenization_utils_base": ["entail.adapters.transformers_template"],
+    "sglang.srt.entrypoints.openai.serving_chat": ["entail.adapters.sglang_serve"],
     # ComfyUI (M6.2): the loaders keep what a checkpoint declares with its model, the LoRA contract sits where LoRAs
     # are applied, the prediction and latent scale are decided at sampling; the node hook only names the LoRA file.
     "comfy.sd": ["entail.adapters.comfyui"],

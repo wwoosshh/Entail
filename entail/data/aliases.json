@@ -25,7 +25,7 @@
     "gguf": {"softcap": ["{arch}.attn_logit_softcapping"], "sliding_window": ["{arch}.attention.sliding_window"]}
   },
   "Rotary": {
-    "hf_config": {"theta": ["rope_theta"], "scaling": ["rope_scaling"], "parameters": ["rope_parameters"], "type": ["rope_type", "type"], "factor": ["factor"], "original_max_position": ["original_max_position_embeddings"]},
+    "hf_config": {"theta": ["rope_theta"], "scaling": ["rope_scaling"], "parameters": ["rope_parameters"], "type": ["rope_type", "type"], "factor": ["factor"], "original_max_position": ["original_max_position_embeddings"], "low_freq_factor": ["low_freq_factor"], "high_freq_factor": ["high_freq_factor"]},
     "gguf": {"theta": ["{arch}.rope.freq_base"], "type": ["{arch}.rope.scaling.type"], "factor": ["{arch}.rope.scaling.factor"], "original_max_position": ["{arch}.rope.scaling.original_context_length"]}
   },
   "Template": {

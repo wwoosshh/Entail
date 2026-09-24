@@ -20,12 +20,16 @@ server does with one request; the rules are here, and they run once per request,
             (resolved); a context the user set, or no room, leaves the cut: broken (M5.5)
 
 The tool call format is decided once, where the server builds its tool parser (load.tool_parser).
+Where a template is applied: a server's adapter (vllm_serve) decides the renders of its server itself - it knows
+whether the request named the template - and marks them (`deciding`); the tokenizer's own apply_chat_template, which
+it calls inside, is then not decided again (transformers_template, M9.3).
 Passes are counted (tally). Anything else is a Decision recorded through load.enforce: a broken rule for every
 request it breaks in (like an access log's error line), an unknown that does not block once per boundary and counted
 afterwards. Under the default policy the request goes on as it would without entail (M5.4); `reported` gives the
 lines for an adapter that also puts them in the response. Where the policy stops, a refusal raises RoleError, which
 the adapter turns into the server's own error response before anything is generated.
 """
+import threading
 from functools import lru_cache
 from typing import Dict, Iterable, Optional, Sequence
 
@@ -39,6 +43,7 @@ from .readers import sha256_text
 _DECLARED: Dict[str, object] = {}   # model path -> load.Declared, read once
 _PROJECTED: Dict[tuple, tuple] = {}  # (id of a declaration, Template field) -> (it, its candidates for that field)
 _RECORDED = set()                   # boundaries whose non-blocking unknown was recorded once
+_DECIDING = threading.local()       # .depth > 0 while a server adapter decides the render it is running
 
 
 @lru_cache(maxsize=64)
@@ -208,6 +213,25 @@ def settings(boundary: str, consumer: str, given: Iterable[str], taken: Iterable
                                                 policy or policies.current()))
 
 
+class deciding:
+    """`with request_contract.deciding():` around the work of a server adapter that decides the template of what it
+    renders itself. The tokenizer's apply_chat_template, called inside - in the same thread, where the server applies
+    the template - steps aside (decided_elsewhere)."""
+
+    def __enter__(self):
+        _DECIDING.depth = getattr(_DECIDING, "depth", 0) + 1
+        return self
+
+    def __exit__(self, *exc):
+        _DECIDING.depth -= 1
+        return False
+
+
+def decided_elsewhere() -> bool:
+    """True inside `deciding`: a server's adapter decides this render."""
+    return getattr(_DECIDING, "depth", 0) > 0
+
+
 def guarded(boundary: str, consumer: str, work, *args, **kwargs):
     """tally.guarded for these rules: an error inside entail never breaks the server (principle 12)."""
     return _tally.guarded(boundary, consumer, "Template", work, *args, **kwargs)
@@ -228,4 +252,5 @@ def reset(boundary: Optional[str] = None) -> None:
         _RECORDED.discard(boundary)
 
 
-__all__ = ["declared", "template", "history", "settings", "window", "reported", "guarded", "stats", "reset"]
+__all__ = ["declared", "template", "history", "settings", "window", "reported", "deciding", "decided_elsewhere",
+           "guarded", "stats", "reset"]

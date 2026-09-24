@@ -27,7 +27,9 @@
                the reasoning in the content, where it cannot be told.
   handles      switch_tool_parser: build the parsers with the named tool parser.
 request_contract decides the request rules, load.tool_parser the tool call format. Installed per module (the parser
-manager, the renderer, the chat server), each as soon as it has been imported.
+manager, the renderer, the chat server), each as soon as it has been imported. vLLM applies the template in
+safe_apply_chat_template, which calls the tokenizer's apply_chat_template: marked as decided here
+(request_contract.deciding), so transformers_template does not decide the same render again (M9.3).
 """
 import contextvars
 import os
@@ -215,9 +217,19 @@ def install_render():
     """Wrap HfRenderer.render_messages and render_messages_async. Returns 1 or 0."""
     from vllm.renderers.hf import HfRenderer
 
+    from vllm.renderers import hf
+
     if "render" in _ORIG:
         return 0
     _ORIG.update(render=HfRenderer.render_messages, render_async=HfRenderer.render_messages_async)
+    if hasattr(hf, "safe_apply_chat_template"):
+        _ORIG["safe_apply"] = hf.safe_apply_chat_template
+
+        def safe_apply_chat_template(*args, **kwargs):
+            with request_contract.deciding():   # decided before rendering, above; not again by the tokenizer
+                return _ORIG["safe_apply"](*args, **kwargs)
+
+        hf.safe_apply_chat_template = safe_apply_chat_template
 
     def render_messages(self, messages, params):
         if _active():
@@ -279,6 +291,10 @@ def uninstall():
 
         HfRenderer.render_messages = _ORIG.pop("render")
         HfRenderer.render_messages_async = _ORIG.pop("render_async")
+        if "safe_apply" in _ORIG:
+            from vllm.renderers import hf
+
+            hf.safe_apply_chat_template = _ORIG.pop("safe_apply")
         n += 1
     if "create" in _ORIG:
         from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
