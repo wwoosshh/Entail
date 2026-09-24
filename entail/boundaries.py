@@ -146,8 +146,9 @@ def _replace(value, facts, why):
     their place, the old facts are kept as an Invalidated marker that names who made them untrue."""
     have = core._FACTS.get(id(value))
     old = sorted(k for k in (have or {}) if k != "Invalidated")
+    was = ", ".join(sorted({str(have[k].source) for k in old if isinstance(have[k], Fact)})) if old else ""
     new = {(f.name if isinstance(f, Fact) else type(f).__name__): f for f in facts} if facts else (
-        {"Invalidated": Invalidated(kind=",".join(old), why=why)} if old else {})
+        {"Invalidated": Invalidated(kind=",".join(old), why=why, was=was)} if old else {})
     if have is not None:   # rewrite the entry in place: the value's finalizer is already registered
         have.clear()
         have.update(new)
@@ -229,8 +230,9 @@ def _check_arg(where, arg, want, value, policy):
         dead = raw["Invalidated"]
         return Decision(contract, kind, Verdict.UNKNOWN, RULES["invalidated"],
                         blocking=policy.stops_unknown(kind, True) or policy.mode == "debug",
-                        note=f"argument {arg}: made untrue by {dead.why}; declare what it holds now",
-                        lost_by=dead.why), value
+                        note=f"argument {arg}: made untrue by {dead.why}"
+                             + (f" (it was declared by {dead.was})" if getattr(dead, "was", "") else "")
+                             + "; declare what it holds now", lost_by=dead.why), value
     options = want if isinstance(want, tuple) else (want,)
     chosen = next((w for w in options if carried is not None and carried.value == w), None)
     if chosen is None and carried is not None:   # a form this boundary takes that a converter can reach

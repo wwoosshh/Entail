@@ -108,6 +108,32 @@ vLLM과 SGLang은 모델을 자기가 새로 띄운 프로세스에서 돌린다
 - KV 캐시 계약을 본다. 요청이 필요한 만큼 가지고 있는지, 줄어든 것이 없는지다. transformers, vLLM 페이지 캐시, SGLang에서 돈다.
 - 이미지 모델(ComfyUI, diffusers): 체크포인트, 폴더, 선언 파일이 선언한 예측 방식과 잠재 배율을 샘플러와 VAE에 대조하고, LoRA의 모듈이 붙인 모델에 닿는지 본다.
 
+### 그래도 출력이 틀리면
+
+entail은 검사한 경계마다 판정을 `entail_logs/`에 남긴다. `entail locate`는 이 기록을 읽어 의미가 깨진 곳, 곧 의미를 지키지 못한 첫 경계를 짚는다. 검사한 모든 경계가 온전한데 출력이 틀렸다면(`entail locate --wrong`), 문제는 계층 사이에서 넘긴 것이 아니라 계층 안쪽에 있다. 모델 자체, 컴파일러, 커널, 하드웨어가 여기에 든다. entail이 검사하지 못한 경계는 양옆 계층과 함께 의심 구간으로 남는다.
+
+계층까지 좁히려면 디버그 모드에서 돌리면서 계층을 같은 입력으로 참조 구현과 비교한다. 층마다 첫 호출을 비교하고(`calls=`로 더 늘린다), 참조가 출력을 재현하지 못하는 계층을 짚는다.
+
+```python
+import torch, entail
+from entail import diagnose
+from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP
+
+def mlp_in_float32(self, x):   # 참조: 같은 MLP를 float32로 계산한다
+    f = torch.nn.functional
+    gate, up = (f.linear(x.float(), p.weight.float()) for p in (self.gate_proj, self.up_proj))
+    return f.linear(f.silu(gate) * up, self.down_proj.weight.float()).to(x.dtype)
+
+entail.enable("debug")         # 모델을 올리기 전에 켠다. 적재도 검사된다
+with diagnose.propagating(), diagnose.watch(Qwen3MLP, "forward", mlp_in_float32, label="mlp"):
+    model.generate(**inputs, max_new_tokens=8)
+print("\n".join(entail.locate(output_wrong=True).lines()))
+```
+
+`diagnose.propagating()`은 두 경계 사이에서 선언된 사실을 무효로 만든 연산도 짚는다. 예를 들어 배치를 선언한 값을 transpose한 경우다. Qwen3-4B와 gemma-2-2b-it(transformers 5.17)에 결함을 심어 쟀다. 심은 곳은 적재·캐시·코드 경계, 어텐션과 MLP 커널의 안쪽, 검사하지 못한 경계 뒤였고, 11건 모두 심은 곳을 짚었다. 진단 비용은 64토큰 복호에서 1.72배(eager)와 1.90배(sdpa)였고, 토큰은 같았다.
+
+시험에서는 `pytest --entail`이 시험마다 이렇게 돈다. 깨지면 시험이 실패하고, 실패한 시험의 보고가 그 곳을 짚는다. `entail_condition` 픽스처를 받고 `@pytest.mark.entail_conditions(model="...")`를 단 시험은 모델의 선언이 걸리는 조건마다 한 번씩 돈다. 슬라이딩 창의 한 토큰 아래·같음·위, 스케일된 RoPE가 넘겨받는 문맥 둘레, 이전 사고의 처리를 선언한 모델의 두 번째 차례가 그 예다.
+
 ## 설정
 
 | 변수 | 값 | 뜻 |

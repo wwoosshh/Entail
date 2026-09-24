@@ -201,6 +201,8 @@ class Localization:
         if self.broken_at is not None:
             out.append(f"[entail] where: meaning broke at {self.broken_at}" +
                        (f" (and at {', '.join(self.broken[1:])})" if len(self.broken) > 1 else ""))
+        elif self.lost_by:
+            out.append(f"[entail] where: meaning was lost on the way: {self.lost_by[0]}")
         elif self.all_intact:
             out.append(f"[entail] where: every checked boundary kept its meaning ({len(self.intact)} boundaries)")
         else:
@@ -234,7 +236,8 @@ def _worse(a: dict, b: dict) -> bool:
 
 def _layer_text(c: dict) -> str:
     verdict = "agrees with" if c.get("agrees") else "differs from"
-    text = f"{c.get('layer')} {verdict} {c.get('reference')} on the same inputs"
+    where = f" (instance {c['instance']})" if c.get("instance") is not None and not c.get("agrees") else ""
+    text = f"{c.get('layer')}{where} {verdict} {c.get('reference')} on the same inputs"
     if c.get("max_rel") is not None:
         text += f" (largest difference {c['max_rel']:.3g} of the reference's scale, tolerance {c.get('tol')}"
         text += f"; {c['calls']} calls compared)" if (c.get("calls") or 1) > 1 else ")"
@@ -248,7 +251,7 @@ def locate(rows: Sequence[dict], passes: Optional[Dict[str, int]] = None, layers
     """Apply the rules above. `rows`: decisions as JSON (decision_json, or the lines of a record file); `passes`:
     boundary -> checks that held but were only counted; `layers`: comparisons with a reference; `output_wrong`: what
     the caller knows about the result (None: not known); `skipped`: boundaries none of whose checks ran."""
-    order, status, facts, sides, lost = [], {}, {}, {}, []
+    order, status, facts, sides, lost, lost_ops = [], {}, {}, {}, [], {}
     rank = {"intact": 0, "unchecked": 1, "broken": 2}
 
     def see(boundary, state):
@@ -269,6 +272,7 @@ def locate(rows: Sequence[dict], passes: Optional[Dict[str, int]] = None, layers
         sides.setdefault(b, (_source(r.get("declared")), r.get("consumer")))
         if r.get("lost_by"):
             lost.append(f"{r.get('name')} at {b}, made untrue by {r['lost_by']}")
+            lost_ops.setdefault(b, r["lost_by"])
     for b, n in (passes or {}).items():
         if n:
             see(b, "intact")
@@ -286,6 +290,11 @@ def locate(rows: Sequence[dict], passes: Optional[Dict[str, int]] = None, layers
         suspects.append(f"boundary {b}")
         why.append(f"meaning broke at {b}: {'; '.join(facts.get(b, []))}")
     for b in unchecked:
+        if b in lost_ops:   # not a boundary that could not look: meaning was lost before it, by a named operation
+            suspects.append(f"operation {lost_ops[b]} on the way to {b}")
+            why.append(f"meaning was lost on the way to {b}: {lost_ops[b]} made what it needs untrue, and nothing "
+                       f"said what the value holds after it ({'; '.join(facts.get(b, []))})")
+            continue
         producer, consumer = sides.get(b, (None, None))
         named = ", ".join(x for x in (producer, consumer) if x)
         suspects.append(f"boundary {b} and beside it {named}" if named else f"boundary {b} and the layers beside it")

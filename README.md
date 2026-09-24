@@ -120,6 +120,44 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
 
 `entail preflight --model /path/to/model --engine sglang --list` runs the start-up checks without starting a server.
 
+### When the output is still wrong
+
+entail records a verdict for every boundary it checks, in `entail_logs/`. `entail locate` reads that record and says
+where meaning broke: the first boundary that did not keep it. If every boundary it checked held and the output was
+wrong (`entail locate --wrong`), the fault is not in what was handed between layers but inside one - the model, a
+compiler, a kernel, the hardware. A boundary entail could not check stays suspect, with the layers on either side.
+
+To narrow it to a layer, run the code in debug mode and compare layers with a reference on the same inputs. Every
+layer's first call is compared (more with `calls=`), and a layer whose output its reference does not reproduce is
+named:
+
+```python
+import torch, entail
+from entail import diagnose
+from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP
+
+def mlp_in_float32(self, x):   # the reference: the same MLP, computed in float32
+    f = torch.nn.functional
+    gate, up = (f.linear(x.float(), p.weight.float()) for p in (self.gate_proj, self.up_proj))
+    return f.linear(f.silu(gate) * up, self.down_proj.weight.float()).to(x.dtype)
+
+entail.enable("debug")         # before the model is loaded, so its load is checked too
+with diagnose.propagating(), diagnose.watch(Qwen3MLP, "forward", mlp_in_float32, label="mlp"):
+    model.generate(**inputs, max_new_tokens=8)
+print("\n".join(entail.locate(output_wrong=True).lines()))
+```
+
+`diagnose.propagating()` also names an operation that made a declared fact untrue between two boundaries (a
+transpose of a value whose layout was declared). With defects planted on Qwen3-4B and gemma-2-2b-it (transformers
+5.17) - at a load, cache or code boundary, inside the attention or MLP kernel, behind a boundary entail could not
+check - it pointed to the planted place in all 11 cases. The diagnosis cost 1.72x (eager) and 1.90x (sdpa) on a
+64-token decode, with the same tokens.
+
+In a test suite, `pytest --entail` runs each test that way: what breaks fails the test, and a failing test's report
+says where. A test that takes the `entail_condition` fixture, marked `@pytest.mark.entail_conditions(model="...")`,
+runs once per condition the model's declarations put at stake: one token under, at and over its sliding window, around
+where a scaled RoPE takes over, a second turn when it declares how earlier reasoning is kept.
+
 ## Configuration
 
 | variable | values | meaning |

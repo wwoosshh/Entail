@@ -104,22 +104,26 @@ def _name(func):
 
 
 def _merged(a, b):
-    """Two Invalidated markers as one: every kind either names; the operation of the later one."""
+    """Two Invalidated markers as one: every kind either names, and where they came from; the operation of the
+    later one."""
     if a is None:
         return b
     if b is None:
         return a
     kinds = sorted(set(a.kind.split(",")) | set(b.kind.split(",")))
-    return Invalidated(kind=",".join(kinds), why=b.why)
+    was = ", ".join(sorted({w for m in (a, b) for w in m.was.split(", ") if w}))
+    return Invalidated(kind=",".join(kinds), why=b.why, was=was)
 
 
 def _invalidate(have: dict, kinds, why):
-    """What `have` holds, with `kinds` turned into one Invalidated marker (merged with a marker already there)."""
+    """What `have` holds, with `kinds` turned into one Invalidated marker (merged with a marker already there) that
+    keeps where the facts came from."""
     kinds = sorted(k for k in kinds if k != MARK)
     if not kinds:
         return dict(have)
+    was = ", ".join(sorted({str(have[k].source) for k in kinds if isinstance(have.get(k), Fact)}))
     out = {k: v for k, v in have.items() if k not in kinds and k != MARK}
-    out[MARK] = _merged(have.get(MARK), Invalidated(kind=",".join(kinds), why=why))
+    out[MARK] = _merged(have.get(MARK), Invalidated(kind=",".join(kinds), why=why, was=was))
     return out
 
 

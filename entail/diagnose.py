@@ -11,10 +11,14 @@ ROADMAP M7.1). Secondary to keeping meaning intact: it is what the ledger makes 
                          after it compute correctly on what they were given, so they agree with theirs
 
 `entail locate` reads the record files instead (engines check in child processes this one cannot see into).
-Watching compares the first `calls` calls of a function (default 1), and only in debug mode. The references are the
-caller's - an engine's plain path, a slower exact computation - because entail does not know what a layer should
-compute, only whether two computations on the same inputs agree. A comparison is recorded like a decision: in the
-ledger (Ledger.layers), and as one JSON line in the record.
+Watching compares the first `calls` calls of each module the function runs for - every layer of a model once, by
+default - and only in debug mode. Measured in M7.3 (testbed/results/m73/tolerance.json): comparing only the first call
+in all (layer 0) saw a softmax scale 15% off by 0.040, just over the tolerance, and missed 10%; every layer once saw
+5% (0.046) and up; the 1-2% errors, which still changed the output, parted from healthy rounding only when several
+calls of each layer were compared (calls=3 and more). The references are the caller's - an engine's plain path, a
+slower exact computation - because entail does not know what a layer should compute, only whether two computations
+on the same inputs agree. A comparison is recorded like a decision: in the ledger (Ledger.layers), and as one JSON
+line in the record.
 """
 import contextlib
 import functools
@@ -25,7 +29,9 @@ from typing import Callable, Optional
 from . import core, record
 
 # The largest difference, relative to the reference's largest magnitude, that still counts as agreeing: the rounding
-# two correct computations may differ by in each dtype. M7.3 checks these against healthy layers of a real model.
+# two correct computations may differ by in each dtype. bfloat16 measured in M7.3: over 2,440 healthy calls of the
+# attention, MLP and RMSNorm of Qwen3-4B and Llama-3.2-3B against float32 references the largest was 0.0163, so 3e-2
+# keeps 1.8x above it (testbed/results/m73/tolerance.json). The others are not measured yet.
 TOLERANCE = {"float64": 1e-9, "float32": 1e-4, "float16": 1e-2, "bfloat16": 3e-2}
 _ORDER = itertools.count()
 
@@ -109,7 +115,7 @@ def _difference(out, ref):
     return largest, largest / scale if scale > 0 else largest, ""
 
 
-def _compared(label, reference, out, ref, tol, pick, call):
+def _compared(label, reference, out, ref, tol, pick, call, instance=None):
     """Record one comparison: in the ledger, in the record, and said when the layer and its reference differ."""
     from . import load
 
@@ -123,7 +129,8 @@ def _compared(label, reference, out, ref, tol, pick, call):
         largest, rel, note, limit = None, None, f"could not compare: {type(e).__name__}: {e}", tol
     agrees = rel is not None and rel <= limit
     entry = {"layer": label, "reference": getattr(reference, "__qualname__", repr(reference)), "call": call,
-             "order": next(_ORDER), "max_abs": largest, "max_rel": rel, "tol": limit, "agrees": agrees, "note": note}
+             "instance": instance, "order": next(_ORDER), "max_abs": largest, "max_rel": rel, "tol": limit,
+             "agrees": agrees, "note": note}
     load.LEDGER.layers.append(entry)
     record.write_json({"pid": os.getpid(), **entry})
     if not agrees or os.environ.get("ENTAIL_VERBOSE"):
@@ -149,22 +156,31 @@ def compare(label: str, fn: Callable, reference: Callable, *args, tol: Optional[
 def watch(owner, name: str, reference: Callable, label: Optional[str] = None, calls: int = 1,
           tol: Optional[float] = None, pick: Optional[Callable] = None):
     """While the block runs, the function `owner.name` (or `owner[name]`, for a registry such as transformers'
-    attention functions) is compared with `reference` on the same inputs, for its first `calls` calls, in debug mode.
-    A method is watched on its class: `watch(Qwen3MLP, "forward", reference)` and the reference takes `self` too.
-    `pick` chooses the tensor to compare from each output (default: the first one it holds); `tol` the largest
-    relative difference that agrees (default: TOLERANCE for the reference's dtype)."""
+    attention functions) is compared with `reference` on the same inputs, in debug mode: the first `calls` calls for
+    each module it runs for (its first argument, when that is a torch module: a method's `self`, the layer an
+    attention function is given), so every layer of a model is compared; `calls=None` compares every call. A method
+    is watched on its class: `watch(Qwen3MLP, "forward", reference)` and the reference takes `self` too. `pick`
+    chooses the tensor to compare from each output (default: the first one it holds); `tol` the largest relative
+    difference that agrees (default: TOLERANCE for the reference's dtype). A comparison names the module by the order
+    it was first seen in (`instance`: for a model, the layer's place)."""
     import torch
 
     items = not hasattr(owner, name) and hasattr(owner, "__getitem__")
     fn = owner[name] if items else getattr(owner, name)
     label = label or f"{getattr(owner, '__name__', type(owner).__name__)}.{name}"
-    seen = [0]
+    seen = {}       # module (or None) -> [its place among the modules seen, calls compared]
 
     @functools.wraps(fn)
     def watched(*args, **kwargs):
-        if core._MODE != "debug" or seen[0] >= calls:
+        if core._MODE != "debug":
             return fn(*args, **kwargs)
-        seen[0] += 1
+        key = id(args[0]) if args and isinstance(args[0], torch.nn.Module) else None
+        count = seen.get(key)
+        if count is None:
+            count = seen[key] = [len(seen), 0]
+        if calls is not None and count[1] >= calls:
+            return fn(*args, **kwargs)
+        count[1] += 1
         before = (_clone(args), _clone(kwargs))
         out = fn(*args, **kwargs)
         try:
@@ -173,7 +189,7 @@ def watch(owner, name: str, reference: Callable, label: Optional[str] = None, ca
         except Exception as e:  # noqa: BLE001 - the reference failing is said, and the layer's own result stands
             ref = None
             record.say(f"[entail] compared: the reference for {label} failed: {type(e).__name__}: {e}")
-        _compared(label, reference, out, ref, tol, pick, seen[0])
+        _compared(label, reference, out, ref, tol, pick, count[1], count[0] if key is not None else None)
         return out
 
     if items:

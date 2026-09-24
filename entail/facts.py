@@ -303,8 +303,9 @@ class Invalidated:
     a fact means (a transpose changes which axis is which), the output carries this marker, and the next
     boundary that wants that kind of fact fails with the reason instead of finding nothing.
     """
-    kind: str   # the fact class name that stopped being true, e.g. "Layout"
-    why: str    # the operation that did it, e.g. "aten.transpose"
+    kind: str       # the fact class name that stopped being true, e.g. "Layout"
+    why: str        # the operation that did it, e.g. "transpose"
+    was: str = ""   # where the fact came from before it stopped being true (its source), when known (M7.3)
 
 
 # --- the vocabulary and the envelope --------------------------------------------------------------------------

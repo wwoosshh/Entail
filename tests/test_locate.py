@@ -99,6 +99,11 @@ def test_the_operation_that_made_a_fact_untrue_is_named():
         core.set_mode("off")
     assert found.lost_by == ("Layout at boundary:kernel, made untrue by transpose",), found.lost_by
     assert found.unchecked[0].startswith("boundary:kernel (Layout: " + RULES["invalidated"]), found.unchecked
+    assert found.suspects[0] == "operation transpose on the way to boundary:kernel", found.suspects
+    assert found.lines()[0] == ("[entail] where: meaning was lost on the way: Layout at boundary:kernel, made "
+                                "untrue by transpose"), found.lines()
+    note = load.LEDGER.decisions[-1].note
+    assert "made untrue by transpose (it was declared by boundary: pack.returns)" in note, note
 
 
 def planted_softmax(x):
@@ -138,6 +143,35 @@ def test_a_layer_compared_with_a_reference_narrows_the_fault():
     assert found.suspects == ("inside attention",) and found.all_intact, found
     assert "attention differs from exact_softmax on the same inputs" in found.why[0], found.why
     assert "compared: attention differs" in said.getvalue(), "a layer that differs is said"
+
+
+def test_every_layer_is_compared_once():
+    """A method watched on its class runs for every layer: each is compared on its first call (calls per module),
+    and the comparison names the layer that differs by its place."""
+    fresh()
+
+    class Norm(torch.nn.Module):
+        def __init__(self, scale):
+            super().__init__()
+            self.scale = scale
+
+        def forward(self, x):
+            return x * self.scale
+
+    layers = [Norm(1.0), Norm(1.0), Norm(1.5), Norm(1.0)]   # the third one computes wrong
+    core.set_mode("debug")
+    try:
+        with diagnose.watch(Norm, "forward", lambda self, x: x * 1.0, label="norm"):
+            x = torch.ones(2, 4)
+            for _ in range(3):
+                for layer in layers:
+                    layer(x)
+        found = diagnose.locate(output_wrong=True)
+    finally:
+        core.set_mode("off")
+    assert [(c["instance"], c["agrees"]) for c in load.LEDGER.layers] == [(0, True), (1, True), (2, False),
+                                                                          (3, True)], load.LEDGER.layers
+    assert found.suspects == ("inside norm",) and "norm (instance 2) differs" in found.why[0], found.why
 
 
 def test_watching_does_nothing_outside_debug_mode():
