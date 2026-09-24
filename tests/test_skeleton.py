@@ -14,7 +14,6 @@ PLANNED = [   # built since M0.3: contracts, policies, the ledger, sources and r
     #             the capability table and probes (M3.1), the load contracts (M3.2), entail check (M3.4)
     (sites.at_container, (None, "w", None), "M5.1"),
     (sites.at_request, ({}, {}, None), "M5.3"),
-    (sites.debug_propagation, (), "M7.1"),
     (testing.problems, (), "M7.2"),
 ]
 
@@ -35,12 +34,9 @@ def test_planned_functions_name_their_milestone():
             assert str(e).startswith(milestone), (fn.__name__, str(e))
 
 
-def test_locating_is_planned():
-    try:
-        record.Ledger().locate()
-        raise AssertionError("should not run yet")
-    except NotImplementedError as e:
-        assert str(e).startswith("M7.1"), str(e)
+def test_an_empty_ledger_cannot_say_where():
+    found = record.Ledger().locate()
+    assert (found.broken_at, found.all_intact, found.suspects) == (None, False, ()), found
 
 
 def test_boundaries_is_the_same_objects():

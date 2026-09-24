@@ -29,7 +29,17 @@ def enable(mode="load", policy="resolve"):
     _hook.activate()
 
 
+def locate(output_wrong=None, say=False):
+    """Where the fault lies, from this process's ledger (M7.1): the boundary where meaning broke, or - every checked
+    boundary having held and output_wrong=True - inside a layer. See diagnose.locate; `entail locate` reads the
+    record files of every process instead."""
+    from .diagnose import locate as _locate
+
+    return _locate(output_wrong, say)
+
+
 __all__ = ["RoleError", "advance", "boundary", "carry", "check_config_keys", "check_props", "check_tied", "enable",
-           "envelopes_of", "facts_of", "mode", "policy", "require", "set_mode", "set_policy", "tag", "LAYOUT_KINDS",
+           "envelopes_of", "facts_of", "locate", "mode", "policy", "require", "set_mode", "set_policy", "tag",
+           "LAYOUT_KINDS",
            "Assumed", "Epoch", "KernelCaps", "LatentScale", "Layout", "ModelProps", "Origin", "Positions",
            "Prediction", "Quantized", "Reduction", "Rotary", "Template", "Valid", "__version__"]

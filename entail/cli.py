@@ -10,6 +10,9 @@
   entail pin MANIFEST                    mark a reviewed manifest pinned, so its facts count as declarations
   entail probe --engine E --consumer C --fact Name.field --model DIR [--out FILE] [--no-gate]
                                          check one capability-table row with data (runs the engine on the GPU)
+  entail locate [RECORD ...] [--wrong] [--pid N] [--json]
+                                         where meaning broke, from the record files (default: the newest one in
+                                         entail_logs/); --wrong says the output was wrong (M7.1)
   entail version
 """
 import argparse
@@ -154,6 +157,42 @@ def _pin(args):
     return 0
 
 
+def _records(given):
+    """The record files to read: those given; else ENTAIL_RECORD; else the newest record-<date>.jsonl in the log
+    folder (ENTAIL_LOG_DIR, or entail_logs/ here)."""
+    import glob
+
+    from . import record
+
+    if given:
+        return given
+    if os.environ.get("ENTAIL_RECORD"):
+        return [os.environ["ENTAIL_RECORD"]]
+    folder = os.environ.get("ENTAIL_LOG_DIR")
+    folder = folder if folder and folder.strip().lower() != "off" else os.path.join(os.getcwd(), record.LOG_DIR_NAME)
+    found = sorted(glob.glob(os.path.join(folder, "record-*.jsonl")))
+    return found[-1:]
+
+
+def _locate(args):
+    from . import record
+
+    paths = _records(args.records)
+    if not paths:
+        print("no record file found: give one, or run from the folder that holds entail_logs/", file=sys.stderr)
+        return 2
+    rows, passes, layers, skipped = record.read_records(paths, args.pid)
+    found = record.locate(rows, passes, layers, True if args.wrong else None, skipped)
+    if args.json:
+        print(json.dumps({"records": paths, **found.to_json()}, indent=1, ensure_ascii=False))
+    else:
+        print(f"read {', '.join(paths)}: {len(rows)} decisions, {len(passes)} counted boundaries, "
+              f"{len(layers)} layer comparisons")
+        for text in found.lines():
+            print(text)
+    return 1 if found.broken else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="entail", description="Keep what a value means intact across LLM "
                                  "inference-stack boundaries.")
@@ -181,6 +220,11 @@ def main(argv=None):
     pr.add_argument("--table", help="a capability table other than the packaged one")
     pr.add_argument("--out", help="write the measurement as JSON here")
     pr.add_argument("--no-gate", action="store_true", help="skip the binding gate for an 'ignores' verdict")
+    lc = sub.add_parser("locate", help="where meaning broke, from the record files")
+    lc.add_argument("records", nargs="*", help="record files (default: the newest one in entail_logs/)")
+    lc.add_argument("--wrong", action="store_true", help="the output was wrong: say where the fault lies")
+    lc.add_argument("--pid", type=int, help="only the decisions of this process")
+    lc.add_argument("--json", action="store_true", help="print the localization as JSON")
     sub.add_parser("version", help="print the version")
     args, rest = ap.parse_known_args(argv)
     if args.cmd == "preflight":
@@ -204,6 +248,8 @@ def main(argv=None):
         return probe_main(args)
     if args.cmd == "check":
         return _check(args)
+    if args.cmd == "locate":
+        return _locate(args)
     return _hook(args)
 
 

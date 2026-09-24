@@ -229,7 +229,8 @@ def _check_arg(where, arg, want, value, policy):
         dead = raw["Invalidated"]
         return Decision(contract, kind, Verdict.UNKNOWN, RULES["invalidated"],
                         blocking=policy.stops_unknown(kind, True) or policy.mode == "debug",
-                        note=f"argument {arg}: made untrue by {dead.why}; declare what it holds now"), value
+                        note=f"argument {arg}: made untrue by {dead.why}; declare what it holds now",
+                        lost_by=dead.why), value
     options = want if isinstance(want, tuple) else (want,)
     chosen = next((w for w in options if carried is not None and carried.value == w), None)
     if chosen is None and carried is not None:   # a form this boundary takes that a converter can reach

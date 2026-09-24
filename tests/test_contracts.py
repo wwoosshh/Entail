@@ -252,11 +252,8 @@ def test_ledger_says_everything_in_one_line():
     j = ledger.to_json()["decisions"][0]
     assert (j["verdict"], j["handle"], j["declared"]["source"]["where"], j["chosen"]["value"]) == \
         ("resolved", "set_sampling", "m.safetensors#modelspec.prediction_type", "eps without zero terminal SNR")
-    try:
-        ledger.locate()
-        raise AssertionError("locate is M7.1")
-    except NotImplementedError as e:
-        assert str(e).startswith("M7.1")
+    found = ledger.locate()   # M7.1: the first boundary that broke is the problem area
+    assert (found.broken_at, found.all_intact) == (ledger.broken()[0].contract.boundary, False), found
 
 
 def test_policy_from_the_environment():

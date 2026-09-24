@@ -1,7 +1,8 @@
 """sites: where checks run, and what each may cost (LIBRARY_DESIGN.md 4.7, principle 6).
 
 Always on: load (once, at start-up), container (host-side updates of a cache or a scheduler), request (per request).
-Debug and CI only: operation-level propagation (propagate.py), about 2.1-2.2x in eager decode.
+Debug and CI only: the diagnosis site (diagnose.py): operation-level propagation (propagate.py) and layers compared
+with a reference. Its cost is measured in testbed/results/m71 and m73 (target: at most 2x).
 Never inside a compiled or captured region: a check placed there cost 47.7x and changed the output
 (reinvestigation/feasibility.md 2.3). Before running: `entail check` makes the load decisions without a GPU.
 """
@@ -119,6 +120,9 @@ def at_request(request_facts: dict, server_choice: dict, policy):
     raise NotImplementedError("M5.3: request contracts")
 
 
-def debug_propagation():
-    """Operation-level propagation for diagnosis (wraps propagate.RolePropagation)."""
-    raise NotImplementedError("M7.1: diagnosis mode")
+def debug_propagation(on_conflict: str = "policy"):
+    """Operation-level propagation for diagnosis (M7.1): propagate.RolePropagation in debug mode, a context that does
+    nothing in any other mode (diagnose.propagating)."""
+    from .diagnose import propagating
+
+    return propagating(on_conflict)

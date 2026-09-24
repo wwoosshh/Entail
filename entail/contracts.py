@@ -158,6 +158,7 @@ class Decision:
     conflict: Tuple[Fact, ...] = ()
     target: Optional[object] = None   # what the handle is given, when the resolution names it
     note: str = ""                    # why a boundary could not be checked, or what else the ledger should say
+    lost_by: Optional[str] = None     # the operation that made the declared fact untrue on the way (diagnosis, M7.1)
 
 
 def agrees(declared_value, chosen_value) -> bool:
