@@ -110,14 +110,8 @@ def at_load(model_path, engine: str, choices: dict, policy=None, config=None, ta
     return out
 
 
-def at_container(extent, where: str, policy):
-    """Range and time contracts on host-side numbers (KV extents, buffer epochs)."""
-    raise NotImplementedError("M5.1-M5.2: container contracts")
-
-
-def at_request(request_facts: dict, server_choice: dict, policy):
-    """Chat template, reasoning history, tool-call format: facts that belong to one request."""
-    raise NotImplementedError("M5.3: request contracts")
+# The container site is kv_contract.py and epochs.py, called by the cache adapters (cache_contract,
+# vllm_cache_contract, sglang_cache_contract); the request site is request_contract.py, called by vllm_serve.
 
 
 def debug_propagation(on_conflict: str = "policy"):

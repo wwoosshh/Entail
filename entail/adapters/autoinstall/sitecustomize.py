@@ -47,27 +47,11 @@ TARGETS = {
     "diffusers.pipelines.pipeline_utils": ["entail.adapters.diffusers_adapter:install_pipeline"],
     "diffusers.loaders.lora_pipeline": ["entail.adapters.diffusers_adapter:install_lora"],
 }
-# A one-shot probe of SGLang's request bookkeeping, used while writing the cache contract.
-if os.environ.get("ENTAIL_PROBE") == "sglang_cache":
-    TARGETS["sglang.srt.managers.schedule_batch"].append("entail.adapters.sglang_cache_probe")
 # Comparing against the checkpoint file costs a little I/O, so it is opt-in for now.
 if os.environ.get("ENTAIL_SOURCE"):
     TARGETS["vllm.model_executor.model_loader.utils"].append("entail.adapters.vllm_source")
-# Scaffolding for testing the checks against a planted defect; installed first so the check sees it.
-if os.environ.get("ENTAIL_SEED"):
-    TARGETS["vllm.model_executor.model_loader.utils"].insert(0, "entail.adapters.vllm_seed")
-    TARGETS["vllm.model_executor.model_loader.weight_utils"] = ["entail.adapters.vllm_seed:install_loader"]
-    TARGETS["vllm.v1.core.kv_cache_manager"].insert(0, "entail.adapters.vllm_seed:install_blocks")
-    TARGETS["sglang.srt.managers.schedule_batch"].insert(0, "entail.adapters.sglang_seed")
-    TARGETS["vllm.entrypoints.openai.chat_completion.protocol"] = ["entail.adapters.vllm_seed:install_drop_effort"]
-# The D-arm ledger is a measurement, not a check, so it is only installed when asked for.
-if os.environ.get("ENTAIL_LEDGER"):
-    TARGETS["vllm.model_executor.model_loader.utils"].insert(0, "entail.adapters.vllm_ledger:install_loader")
-    TARGETS["vllm.model_executor.layers.quantization.utils.layer_utils"] = \
-        ["entail.adapters.vllm_ledger:install_replace"]
-    # vllm/model_executor/utils.py holds a second function with the same name, and the online quantisation
-    # methods use that one. Both have to be wrapped or the ledger records nothing for them.
-    TARGETS["vllm.model_executor.utils"] = ["entail.adapters.vllm_ledger:install_replace_core"]
+# Fault injection, the layout ledger and the bookkeeping probe used to measure entail are research tools, not part
+# of the library: they live in the development workspace, with a hook of their own that adds them to this table.
 # ENTAIL_ONLY=rope_alias,sglang_adapter installs just those adapters (to measure one of them on its own).
 if os.environ.get("ENTAIL_ONLY"):
     _only = {s.strip() for s in os.environ["ENTAIL_ONLY"].split(",") if s.strip()}
@@ -158,6 +142,5 @@ def activate():
     install_now()
 
 
-if (os.environ.get("ENTAIL", "off") in ("load", "debug") or os.environ.get("ENTAIL_LEDGER")
-        or os.environ.get("ENTAIL_SEED")):
+if os.environ.get("ENTAIL", "off") in ("load", "debug"):
     activate()

@@ -24,12 +24,9 @@ ADAPTERS = os.path.join(os.path.dirname(HERE), "entail", "adapters")
 V2 = ("transformers_adapter", "transformers_config", "sglang_adapter", "vllm_attention", "vllm_loader",
       "vllm_source", "rope_alias", "vllm_layout", "cache_contract", "vllm_cache_contract", "sglang_cache_contract",
       "vllm_serve", "comfyui", "diffusers_adapter")
-LEGACY = {   # not yet on the v2 interface: where they move, and why they have not yet
-    "vllm_ledger": "research tool: moves to tools/ (LIBRARY_DESIGN.md 10)",
-    "vllm_seed": "research tool: plants defects for measurements",
-    "sglang_seed": "research tool: plants defects for measurements",
-    "sglang_cache_probe": "research tool: moves to tools/",
-}
+# Not yet on the v2 interface: where they move, and why they have not yet. Empty since M9.3, when the research tools
+# (fault injection, the layout ledger, a probe) left the package.
+LEGACY = {}
 ENGINE_SPECIFIC = {   # repairs of one engine's own defect: not contracts of entail, kept out of the core (M6.2)
     "comfyui_repair": "ComfyUI's dynamic VRAM loader writes one object's schedule into another (Comfy-Org/ComfyUI#16490)",
 }

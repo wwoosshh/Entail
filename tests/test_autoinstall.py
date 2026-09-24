@@ -42,10 +42,19 @@ def test_only_keeps_the_named_adapters():
 
 
 def test_only_matches_the_module_not_the_function():
-    """Entries such as 'entail.adapters.vllm_seed:install_loader' are kept by the module name."""
-    t = _load(ENTAIL_SEED="1", ENTAIL_ONLY="vllm_seed").TARGETS
+    """Entries such as 'entail.adapters.vllm_serve:install_render' are kept by the module name."""
+    t = _load(ENTAIL_ONLY="vllm_serve").TARGETS
     flat = [a for adapters in t.values() for a in adapters]
-    assert "entail.adapters.vllm_seed:install_loader" in flat and all("vllm_seed" in a for a in flat), flat
+    assert "entail.adapters.vllm_serve:install_render" in flat and all("vllm_serve" in a for a in flat), flat
+
+
+def test_the_research_switches_add_nothing():
+    """Fault injection, the ledger and the probe are research tools outside the package (M9.3): their switches
+    leave the library's table as it is."""
+    plain = _load().TARGETS
+    assert _load(ENTAIL_SEED="corrupt_at_load", ENTAIL_LEDGER="/tmp/l", ENTAIL_PROBE="sglang_cache").TARGETS == plain
+    flat = [a for adapters in plain.values() for a in adapters]
+    assert not any(t in a for a in flat for t in ("_seed", "_ledger", "_probe")), flat
 
 
 def test_skip_leaves_out_one_entry_or_a_whole_module():

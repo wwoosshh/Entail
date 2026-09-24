@@ -5,10 +5,10 @@
                step. Every number is a Python int, so nothing synchronises with the device.
   read_choice  per request of the batch: the slots it reserved (kv_allocated_len) and wrote (kv_committed_len), the
                tokens it has once this step writes its one new token, and whether a sliding window evicts its KV.
-               The names were found with a probe on a running scheduler (adapters/sglang_cache_probe.py).
+               The names were found with a probe on a running scheduler (a research tool, outside the package).
   handles      none.
 kv_contract decides (kv_written, kv_needed); windowed requests and requests without the counters are counted as
-skipped. Planting a defect for a measurement is a research tool (adapters/sglang_seed.py), not part of this adapter.
+skipped. Planting a defect for a measurement is a research tool outside the package, not part of this adapter.
 """
 from .. import core, kv_contract
 from .base import Hook

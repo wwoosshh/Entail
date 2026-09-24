@@ -1,5 +1,6 @@
-"""Tests for the M0.3 skeleton (LIBRARY_DESIGN.md 4): every planned module imports, every planned function says which
-milestone builds it, and nothing already public changes. Run: python tests/test_skeleton.py"""
+"""Tests for the M0.3 skeleton (LIBRARY_DESIGN.md 4): every planned module imports, and nothing already public
+changes. (Every function the skeleton planned is built: the last two, the container and request sites, in M5.)
+Run: python tests/test_skeleton.py"""
 import inspect
 import os
 import sys
@@ -10,27 +11,11 @@ import entail  # noqa: E402
 from entail import boundaries, caps, contracts, core, facts, manifest, policies, record, sites, sources  # noqa: E402
 from entail.adapters import base  # noqa: E402
 
-PLANNED = [   # built since M0.3: contracts, policies, the ledger, sources and readers (M1, M2), manifests (M2.3),
-    #             the capability table and probes (M3.1), the load contracts (M3.2), entail check (M3.4)
-    (sites.at_container, (None, "w", None), "M5.1"),
-    (sites.at_request, ({}, {}, None), "M5.3"),
-]
-
-
 def test_public_names_unchanged():
     """The package still exports the functions `boundary` and `policy` after the new submodules are imported.
     (A submodule named `boundary` or `policy` would have replaced them; that is why the modules are plural.)"""
     assert entail.boundary is core.boundary and callable(entail.boundary)
     assert entail.policy is core.policy and callable(entail.policy)
-
-
-def test_planned_functions_name_their_milestone():
-    for fn, args, milestone in PLANNED:
-        try:
-            fn(*args)
-            raise AssertionError(f"{fn.__module__}.{fn.__name__} should not run yet")
-        except NotImplementedError as e:
-            assert str(e).startswith(milestone), (fn.__name__, str(e))
 
 
 def test_an_empty_ledger_cannot_say_where():

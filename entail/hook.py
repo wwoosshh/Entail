@@ -2,8 +2,8 @@
 
 vLLM and SGLang run the model in worker processes they start as fresh interpreters, so patching the parent is not
 enough. pip installs `entail-autoinstall.pth` into site-packages next to the package, and Python runs its single
-line at every start-up. The line reads the environment and does nothing else unless ENTAIL (or one of the testing
-switches) is set; only then does it import the hook that installs the adapters.
+line at every start-up. The line reads the environment and does nothing else unless ENTAIL is set; only then does
+it import the hook that installs the adapters.
 
 An editable install (`pip install -e .`) does not place the file. `entail hook install` writes it, `entail hook
 uninstall` removes it, and `entail hook status` says where it is.
@@ -13,8 +13,8 @@ import sysconfig
 
 PTH_NAME = "entail-autoinstall.pth"
 # One line, as .pth files require: Python executes a line that starts with "import".
-PTH_LINE = ('import os; (os.environ.get("ENTAIL", "off") not in ("", "off") or os.environ.get("ENTAIL_LEDGER") '
-            'or os.environ.get("ENTAIL_SEED")) and __import__("entail.adapters.autoinstall.sitecustomize")\n')
+PTH_LINE = ('import os; os.environ.get("ENTAIL", "off") not in ("", "off") '
+            'and __import__("entail.adapters.autoinstall.sitecustomize")\n')
 
 
 def path():
