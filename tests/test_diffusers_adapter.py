@@ -45,10 +45,11 @@ class Module:
 
 
 class UNet:
-    """named_modules() of a model with two LoRA-able layers."""
+    """named_modules() of a model with two LoRA-able layers, and the PEFT config a loaded adapter leaves."""
 
     def __init__(self):
         self.layers = {"down.0.to_q": Module(), "down.0.to_k": Module()}
+        self.peft_config = {}
 
     def named_modules(self):
         return list(self.layers.items())
@@ -71,6 +72,8 @@ class DiffusionPipeline:
 
     # the LoRA loader mixin's part (StableDiffusionXLLoraLoaderMixin)
     def lora_state_dict(self, source, **kw):
+        """As diffusers returns it: a kohya LoRA still under attention-processor names ('processor.to_q_lora'), which
+        the loader converts to the module names only when it loads (convert_unet_state_dict_to_peft)."""
         return dict(source), None
 
     def get_list_adapters(self):
@@ -89,20 +92,37 @@ class FromSingleFileMixin:
 
 class StableDiffusionXLLoraLoaderMixin:
     def load_lora_weights(self, source, adapter_name=None, **kw):
-        """Adds the adapter to the modules the LoRA names that the model has; silently skips the rest. Without the
-        PEFT backend diffusers refuses to load at all."""
+        """As diffusers 0.40 does it: keeps the keys under 'unet.' (the rest is skipped with a log line), converts
+        attention-processor names to module names, puts LoRA layers on the modules whose names end like a target
+        (peft's target list holds name endings), and hands the weights to peft's set_peft_model_state_dict, which
+        returns the keys the model had no place for. Without the PEFT backend diffusers refuses to load at all."""
         if getattr(self, "no_peft", False):
             raise ValueError("PEFT backend is required for this method. (the loader)")
         name = adapter_name or "default_0"
-        for key in source:
-            mod = key.split(".lora_A")[0].split(".lora_B")[0].removeprefix("unet.")
-            if mod in self.unet.layers:
-                self.unet.layers[mod].lora_A[name] = True
+        source, _ = self.lora_state_dict(source)
+        final = {k.removeprefix("unet.").replace("processor.to_q_lora.down", "to_q.lora_A")
+                 .replace("processor.to_q_lora.up", "to_q.lora_B"): v for k, v in source.items() if k.startswith("unet.")}
+        if not final:
+            return
+        endings = {k.split(".lora")[0].rsplit(".", 1)[-1] for k in final}
+        self.unet.peft_config[name] = types.SimpleNamespace(target_modules=endings)
+        for mod_name, mod in self.unet.layers.items():
+            if mod_name.rsplit(".", 1)[-1] in endings:
+                mod.lora_A[name] = True
+        sys.modules["peft"].set_peft_model_state_dict(self.unet, final, name)
+
+
+def set_peft_model_state_dict(model, state_dict, adapter_name="default"):
+    """peft's: loads what has a place in the model, returns the rest as unexpected keys."""
+    unexpected = [k.replace(".lora_A", f".lora_A.{adapter_name}") for k in state_dict
+                  if k.split(".lora")[0] not in model.layers]
+    return types.SimpleNamespace(missing_keys=[], unexpected_keys=unexpected)
 
 
 def _stand_ins():
     mods = {n: types.ModuleType(n) for n in ("diffusers.loaders.single_file", "diffusers.pipelines.pipeline_utils",
-                                             "diffusers.loaders.lora_pipeline")}
+                                             "diffusers.loaders.lora_pipeline", "peft")}
+    mods["peft"].set_peft_model_state_dict = set_peft_model_state_dict
     mods["diffusers.loaders.single_file"].FromSingleFileMixin = FromSingleFileMixin
     mods["diffusers.pipelines.pipeline_utils"].DiffusionPipeline = DiffusionPipeline
     mods["diffusers.loaders.lora_pipeline"].StableDiffusionXLLoraLoaderMixin = StableDiffusionXLLoraLoaderMixin
@@ -112,7 +132,7 @@ def _stand_ins():
 sys.modules.update(_stand_ins())
 from entail.adapters import diffusers_adapter as da  # noqa: E402
 
-assert da.install() == 1 and da.install_pipeline() == 2 and da.install_lora() == 1
+assert da.install() == 1 and da.install_pipeline() == 2 and da.install_lora() == 2
 
 
 class SDXLPipeline(DiffusionPipeline, FromSingleFileMixin, StableDiffusionXLLoraLoaderMixin):
@@ -237,6 +257,21 @@ def test_a_lora_that_reaches_nothing_is_reported():
     other = {"transformer.blocks.0.attn.q.lora_A.weight": 0, "transformer.blocks.1.attn.q.lora_A.weight": 0}
     _, printed = run(lambda: pipe.load_lora_weights(other, adapter_name="b"))
     assert "broken at load:diffusers.lora" in printed and "taken=0" in printed and "reported, not stopped" in printed
+    assert "carries nothing for the parts it was applied to" in printed, "the loader targeted nothing: what it carries"
+
+
+def test_a_lora_is_compared_by_what_the_loader_targeted():
+    """M6.3: a kohya LoRA reaches diffusers' loader under attention-processor names and is converted to module names
+    only while loading; compared by the state dict's names, the researcher's LoRA - applied to 788 modules - was
+    reported as reaching none. The loader's own targets are compared instead."""
+    pipe = SDXLPipeline(Scheduler(prediction_type="epsilon"), VAE(scaling_factor=0.13025))
+    kohya_like = {"unet.down.0.processor.to_q_lora.down.weight": 0, "unet.down.0.to_k.lora_A.weight": 0}
+    _, printed = run(lambda: pipe.load_lora_weights(kohya_like, adapter_name="k"))
+    assert printed == "", printed
+    assert sum(1 for m in pipe.unet.layers.values() if "k" in m.lora_A) == 2
+    partial = {"unet.down.0.to_q.lora_A.weight": 0, "unet.up.9.to_v.lora_A.weight": 0}   # the model has no up.9
+    _, printed = run(lambda: pipe.load_lora_weights(partial, adapter_name="p"))
+    assert "broken at load:diffusers.lora" in printed and "taken=1" in printed and "unet.up.9.to_v" in printed
 
 
 def test_without_the_peft_backend_the_loader_says_so_not_entail():

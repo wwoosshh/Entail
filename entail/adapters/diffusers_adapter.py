@@ -8,15 +8,19 @@ make it use something else; the rules are the core's (load.prediction, load.late
                are the declaration.
                DiffusionPipeline.__setattr__ for "vae" on a pipeline already built: a VAE put in later. A VAE file read
                on its own is taken for Stable Diffusion 1.5's, because the two VAEs have the same keys (fd-vae).
-               load_lora_weights of every LoRA loader mixin in loaders/lora_pipeline.py.
+               load_lora_weights of every LoRA loader mixin in loaders/lora_pipeline.py, and peft's
+               set_peft_model_state_dict, the loader's last step, which it calls for each model the LoRA reaches.
   read_choice  the scheduler's prediction_type and rescale_betas_zero_snr; the VAE config's scaling_factor and
-               shift_factor; a LoRA's modules (in diffusers' own conversion of its state dict) and the modules that
-               hold the adapter afterwards; whether the caller passed the scheduler or prediction_type (explicit).
+               shift_factor; for a LoRA, what the loader handed peft at its last step - under the names it
+               converted the LoRA to - and the keys peft found no place for in the model (its unexpected keys), and,
+               when nothing got that far, the LoRA's modules as lora_state_dict reads them; whether the caller passed
+               the scheduler or prediction_type (explicit).
   handles      switch_prediction: the scheduler rebuilt from its config with the declared prediction_type (and
                rescale_betas_zero_snr where the scheduler has it), what diffusers' docs tell users to do by hand;
                set_latent_scale: the VAE's config given the declared scaling_factor (and shift_factor).
 A pipeline from the Hub is not read (only local files and folders are): reported as not checked.
 """
+import contextvars
 import importlib
 import os
 
@@ -27,13 +31,15 @@ from .base import Hook
 engine = "diffusers"
 versions = "0.40.0"
 _ORIG = {}
+_HANDED = contextvars.ContextVar("entail_diffusers_lora", default=None)   # this load: [(model, keys, unexpected)]
 
 
 def hooks():
     return [Hook("diffusers.loaders.single_file.FromSingleFileMixin.from_single_file", "load"),
             Hook("diffusers.pipelines.pipeline_utils.DiffusionPipeline.from_pretrained", "load"),
             Hook("diffusers.pipelines.pipeline_utils.DiffusionPipeline.__setattr__", "load"),
-            Hook("diffusers.loaders.lora_pipeline.*LoraLoaderMixin.load_lora_weights", "load")]
+            Hook("diffusers.loaders.lora_pipeline.*LoraLoaderMixin.load_lora_weights", "load"),
+            Hook("peft.set_peft_model_state_dict", "load")]
 
 
 def _active():
@@ -45,6 +51,9 @@ def read_choice(kind, *args):
       ("prediction", scheduler)        -> Prediction, or None when its config does not name a prediction type
       ("latent_scale", vae)            -> LatentScale, or None when its config has no scaling_factor
       ("lora_given", lora state dict)  -> the modules a LoRA carries weights for, as 'component.module'
+      ("lora_handed", pipeline, [(model, keys, unexpected keys)])
+                                       -> (given, taken): the modules the loader handed peft, and those of them the
+                                          model had a place for, as 'component.module'
       ("lora_taken", pipeline, names)  -> the modules that hold one of the adapters `names`, as 'component.module'"""
     if kind == "prediction":
         (scheduler,) = args
@@ -66,6 +75,17 @@ def read_choice(kind, *args):
                     mod = mod[: -len(suffix)]
             mods.add(mod)
         return mods
+    if kind == "lora_handed":
+        pipe, handed = args
+        comps = {id(getattr(pipe, c, None)): c for c in ("unet", "transformer", "text_encoder", "text_encoder_2",
+                                                          "text_encoder_3")}
+        given, taken = set(), set()
+        for model, keys, unexpected in handed:
+            comp = comps.get(id(model), type(model).__name__)
+            mods, left = readers.lora_modules(keys), readers.lora_modules(unexpected)
+            given |= {f"{comp}.{m}" for m in mods}
+            taken |= {f"{comp}.{m}" for m in mods - left}
+        return given, taken
     if kind == "lora_taken":
         pipe, names = args
         out = set()
@@ -212,30 +232,67 @@ def install_lora():
         def load_lora_weights(self, pretrained_model_name_or_path_or_dict, adapter_name=None, *a, _orig=orig, **kw):
             if not _active():
                 return _orig(self, pretrained_model_name_or_path_or_dict, adapter_name, *a, **kw)
-            given = load.safely("load:diffusers.lora", "diffusers.lora_loader", "Coverage",
-                                lambda: _lora_given(self, pretrained_model_name_or_path_or_dict, kw))
+            source = pretrained_model_name_or_path_or_dict
             before = _adapters(self)
-            out = _orig(self, pretrained_model_name_or_path_or_dict, adapter_name, *a, **kw)
-            if given:
-                source = pretrained_model_name_or_path_or_dict
-                where = f"LoRA {source}" if isinstance(source, (str, os.PathLike)) else "a LoRA state dict"
+            token = _HANDED.set([])
+            try:
+                out = _orig(self, source, adapter_name, *a, **kw)
+            finally:
+                handed = _HANDED.get()
+                _HANDED.reset(token)
+            where = f"LoRA {source}" if isinstance(source, (str, os.PathLike)) else "a LoRA state dict"
 
-                def work():
-                    names = {adapter_name} if adapter_name else _adapters(self) - before
-                    load.enforce(load.lora(engine, f"{where} on {type(self).__name__}", given,
-                                           read_choice("lora_taken", self, names), policy=policies.current()))
+            def work():
+                if not handed and read_choice("lora_taken", self,
+                                              {adapter_name} if adapter_name else _adapters(self) - before):
+                    load.enforce([load.cannot_check("load:diffusers.lora", "diffusers.lora_loader", "Coverage",
+                                                    f"{where}: loaded without peft's set_peft_model_state_dict "
+                                                    f"(hotswap?), so what reached the model was not read")])
+                    return
+                given, taken = read_choice("lora_handed", self, handed)
+                carried = () if handed else _lora_given(self, source, kw)   # nothing got that far: what it has
+                load.enforce(load.lora(engine, f"{where} on {type(self).__name__}", given, taken,
+                                       policy=policies.current(), carried=carried))
 
-                load.safely("load:diffusers.lora", "diffusers.lora_loader", "Coverage", work)
+            load.safely("load:diffusers.lora", "diffusers.lora_loader", "Coverage", work)
             return out
 
         _ORIG[(cls, "load_lora_weights")] = orig
         cls.load_lora_weights = load_lora_weights
         n += 1
-    return n
+    return n + _install_peft()
+
+
+def _install_peft():
+    """peft.set_peft_model_state_dict, which diffusers imports from peft each time it loads a LoRA into a model."""
+    try:
+        peft = importlib.import_module("peft")
+    except ImportError:   # without peft diffusers loads no LoRA at all, and says so itself
+        return 0
+    if (peft, "set_peft_model_state_dict") in _ORIG:
+        return 0
+    orig = peft.set_peft_model_state_dict
+
+    def set_peft_model_state_dict(model, peft_model_state_dict, *a, **kw):
+        out = orig(model, peft_model_state_dict, *a, **kw)
+        handed = _HANDED.get()
+        if handed is not None:
+            try:
+                handed.append((model, list(peft_model_state_dict), list(getattr(out, "unexpected_keys", None) or ())))
+            except Exception:  # noqa: BLE001 - reading what the loader did must never break it
+                pass
+        return out
+
+    _ORIG[(peft, "set_peft_model_state_dict")] = orig
+    peft.set_peft_model_state_dict = set_peft_model_state_dict
+    return 1
 
 
 def _lora_given(pipe, source, kw):
-    """As load_lora_weights reads it: lora_state_dict edits a dict it is given, and does not take low_cpu_mem_usage."""
+    """The modules a LoRA carries, as lora_state_dict reads it, for a LoRA none of which reached the loader's last
+    step: it edits a dict it is given, and does not take low_cpu_mem_usage. (Its names are not always the loader's
+    final ones - a kohya LoRA still has attention-processor names there, and peft's target list holds name endings,
+    not modules - which is why a LoRA the loader took is read at set_peft_model_state_dict; found in M6.3.)"""
     source = source.copy() if isinstance(source, dict) else source
     sd = pipe.lora_state_dict(source, **{k: v for k, v in kw.items() if k not in ("low_cpu_mem_usage", "hotswap")})
     return read_choice("lora_given", sd[0] if isinstance(sd, tuple) else sd)
