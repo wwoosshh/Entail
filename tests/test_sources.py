@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 from entail import gguf, sources  # noqa: E402
 from entail.facts import (PREDICTION_KINDS, ROPE_TYPES, VOCAB_VERSION, VOCABULARY, Certainty,  # noqa: E402
                           LatentScale, Layout, ModelProps, Prediction, Rotary, Template)
+from entail import readers  # noqa: E402
 from entail.readers import ALIASES, sha256_text  # noqa: E402
 
 
@@ -58,6 +59,13 @@ def test_hf_config_gemma2_qwen3_llama32():
     got, _ = facts_of(folder({"config.json": {"sliding_window": 32768, "use_sliding_window": False,
                                               "rope_theta": 1000000, "rope_scaling": None, "tie_word_embeddings": True}}))
     assert got == {("ModelProps", ModelProps(tie_word_embeddings=True)), ("Rotary", Rotary(theta=1000000))}, got
+    # Phi-3.5 / Phi-4-mini: a window that is not below the positions never binds, so it is no requirement (M11.4)
+    got, r = facts_of(folder({"config.json": {"sliding_window": 262144, "max_position_embeddings": 131072,
+                                              "tie_word_embeddings": False}}))
+    assert got == {("ModelProps", ModelProps(tie_word_embeddings=False))}, got
+    assert any("sliding_window 262144 is not below max_position_embeddings 131072" in p for p in r.problems)
+    got, _ = facts_of(folder({"config.json": {"sliding_window": 512, "max_position_embeddings": 32768}}))
+    assert got == {("ModelProps", ModelProps(sliding_window=512))}, got     # gemma-3-1b: below, so it binds
     # Llama 3.2: llama3 scaling, its frequency factors carried since vocabulary v4 (M9.3)
     got, r = facts_of(folder({"config.json": {"rope_theta": 500000.0, "rope_scaling": {
         "factor": 32.0, "high_freq_factor": 4.0, "low_freq_factor": 1.0, "original_max_position_embeddings": 8192,
@@ -125,9 +133,15 @@ def test_hf_template():
     assert "named templates ['tool_use'] besides 'default'" in r.problems[0]
     _, r = facts_of(folder({"tokenizer_config.json": {"chat_template": [{"name": "rag", "template": "x"}]}}))
     assert any("without a 'default' one" in p for p in r.problems) and not r.facts
+    # M11.3: chat_template.jinja is what transformers reads when it exists; the entry is not a second declaration
     r = sources.read_all(folder({"tokenizer_config.json": {"chat_template": tpl}, "chat_template.jinja": "other"}))
-    _, conflicts = sources.merge(r.facts)
-    assert len(r.facts) == 2 and len(conflicts) == 1   # two templates for one model: a disagreement to record
+    assert [f.value for f in r.facts] == [Template(sha256_text("other"))]
+    assert any("differs from" in p and "is not what runs" in p for p in r.problems), r.problems
+    lines = "{%- for m in messages %}\n{{ m.content }}\n{%- endfor %}"
+    spaced = lines.replace("\n", "  \n\n")                  # the same lines with blank lines and trailing spaces
+    r = sources.read_all(folder({"tokenizer_config.json": {"chat_template": lines}, "chat_template.jinja": spaced}))
+    assert [f.value for f in r.facts] == [Template(sha256_text(spaced))] and not r.problems, r.problems
+    assert readers.same_template(lines, spaced) and not readers.same_template(lines, "other")
 
 
 def test_diffusers_folder():

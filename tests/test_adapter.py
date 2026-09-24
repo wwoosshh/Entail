@@ -36,12 +36,36 @@ def test_the_model_contracts_run_once_per_model():
         print("skip (no local model)")
         return
     with _On() as on, redirect_stdout(io.StringIO()):
-        model = _gemma_on_meta("eager")
-        model.tie_weights()                       # a second call decides nothing again
+        model = _gemma_on_meta("eager")           # post_init's call on a meta model decides nothing yet (M11.2)
+        assert not [d for d in on.new() if d.contract.boundary == "load:transformers.loader"]
+        model.tie_weights(missing_keys=set())     # from_pretrained's call, after loading: decides once
+        model.tie_weights(missing_keys=set())     # a second call decides nothing again
         loader = [d for d in on.new() if d.contract.boundary == "load:transformers.loader"]
         rope = [d for d in on.new() if d.contract.boundary == "load:transformers.config.rope_parameters"]
     assert len(loader) == 1 and loader[0].verdict is Verdict.PASS          # no lm_head.weight: tied, as declared
     assert len(rope) == 1 and rope[0].verdict is Verdict.PASS
+
+
+def test_what_the_loader_left_is_read_from_the_model():
+    """M11.2: after tie_weights the adapter reads whether the head shares the embedding's tensor, and only at a call
+    that has the weights (from_pretrained's passes missing_keys; a meta model's post_init call is skipped)."""
+    import torch
+    from types import SimpleNamespace
+
+    w = torch.zeros(4, 2)
+    emb = lambda t: SimpleNamespace(weight=t)  # noqa: E731
+    tied = SimpleNamespace(get_output_embeddings=lambda: emb(w), get_input_embeddings=lambda: emb(w))
+    own = SimpleNamespace(get_output_embeddings=lambda: emb(w.clone()), get_input_embeddings=lambda: emb(w))
+    none = SimpleNamespace(get_output_embeddings=lambda: None, get_input_embeddings=lambda: emb(w))
+    m = torch.empty(2, device="meta")
+    meta = SimpleNamespace(get_output_embeddings=lambda: emb(m), get_input_embeddings=lambda: emb(m))
+    assert adapter.tied_in_memory(tied) is True and adapter.tied_in_memory(own) is False
+    assert adapter.tied_in_memory(none) is None and adapter.tied_in_memory(meta) is None
+    real = SimpleNamespace(parameters=lambda: iter([torch.nn.Parameter(w)]))
+    on_meta = SimpleNamespace(parameters=lambda: iter([torch.nn.Parameter(m)]))
+    assert adapter.weights_there(real, (), {}) and not adapter.weights_there(on_meta, (), {})
+    assert adapter.weights_there(on_meta, (), {"missing_keys": set()}) and adapter.weights_there(on_meta, (set(),), {})
+    assert not adapter.weights_there(on_meta, (), {"missing_keys": None})
 
 
 def test_install_is_reversible():

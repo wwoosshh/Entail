@@ -10,7 +10,7 @@
 kv_contract decides (kv_written, kv_needed); windowed requests and requests without the counters are counted as
 skipped. Planting a defect for a measurement is a research tool outside the package, not part of this adapter.
 """
-from .. import core, kv_contract
+from .. import core, kv_contract, load, policies
 from .base import Hook
 
 engine = "sglang"
@@ -18,6 +18,7 @@ versions = "0.5.20"
 BOUNDARY = "container:sglang.prepare_for_decode"
 CONSUMER = "sglang.kv_cache"
 _ORIG = None
+_SAID_SPECULATIVE = False   # the once-per-process note that speculative batches are not checked (M11.5)
 
 
 def hooks():
@@ -41,7 +42,27 @@ def handles():
     return {}
 
 
+def speculative(batch) -> bool:
+    """Whether the batch decodes speculatively: its spec_algorithm is set and not none."""
+    algo = getattr(batch, "spec_algorithm", None)
+    is_none = getattr(algo, "is_none", None)
+    return algo is not None and (not is_none() if callable(is_none) else bool(algo))
+
+
 def _decide(batch):
+    global _SAID_SPECULATIVE
+    if speculative(batch):
+        # M11.5: under speculative decoding the scheduler reserves draft slots ahead of the tokens (kv_allocated_len
+        # runs past kv_committed_len by the draft budget: eagle_prepare_for_decode, get_alloc_reserve_per_decode),
+        # which this adapter does not model; 1.0 reported it as reserved and written slots disagreeing. Said once.
+        kv_contract.skipped(BOUNDARY, len(getattr(batch, "reqs", None) or []))
+        if not _SAID_SPECULATIVE:
+            _SAID_SPECULATIVE = True
+            load.enforce([load.cannot_check(BOUNDARY, CONSUMER, "KvExtent", "speculative decoding reserves draft "
+                                            "slots ahead of the tokens (kv_allocated_len runs past kv_committed_len "
+                                            "by the draft budget), which entail does not model: the KV extents of "
+                                            "speculative batches are not checked", policies.current())])
+        return
     for where, reserved, written, tokens, windowed in read_choice(batch):
         if reserved is None or written is None or windowed:
             kv_contract.skipped(BOUNDARY)

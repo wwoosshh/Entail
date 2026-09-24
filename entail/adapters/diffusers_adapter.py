@@ -177,8 +177,25 @@ def install():
     return _classmethod(cls, "from_single_file", make)
 
 
+def local_snapshot(name, kwargs):
+    """The local folder a hub id was downloaded to - the huggingface_hub cache diffusers has just filled - or None
+    when it is not there (M11.6; 1.0 checked nothing for a pipeline named by its hub id). Only the local cache is
+    asked: nothing is downloaded here."""
+    if not isinstance(name, str) or os.path.exists(name):
+        return None
+    try:
+        from huggingface_hub import snapshot_download
+
+        folder = snapshot_download(repo_id=name, revision=kwargs.get("revision"), cache_dir=kwargs.get("cache_dir"),
+                                   local_files_only=True)
+    except Exception:  # noqa: BLE001 - not cached, or no huggingface_hub: reported as not checked by the caller
+        return None
+    return folder if isinstance(folder, str) and os.path.isdir(folder) else None
+
+
 def install_pipeline():
-    """Wrap DiffusionPipeline.from_pretrained (a local folder) and __setattr__ ("vae" on a built pipeline)."""
+    """Wrap DiffusionPipeline.from_pretrained (a local folder, or a hub id found in the local cache) and __setattr__
+    ("vae" on a built pipeline)."""
     cls = importlib.import_module("diffusers.pipelines.pipeline_utils").DiffusionPipeline
     if (cls, "__setattr__") in _ORIG:
         return 0
@@ -188,14 +205,15 @@ def install_pipeline():
             pipe = raw(klass, pretrained_model_name_or_path, **kwargs)
             if _active():
                 path = pretrained_model_name_or_path
-                if isinstance(path, (str, os.PathLike)) and os.path.isdir(path):
+                folder = os.fspath(path) if isinstance(path, (str, os.PathLike)) and os.path.isdir(path) else \
+                    local_snapshot(path, kwargs)
+                if folder is not None:
                     load.safely("load:diffusers.pipeline", "diffusers.scheduler", "Prediction",
-                                lambda: _check_pipeline(pipe, os.fspath(path), kwargs,
-                                                        f"{klass.__name__}.from_pretrained"))
+                                lambda: _check_pipeline(pipe, folder, kwargs, f"{klass.__name__}.from_pretrained"))
                 else:
                     load.enforce([load.cannot_check("load:diffusers.pipeline", "diffusers.scheduler", "Prediction",
-                                                    f"{path!r} is not a local folder; entail reads only local "
-                                                    f"folders")])
+                                                    f"{path!r} is not a local folder and is not in the local "
+                                                    f"huggingface_hub cache; entail reads only local folders")])
             return pipe
 
         return from_pretrained

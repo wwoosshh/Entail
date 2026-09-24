@@ -246,13 +246,32 @@ def attention(engine: str, backend: str, facts: Declared, table=None, policy: Op
     candidates = _projected(facts, "ModelProps", _caps.consumed(table, group))
     if not candidates:
         return []
-    best, _ = _sources.pick(candidates)
+    best, conflict = _sources.pick(candidates)
     chosen = _caps.chosen_fact(table, consumer, best)
+    contract = Contract(f"load:{group}", consumer, ("ModelProps",), ("ModelProps",))
+    inferred = None if conflict else _inferred_mismatch(contract, "ModelProps", table, consumer, best, chosen, policy)
+    if inferred is not None:
+        return [inferred]
     route = Resolution("route to a backend measured to honour it", "switch_attention_backend",
                        target=lambda d, c: _caps.route(table, group, d.value, exclude=(backend,)))
-    contract = Contract(f"load:{group}", consumer, ("ModelProps",), ("ModelProps",))
     return decide(contract, {"ModelProps": tuple(candidates)}, {"ModelProps": chosen}, policy,
                   resolutions={"ModelProps": [route] if can_switch else []})
+
+
+def _inferred_mismatch(contract: Contract, name: str, table, consumer: str, best: Fact, chosen: Fact,
+                       policy: Optional[Policy]) -> Optional[Decision]:
+    """One unknown decision when every field the table says `consumer` drops rests on reading its code or a
+    document, not on a measurement (M11.4): said to be inferred, blocking only in debug mode, and no resolution is
+    tried on it - 1.0 switched SGLang's flashinfer to triton on a code-read sliding-window row in 3 of 81 runs on
+    30 popular models. A row that states what the consumer reads instead (a tool parser is its format) is settled
+    by its code. None when at least one differing field is settled, or none differs."""
+    said = _caps.disagreements(table, consumer, best.value)
+    if not said or any(e == "measured" or reads is not None for _, e, reads in said):
+        return None
+    policy = policy or Policy()
+    return Decision(contract, name, Verdict.UNKNOWN, RULES["consumer_inferred"], declared=best, chosen=chosen,
+                    blocking=policy.mode == "debug",
+                    note="inferred, not measured: " + ", ".join(f"{f} ({e})" for f, e, _ in said))
 
 
 def tool_parser(engine: str, parser: Optional[str], facts: Declared, table=None, policy: Optional[Policy] = None,
@@ -267,38 +286,75 @@ def tool_parser(engine: str, parser: Optional[str], facts: Declared, table=None,
     candidates = _projected(facts, "Template", ("Template.tool_call_format",))
     if not parser or not candidates:
         return []
-    best, _ = _sources.pick(candidates)
+    best, conflict = _sources.pick(candidates)
     consumer = f"{group}.{parser}"
+    contract = Contract(f"load:{group}", consumer, ("Template",), ("Template",))
     if _caps.lookup(table, consumer, "Template.tool_call_format") is None:
         chosen = Fact("Template", None, Source("engine", f"{consumer} [not in the capability table]"),
                       Certainty.UNKNOWN)
     else:
         chosen = _caps.chosen_fact(table, consumer, best)
+        inferred = None if conflict else _inferred_mismatch(contract, "Template", table, consumer, best, chosen,
+                                                            policy)
+        if inferred is not None:
+            return [inferred]
     route = Resolution("switch to a tool parser measured to read the declared format", "switch_tool_parser",
                        target=lambda d, c: _caps.route(table, group, d.value, exclude=(parser,)))
-    contract = Contract(f"load:{group}", consumer, ("Template",), ("Template",))
     return decide(contract, {"Template": tuple(candidates)}, {"Template": chosen}, policy,
                   resolutions={"Template": [route] if can_switch else []})
 
 
 def tie(engine: str, facts: Declared, model_path: Optional[str] = None, loader_ties: Optional[bool] = None,
-        policy: Optional[Policy] = None, observed: Optional[Fact] = None) -> List[Decision]:
-    """tie_word_embeddings: the declaration against the checkpoint (observe.tie) and against what the loader does
-    (it ties the head when the config it holds says so; `loader_ties` is that value, None when unknown).
-    rolebench 07: the config declares a tie and the checkpoint ships its own head -> broken (refused where the
-    policy stops)."""
+        policy: Optional[Policy] = None, observed: Optional[Fact] = None, compares_head: bool = False,
+        tied_in_memory: Optional[bool] = None) -> List[Decision]:
+    """tie_word_embeddings: the declaration against the checkpoint (observe.head) and against what the loader does.
+    `loader_ties`: whether the config the loader holds tells it to tie (None when unknown). `compares_head`: the
+    loader compares a shipped lm_head.weight with the embedding and keeps a different one instead of tying (vLLM
+    0.30 maybe_untie_word_embeddings and maybe_retie_word_embeddings, transformers 5.17 tie_weights; SGLang 0.5.20
+    ties regardless and skips the shipped head), so what it does then depends on the data. `tied_in_memory`: what
+    such a loader left in the model - the head sharing the embedding's tensor, or its own - read by the adapter
+    after the loader's step; with it the checkpoint is only sampled, since the loader compared the two itself.
+    Without it (the static check) the checkpoint's head is compared byte for byte when the sampled rows match and
+    the loader's choice depends on it.
+    rolebench 07: the config declares a tie and the checkpoint ships a different head -> the declaration contradicts
+    the data: broken (refused where the policy stops). Where the policy uses the data instead, a loader that
+    compares runs the checkpoint's head (pass, the data used) and one that ties regardless differs from it.
+    M11.2: a shipped head that equals the embedding (a stored copy of the tied head: Qwen3 0.6B and 1.7B, quantised
+    exports) satisfies a declared tie; 1.0 called vLLM's untie-then-retie of it broken."""
     candidates = _projected(facts, "ModelProps", ("ModelProps.tie_word_embeddings",))
-    if observed is None and model_path:
-        observed = _observe.tie(os.path.expanduser(model_path))
+    full = compares_head and tied_in_memory is None
+    head = _observe.head(os.path.expanduser(model_path), full=full) if model_path else None
+    if observed is None and head is not None:
+        observed = _observe.tie_fact(head)
     if not candidates and observed is None:
         return []
     consumer = f"{engine}.loader"
-    if loader_ties is None:
+    if tied_in_memory is not None:
+        if tied_in_memory:
+            what = "left the head tied to the embedding: one tensor for both (read from the model)"
+        elif loader_ties and compares_head:
+            what = ("left the checkpoint's own lm_head.weight as the head: it compares the two and keeps a different "
+                    "one (read from the model)")
+        else:
+            what = "left the checkpoint's own lm_head.weight as the head (read from the model)"
+        chosen = Fact("ModelProps", ModelProps(tie_word_embeddings=tied_in_memory), Source("engine", f"{consumer} {what}"),
+                      Certainty.VERIFIED)
+    elif loader_ties is None:
         chosen = Fact("ModelProps", None, Source("engine", consumer), Certainty.UNKNOWN)
+    elif loader_ties and compares_head and head is not None and head.kind == "differs":
+        chosen = Fact("ModelProps", ModelProps(tie_word_embeddings=False),
+                      Source("engine", f"{consumer} keeps the checkpoint's own lm_head.weight instead of tying: it "
+                                       f"compares the two, and they differ"), Certainty.VERIFIED)
+    elif loader_ties:
+        same = ("; the checkpoint's own lm_head.weight equals the embedding in every byte"
+                if head is not None and head.kind == "same" else "")
+        chosen = Fact("ModelProps", ModelProps(tie_word_embeddings=True),
+                      Source("engine", f"{consumer} ties the head to the embedding: the config it holds says "
+                                       f"tie_word_embeddings{same}"), Certainty.VERIFIED)
     else:
-        chosen = Fact("ModelProps", ModelProps(tie_word_embeddings=loader_ties),
-                      Source("engine", f"{consumer} ties the head to the embedding exactly when the config it holds "
-                                       f"says tie_word_embeddings"), Certainty.VERIFIED)
+        chosen = Fact("ModelProps", ModelProps(tie_word_embeddings=False),
+                      Source("engine", f"{consumer} does not tie: the config it holds says tie_word_embeddings is "
+                                       f"false"), Certainty.VERIFIED)
     contract = Contract(f"load:{consumer}", consumer, ("ModelProps",), ("ModelProps",))
     return decide(contract, {"ModelProps": tuple(candidates)}, {"ModelProps": chosen}, policy,
                   observed={"ModelProps": observed} if observed is not None else None)
@@ -346,13 +402,68 @@ def keys_taken(raw: dict, known: set, resolved: dict):
     return taken, left, notes
 
 
+def _vocabulary_keys() -> Dict[str, str]:
+    """config.json key -> the fact and field entail's readers map it to (the hf_config names of data/aliases.json)."""
+    out = {}
+    for fact, table in _readers.ALIASES.items():
+        names = table.get("hf_config") if isinstance(table, dict) else None
+        if not isinstance(names, dict):
+            continue
+        for field_name, keys in names.items():
+            for k in (keys if isinstance(keys, list) else [keys]):
+                out.setdefault(k, f"{fact}.{field_name}")
+    return out
+
+
+VOCABULARY_KEYS = _vocabulary_keys()
+
+
+def _distance(a: str, b: str) -> int:
+    """Edits (insert, delete, substitute) that turn `a` into `b`."""
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def misspelt(key: str) -> Optional[str]:
+    """The vocabulary key that `key` (with or without a scope prefix) looks like a misspelling of, or None: within
+    three edits and less than half the name away (rope_scale -> rope_scaling, rolebench 15). A name shorter than
+    five characters (type) is no target: too much is one edit from it. The bound was chosen on data: of 215 keys
+    left unread on 92 popular models, none is within three edits of a vocabulary name
+    (testbed/results/m10/e1_llm/coverage_rule_whatif_vocab.json)."""
+    base = key.rsplit(".", 1)[-1]
+    best = None
+    for name in VOCABULARY_KEYS:
+        if len(name) < 5 or name == base:
+            continue
+        d = _distance(base, name)
+        if d <= 3 and d * 2 < len(name) and (best is None or d < best[0]):
+            best = (d, name)
+    return best[1] if best else None
+
+
 def config_keys(engine: str, scopes: Sequence[tuple], where: str, policy: Optional[Policy] = None
                 ) -> List[Decision]:
     """Coverage of config.json by the engine's config class. `scopes` is a list of (prefix, raw dict, the fields the
-    class knows, the class's resolved dict) - the top level and a nested text_config. rolebench 15 -> broken
-    (refused where the policy stops)."""
+    class knows, the class's resolved dict) - the top level and a nested text_config. A key the class does not take
+    is one of three things (1.0.1, M11.1; 1.0 called all three broken, which was wrong in 17 of 81 runs on 30
+    popular models, testbed/results/m10/E2_SUMMARY.md):
+      - a misspelling of a key the vocabulary maps (rope_scale for rope_scaling): no reader can pick it up, so the
+        meaning is lost here -> broken (refused where the policy stops); rolebench 15;
+      - a key the vocabulary maps, spelt right (rope_theta given to a class with no rope fields): its fact is
+        declared from the file and compared where a consumer of that fact reads it, so this boundary does not
+        decide it;
+      - any other key (swiglu_limit, task_specific_params): entail has no reader for it and cannot say whether the
+        model needed it.
+    The last two make one unknown decision that names the keys, blocking only in debug mode. The chosen Coverage
+    counts every key the class did not take, whatever the verdict."""
     from .coverage import Coverage
 
+    policy = policy or Policy()
     given, left, notes = 0, [], []
     for prefix, raw, known, resolved in scopes:
         t, lft, n = keys_taken(raw, set(known), resolved)
@@ -361,16 +472,32 @@ def config_keys(engine: str, scopes: Sequence[tuple], where: str, policy: Option
         notes += [prefix + x for x in n]
     if given == 0:
         return []
+    wrong = {k: v for k, v in ((k, misspelt(k)) for k in left) if v}
+    mapped = [k for k in left if k not in wrong and k.rsplit(".", 1)[-1] in VOCABULARY_KEYS]
+    unread = [k for k in left if k not in wrong and k not in mapped]
     declared_fact = Fact("Coverage", Coverage(given, given, ()), Source("config", f"{where} (every key it gives)"),
                          Certainty.DECLARED)
     chosen = Fact("Coverage", Coverage(given, given - len(left), tuple(sorted(left))),
                   Source("engine", f"{engine} config class: a key is taken if the class knows it or its value landed "
                                    f"in a field it knows"), Certainty.VERIFIED)
     contract = Contract(f"load:{engine}.config", f"{engine}.config", ("Coverage",), ("Coverage",))
-    out = decide(contract, {"Coverage": declared_fact}, {"Coverage": chosen}, policy)
+    said = []
+    if wrong:
+        said.append("misspelt: " + ", ".join(f"{k} (nearest key the vocabulary maps: {v})"
+                                             for k, v in sorted(wrong.items())))
+    if unread:
+        said.append("not taken by the class and read by nothing entail knows: " + ", ".join(sorted(unread)))
+    if mapped:
+        said.append("not taken by the class; compared where a consumer of the fact reads it: "
+                    + ", ".join(f"{k} ({VOCABULARY_KEYS[k.rsplit('.', 1)[-1]]})" for k in sorted(mapped)))
     if notes:
-        out = [replace(d, note=f"read elsewhere: {'; '.join(notes)}") for d in out]
-    return out
+        said.append(f"read elsewhere: {'; '.join(notes)}")
+    if wrong or not left:
+        out = decide(contract, {"Coverage": declared_fact}, {"Coverage": chosen}, policy)
+    else:
+        out = [Decision(contract, "Coverage", Verdict.UNKNOWN, RULES["declared_unread"], declared=declared_fact,
+                        chosen=chosen, blocking=policy.mode == "debug")]
+    return [replace(d, note="; ".join(said)) for d in out] if said else out
 
 
 def rotary_write(engine: str, owner: str, key: str, meant, as_engine, scope: str = "",
@@ -513,6 +640,8 @@ def weights_written(boundary: str, weights: Sequence[Weight], before: Optional[D
         if declared is not None:
             seen, problem = _observe.weight_layout(w.tensor, w.in_features, w.out_features, w.scale, where)
             contract = Contract(boundary, w.producer, ("Layout",))
+            if problem and problem.startswith(f"{where}: "):   # grouped by the reason, not per weight (M11.1)
+                problem = problem[len(where) + 2:]
             if seen is None:
                 not_checked(w.producer, "Layout", problem, w.layer)
             elif problem and w.in_features and w.out_features and declared.value.orientation is not None:
@@ -631,12 +760,15 @@ def rotary_held(engine: str, facts: Declared, config, policy: Optional[Policy] =
 
 
 def model_contracts(engine: str, model_path: Optional[str], config, loader_ties: Optional[bool],
-                    policy: Optional[Policy] = None) -> List[Decision]:
+                    policy: Optional[Policy] = None, compares_head: bool = False,
+                    tied_in_memory: Optional[bool] = None) -> List[Decision]:
     """The contracts about the model itself, for an engine's load hook once the model is built: tie against the
-    checkpoint, the RoPE the engine holds, and a stored layout against its data (the kernel that reads it is not in
-    the capability table yet, so that one is reported as unknown unless the data contradicts the declaration)."""
+    checkpoint (`compares_head`, `tied_in_memory`: see tie), the RoPE the engine holds, and a stored layout against
+    its data (the kernel that reads it is not in the capability table yet, so that one is reported as unknown
+    unless the data contradicts the declaration)."""
     facts = declared(model_path, config)
-    out = tie(engine, facts, model_path, loader_ties, policy)
+    out = tie(engine, facts, model_path, loader_ties, policy, compares_head=compares_head,
+              tied_in_memory=tied_in_memory)
     if config is not None:
         out += rotary_held(engine, facts, config, policy)
     if facts.get("Layout") and model_path:

@@ -162,8 +162,15 @@ def read_hf_dict(cfg, label, source_kind="config", from_object=False):
         props["softcap"], used = v, used + [prefix + key]
     key, v = _first(text, k["sliding_window"])
     _, enabled = _first(text, k["window_enabled"])
+    mkey, max_pos = _first(text, ALIASES["ModelProps"]["hf_config_bounds"]["max_position"])
     if key and enabled is not False:       # a window the config switches off is not a requirement
-        props["sliding_window"], used = v, used + [prefix + key]
+        if isinstance(v, int) and isinstance(max_pos, int) and not isinstance(v, bool) and v >= max_pos:
+            # M11.4: Phi-3.5 and Phi-4-mini declare a window of 262144 over 131072 positions: it never binds, so no
+            # backend can drop it; not read as a requirement (1.0 switched backends over it)
+            r.problems.append(f"{file}#{prefix}{key}: sliding_window {v} is not below {mkey} {max_pos}, so it never "
+                              f"binds; not read as a requirement")
+        else:
+            props["sliding_window"], used = v, used + [prefix + key]
     for scope, p in ((cfg, ""), (text, prefix)):
         key, v = _first(scope, k["tie"])
         if key:
@@ -245,30 +252,51 @@ class HfTemplate:
                                            for f in ("tokenizer_config.json", "chat_template.jinja"))
 
     def read(self, path):
+        """The chat template a model folder declares. A chat_template.jinja file takes precedence over the entry in
+        tokenizer_config.json: transformers 5.17 reads the file first and never the entry when the file exists
+        (tokenization_utils_base.from_pretrained), and vLLM and SGLang take the template from that tokenizer. So the
+        file is the declaration and the entry is not a second one (M11.3; 1.0 read both, and a checkpoint whose two
+        copies differed only by blank lines was reported broken at every request). An entry that differs from the
+        file beyond blank lines and trailing spaces is noted: it is not what runs."""
         r = ReadResult()
+        files = []
+        for name in ALIASES["Template"]["hf_files"]["chat_template"]:
+            p = os.path.join(path, name)
+            if os.path.isfile(p):
+                with open(p, encoding="utf-8") as f:
+                    text = f.read()
+                files.append((p, text))
+                _emit(r, "Template", lambda text=text: Template(sha256_text(text)), "config", p)
         tc_path = os.path.join(path, "tokenizer_config.json")
+        entry = None
         if os.path.isfile(tc_path):
             key, ct = _first(_load_json(tc_path), ALIASES["Template"]["hf_tokenizer_config"]["chat_template"])
             where = f"{tc_path}#{key}"
             if isinstance(ct, str):
-                _emit(r, "Template", lambda: Template(sha256_text(ct)), "config", where)
+                entry = (where, ct)
             elif isinstance(ct, list):
                 named = {t.get("name"): t.get("template") for t in ct if isinstance(t, dict)}
                 if isinstance(named.get("default"), str):
-                    _emit(r, "Template", lambda: Template(sha256_text(named["default"])), "config", where + "[default]")
+                    entry = (where + "[default]", named["default"])
                 others = sorted(n for n in named if n != "default")
                 if others:
                     r.problems.append(f"{where}: named templates {others} besides 'default' are not in "
                                       f"vocabulary v{VOCAB_VERSION}")
                 if "default" not in named:
                     r.problems.append(f"{where}: a list of templates without a 'default' one")
-        for name in ALIASES["Template"]["hf_files"]["chat_template"]:
-            p = os.path.join(path, name)
-            if os.path.isfile(p):
-                with open(p, encoding="utf-8") as f:
-                    text = f.read()
-                _emit(r, "Template", lambda: Template(sha256_text(text)), "config", p)
+        if entry is not None and not files:
+            _emit(r, "Template", lambda: Template(sha256_text(entry[1])), "config", entry[0])
+        elif entry is not None and not any(same_template(entry[1], text) for _, text in files):
+            r.problems.append(f"{entry[0]} differs from {files[0][0]}, which transformers reads first; the entry "
+                              f"is not what runs")
         return r
+
+
+def same_template(a, b):
+    """Two template texts that differ at most by blank lines and trailing spaces."""
+    def lines(t):
+        return [x.rstrip() for x in t.splitlines() if x.strip()]
+    return lines(a) == lines(b)
 
 
 # --- diffusers folders ------------------------------------------------------------------------------------------

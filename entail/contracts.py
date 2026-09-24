@@ -56,6 +56,9 @@ RULES = {
     "policy_refuses": "the consumer differs from the declaration and the policy repairs nothing",
     "user_choice": "the user's explicit choice contradicts the declaration; it is not overridden",
     "consumer_unknown": "what the consumer uses is unknown (not read, or not in the capability table)",
+    "consumer_inferred": "what the consumer uses is inferred from its code, not measured; nothing is switched on it",
+    "declared_unread": "declared, but taken by nothing entail knows: the config class does not take it and no "
+                       "reader of it is registered",
     "undeclared": "nothing declares it",
     "inferred_only": "only inferred, never declared",
     "defaulted_only": "only a default, never declared",

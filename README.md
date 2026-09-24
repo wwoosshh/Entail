@@ -19,7 +19,7 @@ The goal of entail is to make that meaning explicit, like a type:
 The name is the logical sense of *entail*: what a checkpoint declares must entail what the engine executes.
 (ent·**AI**·**L** — an AI library.)
 
-> **Status: 1.0, measured on one machine.** Everything below was measured on the engines and versions under
+> **Status: 1.0.1, measured on one machine.** Everything below was measured on the engines and versions under
 > [Tested with](#tested-with), on one RTX 4070 Ti. The 1.0 evaluation is summarised under
 > [How it was measured](#how-it-was-measured), and what it found missing under [Known gaps](#known-gaps).
 > entail does not look for defects inside a model, a compiler, a kernel or the hardware: when every boundary it
@@ -206,6 +206,11 @@ For 1.0 every measurement of the development milestones was run again on the fin
 - **Healthy runs** (Qwen3-4B, Llama-3.2-3B-Instruct and gemma-2-2b-it on transformers, vLLM and SGLang, each
   engine's defaults): no false alarm. Two repairs, both where a backend drops Gemma 2's soft-capping. Every fact
   the model folders declare reached a decision where it was used, the chat template included.
+- **Wider healthy runs, for 1.0.1** (38 popular models that fit one 12 GB card, chosen by download rank, on the
+  same three engines; 102 valid runs): 1.0.0 reported something wrong in 17 of the first 81 runs, none of it a
+  real loss - the five causes are in the changelog. With 1.0.1: no `broken`, no `refused`, two repairs (Gemma 2's
+  soft-capping again, measured rows), every output identical to the run without entail, load cost median
+  0.7-0.9%. What 1.0.1 cannot decide it now says as `unknown` (69 lines over the 81 runs, one per boundary).
 - **31 test problems** (16 reproduction cases, 8 field cases, 7 simulated market incidents): each defect was
   repaired; where no repair exists, it was reported at the boundary and fact where it happened while the run
   went on, or stopped with `ENTAIL_ON_BROKEN=stop`. No fixed version was flagged. (The two ComfyUI cases were
@@ -231,6 +236,11 @@ For 1.0 every measurement of the development milestones was run again on the fin
   `ENTAIL_ON_BROKEN=stop` gets SGLang's own error (500); vLLM's server answers 400.
 - RoPE keys the vocabulary does not carry (yarn's `beta_fast`, longrope's factor lists) are reported as not
   compared.
+- A mismatch the capability table knows only from reading an engine's code (SGLang flashinfer's sliding window) is
+  reported as inferred, not repaired; only measured rows switch a backend. Config keys outside the vocabulary that
+  a model's config class does not take are reported as unread, not as lost.
+- SGLang's KV contract skips speculative-decoding batches (the scheduler reserves draft slots ahead of the tokens)
+  and says so once per process.
 - One GPU. The reduction contracts (a value summed twice across ranks) were measured with one process standing
   in for two ranks.
 

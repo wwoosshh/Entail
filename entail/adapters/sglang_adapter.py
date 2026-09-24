@@ -27,6 +27,11 @@ _ORIG_LOAD = None
 _DECIDED = "_entail_decided"
 
 
+# SGLang 0.5.20 ties when the config says so and skips a shipped lm_head.weight (model_loader/loader.py), so it
+# never compares the two (load.tie, M11.2)
+compares_head = False
+
+
 def hooks():
     return [Hook("sglang.srt.model_executor.model_runner.resolve_attention_backend_strs", "load"),
             Hook("sglang.srt.model_executor.model_runner.ModelRunner.init_attention_backends", "load"),
@@ -133,7 +138,7 @@ def _install_load(ModelRunner):
 
             def decide():
                 load.enforce(load.model_contracts(engine, path, config, tie if isinstance(tie, bool) else None,
-                                                  policies.current()))
+                                                  policies.current(), compares_head=compares_head))
 
             if config is not None:
                 load.safely(f"load:{engine}.loader", f"{engine}.loader", "ModelProps", decide)

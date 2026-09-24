@@ -19,6 +19,15 @@ BUDGET = {
 }
 
 
+def compares_head(engine: str) -> bool:
+    """Whether the engine's loader compares a shipped lm_head.weight with the embedding before tying (load.tie,
+    M11.2): what each adapter states of its engine version; False for an engine without an adapter."""
+    from .adapters import sglang_adapter, transformers_adapter, vllm_loader
+
+    module = {"transformers": transformers_adapter, "vllm": vllm_loader, "sglang": sglang_adapter}.get(engine)
+    return bool(getattr(module, "compares_head", False))
+
+
 def check_static(model_path: str, engine: str, settings: dict):
     """`entail check` (M3.4): the load decisions for a model folder and an engine, before anything runs, without a
     GPU. settings: "attention" (a backend name, or None for every backend of the engine in the capability table),
@@ -77,7 +86,7 @@ def check_static(model_path: str, engine: str, settings: dict):
         return load.config_keys(engine, scopes, cfg_file, policy)
 
     checks = [("tie", lambda: load.tie(engine, facts, path, loader_ties=tie if isinstance(tie, bool) else None,
-                                       policy=policy))]
+                                       policy=policy, compares_head=compares_head(engine)))]
     if config is not None and isinstance(raw, dict):
         checks.append(("config keys", keys))
     if facts.get("Layout"):
@@ -103,7 +112,7 @@ def at_load(model_path, engine: str, choices: dict, policy=None, config=None, ta
     out = []
     if choices.get("attention"):
         out += load.attention(engine, choices["attention"], facts, table, policy)
-    out += load.tie(engine, facts, model_path, choices.get("tie"), policy)
+    out += load.tie(engine, facts, model_path, choices.get("tie"), policy, compares_head=compares_head(engine))
     if choices.get("layout"):
         seen = observe.scale_format(os.path.expanduser(model_path)) if model_path else None
         out += load.layout(choices["layout"], facts, table, observed=seen, policy=policy)

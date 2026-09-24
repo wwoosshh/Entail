@@ -162,6 +162,14 @@ def test_an_untouched_weight_passes_both():
     assert "no values were sampled" in u.note and not u.blocking, u
 
 
+def test_weights_that_cannot_be_read_are_one_line_per_reason():
+    """M11.1: 42 conv1d weights of one model were 42 lines in 1.0 (the weight's name was part of the reason)."""
+    weights = [w(torch.zeros(16, 1, 4), layer=f"model.layers.{i}.mixer.conv1d") for i in range(3)]
+    (d,) = [x for x in written(weights) if x.name == "Layout"]
+    assert d.verdict is Verdict.UNKNOWN and d.note.startswith("3 weight(s) (first: model.layers.0.mixer.conv1d): "
+                                                              "not a matrix (shape (16, 1, 4))"), d.note
+
+
 def test_an_unsigned_method_is_reported_not_passed_and_stops_only_in_debug():
     weights = [w(torch.zeros(OUT, IN), "vllm.quant_method.SomeNewQuantMethod", layer=f"l{i}") for i in range(3)]
     (d,) = written(weights)

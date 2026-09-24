@@ -5,9 +5,11 @@ Three things, and no rules:
                (modeling_utils.py:1263), before the weights are read, and inside set_attn_implementation, which is
                how continuous batching switches to `paged|...`.
                PreTrainedModel.tie_weights: where the head is tied to the embedding (post_init and after loading);
-               the contracts about the model itself (load.model_contracts) run there, once per model.
+               the contracts about the model itself (load.model_contracts) run there, once per model, at the call
+               that has the weights (from_pretrained's, which passes missing_keys; M11.2).
   read_choice  the implementation it settled on, as (group, backend): "paged|sdpa" is sdpa among the paged kernels;
-               whether the loader ties the head (what the config it holds says).
+               whether the loader was told to tie the head (what the config it holds says) and what it left in
+               the model (tied_in_memory: the output embedding sharing the input embedding's tensor, or not).
   handle       switch_attention_backend: ask the same method for another implementation.
 load.attention compares the model's declarations with the backend (caps.json) and decides; load.enforce records the
 decision, prints it, and stops on a blocking one. With the mode off the wrapper returns at once, and uninstall()
@@ -37,8 +39,13 @@ def read_choice(impl):
     return "attention", impl
 
 
+compares_head = True   # transformers 5.17: tie_weights keeps a shipped head that differs from the embedding
+
+
 def loader_ties(config):
-    """Whether the loader will tie the head: the tie_word_embeddings the config holds (top level, else text_config)."""
+    """Whether the loader is told to tie the head: the tie_word_embeddings the config holds (top level, else
+    text_config). PreTrainedModel.tie_weights (5.17) compares a shipped lm_head.weight with the embedding and ties
+    only equal ones: load.tie decides with `compares_head` (M11.2)."""
     tie = getattr(config, "tie_word_embeddings", None)
     if tie is None:
         tie = getattr(getattr(config, "text_config", None), "tie_word_embeddings", None)
@@ -83,6 +90,29 @@ def install():
     return 1
 
 
+def tied_in_memory(model):
+    """Whether the model's output embedding shares its weight tensor with its input embedding, read after
+    tie_weights; None when the model has no output embedding (an encoder) or its weights are not real yet (meta)."""
+    try:
+        out, inp = model.get_output_embeddings(), model.get_input_embeddings()
+    except Exception:  # noqa: BLE001 - a model without the accessors: nothing to read
+        return None
+    w_out, w_in = getattr(out, "weight", None), getattr(inp, "weight", None)
+    if w_out is None or w_in is None or "meta" in (str(w_out.device), str(w_in.device)):
+        return None
+    return w_out is w_in or w_out.data_ptr() == w_in.data_ptr()
+
+
+def weights_there(model, args, kwargs):
+    """Whether this tie_weights call is the one with the weights: from_pretrained's, which passes missing_keys after
+    loading (transformers 5.17 modeling_utils), or any call on a model whose parameters are not on the meta device
+    (a model built in memory). The call post_init makes on a meta model is not it."""
+    if kwargs.get("missing_keys") is not None or (args and args[0] is not None):
+        return True
+    p = next(model.parameters(), None)
+    return p is None or p.device.type != "meta"
+
+
 def _install_tie(PreTrainedModel):
     global _ORIG_TIE
     _ORIG_TIE = PreTrainedModel.tie_weights
@@ -90,12 +120,14 @@ def _install_tie(PreTrainedModel):
     def tie_weights(self, *a, **kw):
         out = _ORIG_TIE(self, *a, **kw)
         config = getattr(self, "config", None)
-        if core.mode() in ("load", "debug") and config is not None and not _SEEN.get(config):
+        if core.mode() in ("load", "debug") and config is not None and not _SEEN.get(config) \
+                and weights_there(self, a, kw):
             _SEEN.set(config, True)
 
             def decide():
                 load.enforce(load.model_contracts(engine, getattr(config, "_name_or_path", None), config,
-                                                  loader_ties(config), policies.current()))
+                                                  loader_ties(config), policies.current(),
+                                                  compares_head=compares_head, tied_in_memory=tied_in_memory(self)))
 
             load.safely(f"load:{engine}.loader", f"{engine}.loader", "ModelProps", decide)
         return out

@@ -244,9 +244,37 @@ def test_a_vae_with_another_familys_scale_gets_the_folders():
     assert printed == "", "a pipeline entail did not see being built has no known declaration: nothing decided"
 
 
-def test_a_pipeline_from_the_hub_is_reported_as_not_checked():
-    _, printed = run(lambda: SDXLPipeline.from_pretrained("someone/some-model"))
-    assert "unknown at load:diffusers.pipeline" in printed and "not a local folder" in printed
+def test_a_pipeline_from_the_hub_is_checked_from_the_local_cache_or_reported():
+    from types import SimpleNamespace
+
+    hub = sys.modules.get("huggingface_hub")
+    try:
+        # M11.6: the hub id resolves to the folder diffusers has just filled in the local cache: checked like a folder
+        d = folder({"prediction_type": "v_prediction"}, {"scaling_factor": 0.13025})
+        asked = []
+
+        def snapshot_download(**kw):
+            asked.append(kw)
+            return d
+
+        sys.modules["huggingface_hub"] = SimpleNamespace(snapshot_download=snapshot_download)
+        pipe, printed = run(lambda: SDXLPipeline.from_pretrained("someone/some-model", revision="v2"))
+        assert asked == [{"repo_id": "someone/some-model", "revision": "v2", "cache_dir": None,
+                          "local_files_only": True}], asked
+        assert "resolved at load:diffusers.prediction" in printed and pipe.scheduler.config["prediction_type"] == "v_prediction"
+        assert da.local_snapshot(d, {}) is None and da.local_snapshot(3, {}) is None   # a folder is used as itself
+
+        def not_cached(**kw):
+            raise FileNotFoundError("not cached")
+
+        sys.modules["huggingface_hub"] = SimpleNamespace(snapshot_download=not_cached)
+        _, printed = run(lambda: SDXLPipeline.from_pretrained("someone/other-model"))
+        assert "unknown at load:diffusers.pipeline" in printed and "not a local folder" in printed
+    finally:
+        if hub is None:
+            sys.modules.pop("huggingface_hub", None)
+        else:
+            sys.modules["huggingface_hub"] = hub
 
 
 def test_a_lora_that_reaches_nothing_is_reported():

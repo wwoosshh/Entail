@@ -22,6 +22,7 @@
   },
   "ModelProps": {
     "hf_config": {"softcap": ["attn_logit_softcapping"], "sliding_window": ["sliding_window"], "window_enabled": ["use_sliding_window"], "tie": ["tie_word_embeddings"]},
+    "hf_config_bounds": {"max_position": ["max_position_embeddings"]},
     "gguf": {"softcap": ["{arch}.attn_logit_softcapping"], "sliding_window": ["{arch}.attention.sliding_window"]}
   },
   "Rotary": {

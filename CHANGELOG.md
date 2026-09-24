@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.0.1
+
+Unreleased. False alarms found when 1.0.0 was run on 30 popular models, three engines each (81 runs: it never broke a
+run and every output was identical, but 17 runs carried a report that was wrong; `testbed/results/m10/E2_SUMMARY.md`
+in the research repository). Nothing in the vocabulary or the verdicts changes; what changes is what counts as
+evidence at five boundaries, and how much is said.
+
+**Fixed**
+- Config keys (`load.config_keys`): a key the model's config class does not take was `broken` whatever it was, and
+  popular models carry keys nobody reads (`swiglu_limit`, `task_specific_params`; 45 of the 81 runs). Now only a
+  misspelling of a key entail's vocabulary maps is `broken` (`rope_scale` for `rope_scaling`: nobody can read it, so
+  it is lost here). A key spelt right that the class does not take is decided where a consumer of its fact reads
+  it; any other unread key is one `unknown` line that names the keys, blocking only in debug mode. On 215 unread
+  keys of 92 popular models the new rule flags none; the rolebench 15 case stays `broken`.
+- Tied embeddings (`load.tie`): vLLM 0.30 sets `tie_word_embeddings` to False when the checkpoint ships an
+  `lm_head.weight`, loads it and re-ties it when it equals the embedding; transformers 5.17 compares the two the same
+  way. 1.0.0 read the False as the loader's choice and reported Qwen3 0.6B, 1.7B and quantised exports (a stored copy
+  of the tied head) as `broken`. Now the adapters read what the loader left in the model - the head sharing the
+  embedding's tensor, or its own - after its step (vLLM after `process_weights_after_loading`, transformers at the
+  `tie_weights` call that has the weights), and the checkpoint is only sampled. A copy satisfies a declared tie; a
+  different head is what those loaders run, so the declaration is reported false, and with `use_data` the head that
+  runs passes as the data used. The static check (`entail check`), which has no model in memory, compares the
+  checkpoint's head with the embedding byte for byte (`observe.head`). SGLang 0.5.20 ties regardless, and is
+  decided as before.
+- Chat template (`readers.HfTemplate`): `chat_template.jinja` takes precedence over the entry in
+  `tokenizer_config.json`, as transformers reads them; the entry is no longer a second declaration. A checkpoint
+  whose two copies differed by blank lines only was reported `broken` at every request. An entry that differs from
+  the file beyond blank lines and trailing spaces is noted as not what runs.
+- Evidence for a repair (`load.attention`, `load.tool_parser`): a mismatch the capability table knows only from
+  reading code (SGLang flashinfer's sliding window) is reported as `unknown` - "inferred from its code, not
+  measured; nothing is switched on it" - instead of switching the backend on it. A declared sliding window that
+  is not below `max_position_embeddings` (Phi-3.5, Phi-4-mini: 262144 over 131072) never binds and is not read as a
+  requirement.
+- SGLang KV contract under speculative decoding: the scheduler reserves draft slots ahead of the tokens, which the
+  contract reported as reserved and written slots disagreeing at every step. Speculative batches are now skipped
+  and said so once per process.
+- diffusers pipelines named by a hub id are checked from the folder in the local huggingface_hub cache; 1.0.0 checked
+  only local folders.
+- Weights the layout step cannot read (a conv1d in a hybrid model) are one line per reason, not one per weight (42
+  lines per load of Nemotron-H).
+
 ## 1.0.0
 
 A redesign. 0.3.0 was a set of checks and resolvers for cases that had been measured one by one; 1.0 is one

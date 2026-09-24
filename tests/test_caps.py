@@ -113,6 +113,18 @@ def test_what_a_consumer_uses():
     u = caps.uses(t, "e.attention.d", both)                      # one field dropped, the other unknown
     assert u.value == ModelProps() and u.dropped == ("ModelProps.sliding_window",) and u.unknown == ("ModelProps.softcap",)
     assert caps.uses(t, "e.attention.b", ModelProps(sliding_window=16)).value == ModelProps(sliding_window=16)
+    # the rows behind a mismatch, with their evidence (M11.4: a code-read mismatch is inferred, not acted on)
+    assert caps.disagreements(t, "e.attention.a", both) == []
+    assert caps.disagreements(t, "e.attention.b", both) == [("ModelProps.softcap", "measured", None)]
+    assert caps.disagreements(t, "e.attention.x", both) == []                  # nothing known: nothing disagrees
+    assert caps.disagreements(t, "e.attention.b", ModelProps(sliding_window=16)) == []
+    guessed = caps.from_rows([row(consumer="e.attention.g", fact="ModelProps.softcap", honours=False, evidence="code"),
+                              row(consumer="e.parser.p", fact="Template.tool_call_format", honours=False,
+                                  evidence="code", reads="pythonic")], {})
+    assert caps.disagreements(guessed, "e.attention.g", both) == [("ModelProps.softcap", "code", None)]
+    from entail.facts import Template
+    assert caps.disagreements(guessed, "e.parser.p", Template(tool_call_format="hermes")) == \
+        [("Template.tool_call_format", "code", "pythonic")]
 
 
 def test_the_chosen_fact_says_how_it_is_known():

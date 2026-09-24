@@ -5,6 +5,8 @@ a behaviour probe. What is claimed is a Fact with Source kind "data" and certain
 settle the question nothing is claimed. From the files, only safetensors headers and a few element bytes are read;
 no tensor is loaded and torch is not needed:
 
+  head(path)           the checkpoint's lm_head.weight against its embedding: absent, differs, or the same in every
+                       byte (a stored copy of a tied head; M11.2)
   tie(path)            ModelProps.tie_word_embeddings: no lm_head.weight means the head is the embedding; a head
                        whose shape, dtype or sampled bytes differ from the embedding is not tied
   scale_format(path)   Layout.scale_format of block-quantized weights: the dtype of their scale tensors
@@ -63,10 +65,46 @@ class Checkpoint:
             fh.seek(start + row * shape[1] * size)
             return fh.read(min(count, shape[1]) * size)
 
+    def same_bytes(self, a, b, chunk=1 << 23):
+        """None when two tensors of one dtype and shape hold the same bytes, else the offset of the first byte that
+        differs. Read in chunks, stopping at the first difference."""
+        fa, dtype, shape, oa = self.tensors[a]
+        fb, _, _, ob = self.tensors[b]
+        n = _SIZE[dtype]
+        for s in shape:
+            n *= s
+        done = 0
+        with open(fa, "rb") as ha, open(fb, "rb") as hb:
+            ha.seek(oa)
+            hb.seek(ob)
+            while done < n:
+                x, y = ha.read(min(chunk, n - done)), hb.read(min(chunk, n - done))
+                if x != y:
+                    return done + next((i for i, (p, q) in enumerate(zip(x, y)) if p != q), min(len(x), len(y)))
+                if not x:
+                    break
+                done += len(x)
+        return None
 
-def tie(path):
-    """What the checkpoint shows about tied embeddings, or None when it cannot say (no checkpoint, or sampled bytes
-    that match - consistent with a tie, but a sample is not proof)."""
+
+class Head:
+    """What a checkpoint shows about its output head. `kind`: "absent" (no lm_head.weight: the head can only be the
+    embedding), "differs" (its dtype, shape or bytes differ from the embedding's), "same" (every byte equals the
+    embedding's: a stored copy of a tied head) or "sampled" (the sampled rows equal; the rest was not read)."""
+
+    def __init__(self, kind, where):
+        self.kind, self.where = kind, where
+
+    def __repr__(self):
+        return f"Head({self.kind!r}, {self.where!r})"
+
+
+def head(path, full=True):
+    """The checkpoint's lm_head.weight against its embedding, or None when the checkpoint cannot say (no safetensors,
+    not exactly one embedding, more than one head). Sixteen rows are sampled first; with `full`, a head whose sample
+    matches is then compared byte for byte (M11.2: vLLM 0.30 and transformers 5.17 compare the two tensors before
+    tying, so whether a shipped head is the embedding decides what the loader does). The full read costs the size of
+    the two tensors once per load, and only for a checkpoint that ships a copy of a tied head."""
     ck = Checkpoint(path)
     if not ck.tensors:
         return None
@@ -75,22 +113,38 @@ def tie(path):
         return None
     where = f"{path}: {len(ck.tensors)} tensors"
     if not heads:
-        return Fact("ModelProps", ModelProps(tie_word_embeddings=True),
-                    Source("data", f"{where}, no lm_head.weight (the head can only be the embedding)"),
-                    Certainty.VERIFIED)
+        return Head("absent", f"{where}, no lm_head.weight (the head can only be the embedding)")
     e, h = ck.tensors[embeds[0]], ck.tensors[heads[0]]
     if e[1:3] != h[1:3]:
-        return Fact("ModelProps", ModelProps(tie_word_embeddings=False),
-                    Source("data", f"{where}, lm_head.weight {h[1]} {list(h[2])} differs from the embedding "
-                                   f"{e[1]} {list(e[2])}"), Certainty.VERIFIED)
+        return Head("differs", f"{where}, lm_head.weight {h[1]} {list(h[2])} differs from the embedding {e[1]} "
+                               f"{list(e[2])}")
     rows = e[2][0]
     for i in range(ROWS):
         r = (i * max(1, rows // ROWS)) % rows
         if ck.row_bytes(embeds[0], r, COLS) != ck.row_bytes(heads[0], r, COLS):
-            return Fact("ModelProps", ModelProps(tie_word_embeddings=False),
-                        Source("data", f"{where}, lm_head.weight row {r} holds other bytes than the embedding"),
-                        Certainty.VERIFIED)
-    return None
+            return Head("differs", f"{where}, lm_head.weight row {r} holds other bytes than the embedding")
+    if not full:
+        return Head("sampled", f"{where}, lm_head.weight equals the embedding on {ROWS} sampled rows")
+    at = ck.same_bytes(embeds[0], heads[0])
+    if at is not None:
+        return Head("differs", f"{where}, lm_head.weight differs from the embedding (first at byte {at})")
+    return Head("same", f"{where}, lm_head.weight equals the embedding in every byte (a stored copy of the tied "
+                        f"head)")
+
+
+def tie_fact(h):
+    """ModelProps.tie_word_embeddings as a Head shows it: absent -> tied, differs -> not tied; None for a head that
+    equals the embedding (consistent with a tie and with a stored copy, so nothing is claimed) or no Head."""
+    if h is None or h.kind not in ("absent", "differs"):
+        return None
+    return Fact("ModelProps", ModelProps(tie_word_embeddings=h.kind == "absent"), Source("data", h.where),
+                Certainty.VERIFIED)
+
+
+def tie(path):
+    """What the checkpoint shows about tied embeddings, or None when it cannot say (no checkpoint, or sampled bytes
+    that match - consistent with a tie, but a sample is not proof; head(path) reads the whole tensors)."""
+    return tie_fact(head(path, full=False))
 
 
 # float dtype -> (bytes, struct code, exponent bits, mantissa bits)

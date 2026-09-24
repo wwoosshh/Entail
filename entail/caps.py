@@ -252,6 +252,19 @@ def uses(table: Table, consumer: str, declared) -> Use:
     return Use(value, tuple(dropped), tuple(unknown), tuple(rows))
 
 
+def disagreements(table: Table, consumer: str, declared) -> List[Tuple[str, str, object]]:
+    """(fact field, evidence, what it reads instead or None) for every field of `declared` that the table says
+    `consumer` drops or reads otherwise: the rows behind a mismatch, so a caller can tell one that is settled - it
+    was measured, or the row states what the consumer reads instead (a parser is its format) - from a drop read off
+    the code, which may hold on one path only (M11.4: reported as inferred, and nothing is switched on it)."""
+    out = []
+    for r in uses(table, consumer, declared).rows:
+        v = getattr(declared, r.fact.split(".", 1)[1])
+        if not (r.honours or (r.reads is not None and _read(r) == v)):
+            out.append((r.fact, r.evidence, None if r.reads is None else _read(r)))
+    return out
+
+
 def chosen_fact(table: Table, consumer: str, declared_fact: Fact) -> Fact:
     """`uses` as a Fact for contracts.decide: source "engine", the consumer and the evidence in its address, and the
     certainty of the weakest evidence (unknown when the table cannot say)."""

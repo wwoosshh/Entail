@@ -98,7 +98,19 @@ def test_attention_routes_to_a_backend_measured_to_honour_it():
     assert r.verdict is Verdict.RESOLVED and r.target == "triton"
     r = only(load.attention("sglang", "flashinfer", facts, policy=LOAD))
     assert r.verdict is Verdict.RESOLVED and r.target == "triton" and r.chosen.certainty is Certainty.INFERRED
+    assert "sliding_window (code)" in r.note if r.note else True
     assert only(load.attention("vllm", "FLASH_ATTN", facts, policy=LOAD)).verdict is Verdict.PASS
+    # M11.4: a mismatch the table knows only from reading code is reported as inferred, and nothing is switched on
+    # it (gemma-3-1b, Phi-4-mini on SGLang's flashinfer: the sliding-window row is code-read); softcap above was
+    # measured, so gemma-2 is still routed
+    window = model_folder(dict(GEMMA, attn_logit_softcapping=None))
+    r = only(load.attention("sglang", "flashinfer", load.declared(window), policy=LOAD))
+    assert r.verdict is Verdict.UNKNOWN and not r.blocking and r.rule.startswith("what the consumer uses is inferred")
+    assert r.note == "inferred, not measured: ModelProps.sliding_window (code)" and r.resolution is None
+    r = only(load.attention("sglang", "flashinfer", load.declared(window), policy=Policy(mode="debug", **STOPS)))
+    assert r.verdict is Verdict.UNKNOWN and r.blocking
+    assert only(load.attention("sglang", "triton", load.declared(window), policy=LOAD)).verdict is Verdict.PASS
+    shutil.rmtree(window)
     r = only(load.attention("transformers", "sdpa", facts, policy=Policy(mode="load", **STOPS, on_mismatch="refuse")))
     assert r.verdict is Verdict.REFUSED and r.blocking
     shutil.rmtree(d)
@@ -152,7 +164,19 @@ def test_observe_tie_from_bytes():
     assert observe.tie(none).value == ModelProps(tie_word_embeddings=True)
     assert "differs from the embedding" in observe.tie(shape).source.where
     assert observe.tie(tempfile.mkdtemp()) is None
-    for p in (same, other, none, shape):
+    # the head against the embedding, byte for byte (M11.2)
+    assert observe.head(same).kind == "same" and "every byte" in observe.head(same).where
+    assert observe.head(same, full=False).kind == "sampled"
+    assert observe.head(other).kind == "differs" and observe.head(none).kind == "absent"
+    assert observe.head(shape).kind == "differs" and observe.tie_fact(observe.head(same)) is None
+    big = ("F32", (64, 2), f32(list(range(128))))            # 64 rows: the sample reads every fourth row
+    hidden = list(range(128))
+    hidden[2] = 999                                           # row 1, which the sample skips
+    tail = model_folder({}, {"model.embed_tokens.weight": big, "lm_head.weight": ("F32", (64, 2), f32(hidden))})
+    h = observe.head(tail)
+    assert h.kind == "differs" and "first at byte 9" in h.where and observe.tie(tail) is None, h   # 999.0 = 00 C0 79 44
+    assert observe.head(tail, full=False).kind == "sampled"
+    for p in (same, other, none, shape, tail):
         shutil.rmtree(p)
 
 
@@ -161,20 +185,50 @@ def test_tie_declaration_against_the_data():
     facts = load.declared(d)
     r = only(load.tie("transformers", facts, d, loader_ties=True, policy=LOAD))    # rolebench 07
     assert r.verdict is Verdict.REFUSED and r.rule == "the declaration contradicts the data" and r.blocking
-    r = only(load.tie("transformers", facts, d, loader_ties=True, policy=Policy(mode="load", **STOPS,
-                                                                              on_false_declaration="use_data")))
-    assert r.verdict is Verdict.REFUSED and r.rule.startswith("the consumer differs")   # the loader still ties
+    use_data = Policy(mode="load", **STOPS, on_false_declaration="use_data")
+    r = only(load.tie("sglang", facts, d, loader_ties=True, policy=use_data))
+    assert r.verdict is Verdict.REFUSED and r.rule.startswith("the consumer differs")   # SGLang ties regardless
+    # a loader that compares the two and keeps the checkpoint's head (vLLM 0.30, transformers 5.17): the declaration
+    # is still false, and with the data used it is what runs (M11.2)
+    r = only(load.tie("vllm", facts, d, loader_ties=True, policy=LOAD, compares_head=True))
+    assert r.verdict is Verdict.REFUSED and r.rule == "the declaration contradicts the data"
+    r = only(load.tie("vllm", facts, d, loader_ties=True, policy=use_data, compares_head=True))
+    assert r.verdict is Verdict.PASS and r.rule == "the declaration contradicts the data; the data's value is used"
+    assert r.chosen.value == ModelProps(tie_word_embeddings=False) and "keeps the checkpoint's own" in r.chosen.source.where
     ok = model_folder({"tie_word_embeddings": True}, {"model.embed_tokens.weight": EMBED})
     r = only(load.tie("transformers", load.declared(ok), ok, loader_ties=True, policy=LOAD))
     assert r.verdict is Verdict.PASS and r.declared.certainty is Certainty.VERIFIED
+    # M11.2: a stored copy of the tied head (Qwen3 0.6B) satisfies the declared tie, whether the loader ties it
+    # straight away or loads it, compares and re-ties (vLLM's maybe_untie/maybe_retie_word_embeddings)
+    copy = model_folder({"tie_word_embeddings": True}, {"model.embed_tokens.weight": EMBED, "lm_head.weight": EMBED})
+    r = only(load.tie("vllm", load.declared(copy), copy, loader_ties=True, policy=LOAD, compares_head=True))
+    assert r.verdict is Verdict.PASS and "equals the embedding in every byte" in r.chosen.source.where
+    assert only(load.tie("sglang", load.declared(copy), copy, loader_ties=True, policy=LOAD)).verdict is Verdict.PASS
+    r = only(load.tie("vllm", load.declared(copy), copy, loader_ties=False, policy=LOAD, compares_head=True))
+    assert r.verdict is Verdict.REFUSED and r.rule.startswith("the consumer differs")   # told not to tie: differs
     untied = model_folder({"tie_word_embeddings": False}, {"model.embed_tokens.weight": EMBED})
     r = only(load.tie("transformers", load.declared(untied), untied, loader_ties=False, policy=LOAD))
     assert r.verdict is Verdict.REFUSED                                          # no head to use: the model has none
+    own = model_folder({"tie_word_embeddings": False}, {"model.embed_tokens.weight": EMBED, "lm_head.weight": EMBED})
+    r = only(load.tie("vllm", load.declared(own), own, loader_ties=False, policy=LOAD, compares_head=True))
+    assert r.verdict is Verdict.PASS                # declared untied, its own head happens to equal the embedding
+    # what the loader left in the model, read by the adapter (tied_in_memory): the checkpoint is only sampled then,
+    # and the loader's own comparison decides (M11.2)
+    r = only(load.tie("vllm", load.declared(copy), copy, loader_ties=True, policy=LOAD, compares_head=True,
+                      tied_in_memory=True))
+    assert r.verdict is Verdict.PASS and "one tensor for both" in r.chosen.source.where
+    r = only(load.tie("vllm", facts, d, loader_ties=True, policy=use_data, compares_head=True, tied_in_memory=False))
+    assert r.verdict is Verdict.PASS and r.rule.endswith("the data's value is used")
+    assert "keeps a different one" in r.chosen.source.where
+    r = only(load.tie("vllm", facts, d, loader_ties=True, policy=LOAD, compares_head=True, tied_in_memory=False))
+    assert r.verdict is Verdict.REFUSED and r.rule == "the declaration contradicts the data"
+    r = only(load.tie("vllm", load.declared(own), own, loader_ties=False, policy=LOAD, tied_in_memory=False))
+    assert r.verdict is Verdict.PASS and r.chosen.source.where.endswith("(read from the model)")
     silent = model_folder({}, {"model.embed_tokens.weight": EMBED, "lm_head.weight": OTHER_HEAD})
     facts = load.declared(silent, SimpleNamespace(tie_word_embeddings=True))      # the class default says tie
     r = only(load.tie("transformers", facts, silent, loader_ties=True, policy=LOAD))
     assert r.verdict is Verdict.REFUSED and r.declared.source.kind == "data"
-    for p in (d, ok, untied, silent):
+    for p in (d, ok, copy, untied, own, silent):
         shutil.rmtree(p)
 
 
@@ -188,6 +242,7 @@ def test_config_keys():
     r = only(load.config_keys("transformers", [("", raw, known, resolved)], "config.json", LOAD))
     assert r.verdict is Verdict.REFUSED and r.chosen.value == Coverage(6, 5, ("rope_scale",))
     assert "architectures" in r.note and "transformers_version" in r.note
+    assert "misspelt: rope_scale (nearest key the vocabulary maps: rope_scaling)" in r.note      # M11.1
     raw.pop("rope_scale")
     r = only(load.config_keys("transformers", [("", raw, known, resolved)], "config.json", LOAD))
     assert r.verdict is Verdict.PASS                              # rope_theta renamed, but its value survived
@@ -195,10 +250,30 @@ def test_config_keys():
     held = dict(resolved, rope_parameters={"rope_type": "llama3", "factor": 32.0, "rope_theta": 500000.0})
     r = only(load.config_keys("transformers", [("", moved, known, held)], "config.json", LOAD))
     assert r.verdict is Verdict.PASS and "quantization_config" in r.note   # a dict that moved; a key read elsewhere
+    # a key the vocabulary maps, spelt right, that the class did not take: its own fact's contract decides it where
+    # a consumer reads it; here it is unknown, not broken (M11.1)
     lost = dict(raw, rope_scaling={"rope_type": "yarn", "factor": 4.0})
-    assert only(load.config_keys("transformers", [("", lost, known, held)], "c", LOAD)).verdict is Verdict.REFUSED
+    r = only(load.config_keys("transformers", [("", lost, known, held)], "c", LOAD))
+    assert r.verdict is Verdict.UNKNOWN and not r.blocking and r.chosen.value.left == ("rope_scaling",)
+    assert "compared where a consumer of the fact reads it: rope_scaling (Rotary.scaling)" in r.note
     r = only(load.config_keys("transformers", [("text_config.", {"rope_scale": 4.0}, known, resolved)], "c", LOAD))
-    assert r.chosen.value.left == ("text_config.rope_scale",)
+    assert r.chosen.value.left == ("text_config.rope_scale",) and r.verdict is Verdict.REFUSED
+    # a key outside the vocabulary that the class did not take: one unknown line naming it, blocking only in debug
+    # mode (M11.1; 1.0 called it broken on 17 of 81 runs of 30 popular models)
+    other = dict(raw, swiglu_limit=7.0, task_specific_params={"a": 1})
+    r = only(load.config_keys("transformers", [("", other, known, resolved)], "c", LOAD))
+    assert r.verdict is Verdict.UNKNOWN and not r.blocking and r.rule.startswith("declared, but taken by nothing")
+    assert r.chosen.value == Coverage(7, 5, ("swiglu_limit", "task_specific_params"))
+    assert "read by nothing entail knows: swiglu_limit, task_specific_params" in r.note and "architectures" in r.note
+    r = only(load.config_keys("transformers", [("", other, known, resolved)], "c", Policy(mode="debug", **STOPS)))
+    assert r.verdict is Verdict.UNKNOWN and r.blocking
+    both = dict(other, rope_scale=4.0)                            # a misspelling among them: broken, and both named
+    r = only(load.config_keys("transformers", [("", both, known, resolved)], "c", LOAD))
+    assert r.verdict is Verdict.REFUSED and "misspelt: rope_scale" in r.note and "swiglu_limit" in r.note
+    assert r.chosen.value == Coverage(8, 5, ("rope_scale", "swiglu_limit", "task_specific_params"))
+    assert load.misspelt("rope_scale") == "rope_scaling" and load.misspelt("text_config.rope_theta_") == "rope_theta"
+    assert load.misspelt("tie_word_embedding") == "tie_word_embeddings" and load.misspelt("rope_scaling") is None
+    assert load.misspelt("dtype") is None and load.misspelt("swiglu_limit") is None   # type is no target; not close
 
 
 # --- rotary (fd-rope) ----------------------------------------------------------------------------------------------
