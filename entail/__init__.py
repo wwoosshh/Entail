@@ -12,7 +12,7 @@ from .boundaries import advance  # noqa: E402
 from .facts import (LAYOUT_KINDS, Assumed, Epoch, KernelCaps, LatentScale, Layout, ModelProps, Origin, Positions,
                     Prediction, Quantized, Reduction, Rotary, Template, Valid)
 
-__version__ = "0.3.0"
+__version__ = "1.0.0"
 
 
 def enable(mode="load", policy="resolve"):

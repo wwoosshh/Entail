@@ -19,17 +19,11 @@ The goal of entail is to make that meaning explicit, like a type:
 The name is the logical sense of *entail*: what a checkpoint declares must entail what the engine executes.
 (ent·**AI**·**L** — an AI library.)
 
-> **Status: research prototype (alpha). Read this before relying on it.**
-> 0.3.0 is not yet that general mechanism. It is a set of specific checks and resolvers for cases that were
-> measured, listed under [What it does](#what-it-does):
-> - RoPE settings passed under old names
-> - attention backends that drop a declared property
-> - a few ComfyUI cases
-> - start-up checks and cache contracts on three LLM engines
->
-> Anything not listed there is not checked. The general layer is being built for the next major version: facts
-> read from model files and configs, contracts at load, cache and request boundaries, and a ledger that shows
-> where meaning broke. Measured on one RTX 4070 Ti with the versions under "Tested with".
+> **Status: 1.0, measured on one machine.** Everything below was measured on the engines and versions under
+> [Tested with](#tested-with), on one RTX 4070 Ti. The 1.0 evaluation is summarised under
+> [How it was measured](#how-it-was-measured), and what it found missing under [Known gaps](#known-gaps).
+> entail does not look for defects inside a model, a compiler, a kernel or the hardware: when every boundary it
+> checked held and the output is still wrong, it says so and narrows where to look.
 
 ## Why: a case measured end to end
 
@@ -40,10 +34,11 @@ Llama-3.2-3B-Instruct, greedy, GSM8K (first 500 on vLLM, first 200 on SGLang):
 
 | | untouched | same `rope_scaling` passed again at launch | with entail |
 |---|---|---|---|
-| vLLM 0.30.0 `--hf-overrides` | 379 / 500 | **279 / 500**, no warning | 378 / 500 |
+| vLLM 0.30.0 `--hf-overrides` | 379 / 500 | **273 / 500**, no warning | 376 / 500 |
 | SGLang 0.5.20 `--json-model-override-args` | 161 / 200 | **106 / 200** | 161 / 200 (outputs identical) |
 
-The degraded runs are identical to an explicit `rope_theta = 10000`. Outputs stay fluent; the answers are wrong.
+The vLLM row was measured again on 1.0; the SGLang row is from the earlier measurement. The degraded runs are
+identical to an explicit `rope_theta = 10000`. Outputs stay fluent; the answers are wrong.
 Qwen3 dense models happen to be safe because those model files fill in 1,000,000; Llama, Qwen3-MoE, Gemma and
 others do not.
 
@@ -88,6 +83,21 @@ import entail
 entail.enable()          # mode="load", policy="resolve"; child processes inherit it
 ```
 
+### When a model file does not say what it means
+
+Many image checkpoints declare nothing about their prediction type or latent scale, and entail then reports them
+as unknown instead of guessing. A manifest declares it from outside, the way a `.d.ts` file types a JavaScript
+library:
+
+```bash
+entail infer model.safetensors --out model.safetensors.entail.json   # what the file declares, and empty slots
+# fill in the slots you know, then mark it reviewed:
+entail pin model.safetensors.entail.json
+```
+
+A manifest next to the file is found by itself. Manifests kept in a folder (named `<sha256>.json`, the hash the
+draft records) are found through `ENTAIL_MANIFESTS`. Only a pinned manifest counts as a declaration.
+
 ### How it reaches engine worker processes
 
 vLLM and SGLang run the model in processes they start themselves. `pip install` puts one file,
@@ -103,9 +113,12 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
 |---|---|---|
 | a RoPE value given under its transformers-4 name after the config is built (`rope_theta`, `rope_scaling` — keyword to `from_pretrained`, attribute, vLLM `--hf-overrides`, SGLang `--json-model-override-args`) | written where `config.json` would have put it, including per-layer-type RoPE (asks the config class) | equal to the `config.json` route on 4 model families × 2 routes × 3 values; GSM8K restored (table above) |
 | an attention backend that drops a declared model property (e.g. Gemma 2 logit soft-capping on transformers `sdpa`, SGLang `flashinfer`) | switched to a backend measured to honour it (`eager`, `triton`) | tokens equal the reference run; cost 1.18× (transformers), 1.13× (SGLang, the backend's own price) |
-| **ComfyUI, diffusers:** a LoRA that cannot reach the model it is applied to (e.g. an Anima LoRA in an SDXL workflow), or reaches only part of it. ComfyUI skips each module with a console line and the run "succeeds" with the LoRA doing nothing | nothing can convert it: reported with how many of its modules reach the model and what the LoRA declares it was trained for, while the run goes on (`ENTAIL_ON_BROKEN=stop` stops before sampling) | on a real ComfyUI 0.34.1 with entail 0.3.0, which stopped here: the wrong pairing changed the image by 0.8/255 (the right LoRA: 35.2) behind 840 console lines; both wrong directions were caught; 22 right pairings (21 SDXL LoRAs incl. text encoders, 1 Anima) passed with no false alarm; images identical with entail on and off. The current adapters have not been measured on a real engine yet |
-| **ComfyUI, diffusers:** a v-prediction checkpoint that declares it in a way the engine does not read. ComfyUI reads only a `v_pred` key and samples a checkpoint that states `modelspec.prediction_type = v` in its metadata as eps; diffusers' single-file loader reads neither and falls back to epsilon. The images come out broken while the run "succeeds" | the file's own declaration (metadata, marker keys) or a pinned manifest decides: the sampler is set up for it, as a ModelSamplingDiscrete node or a rebuilt scheduler would, and what the declaration leaves open (zero-terminal SNR) keeps the engine's value. A sampling node or scheduler the user set is not overridden: the contradiction is reported. A checkpoint that declares nothing is reported as unknown: how the model behaves is never the basis for a change, so a checkpoint whose marker was lost needs a manifest | ComfyUI 0.34.1, AstolfoCarmix-VPredXL (declares v in its metadata, has no marker key): ComfyUI's own choice gave broken images; reading the declaration gave the author's reference setting (identical, 0.16 and 0.14/255 over three seeds; measured with a development version before these adapters). entail 0.3.0 judged by the first model call instead, missed this model (it behaves like eps at the noisiest step), and repaired a copy of NoobAI-XL-Vpred with its marker removed (67-102/255 from the right images, 12-20 with it); this version reports that copy as unknown unless a manifest declares it |
+| **ComfyUI, diffusers:** a LoRA that cannot reach the model it is applied to (e.g. an Anima LoRA in an SDXL workflow), or reaches only part of it. ComfyUI skips each module with a console line and the run "succeeds" with the LoRA doing nothing | nothing can convert it: reported with how many of its modules reach the model and what the LoRA declares it was trained for, while the run goes on (`ENTAIL_ON_BROKEN=stop` stops before sampling) | ComfyUI 0.34.1: an Anima LoRA on an SDXL model left the images pixel-identical to no LoRA; entail reported it at the LoRA load, and with `ENTAIL_ON_BROKEN=stop` stopped before sampling (3/3); the right LoRA (15-31/255 of change) passed, with identical images with entail on and off. diffusers 0.40: a LoRA whose keys it does not read loaded and did nothing (pixel-identical images); reported the same way. Earlier, with 0.3.0's check: 22 right pairings passed with no false alarm |
+| **ComfyUI, diffusers:** a v-prediction checkpoint that declares it in a way the engine does not read. ComfyUI reads only a `v_pred` key and samples a checkpoint that states `modelspec.prediction_type = v` in its metadata as eps; diffusers' single-file loader reads neither and falls back to epsilon. The images come out broken while the run "succeeds" | the file's own declaration (metadata, marker keys) or a pinned manifest decides: the sampler is set up for it, as a ModelSamplingDiscrete node or a rebuilt scheduler would, and what the declaration leaves open (zero-terminal SNR) keeps the engine's value. A sampling node or scheduler the user set is not overridden: the contradiction is reported. A checkpoint that declares nothing is reported as unknown: how the model behaves is never the basis for a change, so a checkpoint whose marker was lost needs a manifest | ComfyUI 0.34.1, AstolfoCarmix-VPredXL (declares v in its metadata, has no marker key): 83-95/255 from the author's reference setting without entail; with it identical, 0.16 and 0.14/255 over three seeds. diffusers 0.40 single files: NoobAI-XL-Vpred 55-83/255 from its reference without entail, pixel-identical with it; AstolfoCarmix 90-95/255, pixel-identical. entail 0.3.0 judged by the first model call instead and missed AstolfoCarmix (it behaves like eps at the noisiest step); a checkpoint whose marker was removed is now reported as unknown unless a manifest declares it |
 | **ComfyUI:** a sampling node's schedule that outlives its workflow. ComfyUI's dynamic VRAM loader backs model buffers up by attribute path, so after a run with a ModelSamplingDiscrete (or similar) node the checkpoint keeps sampling with that node's schedule once the node is gone, and a node used after a plain run silently gets the plain schedule | each sampling object keeps a copy of the schedule its own setter registered; the loader's backup goes back to the object it came from instead of into another; the first model call after the buffers change checks them against that copy and puts them back | ComfyUI 0.34.1: after one run with a ModelSamplingDiscrete(v_prediction, zsnr) node on waiIllustrious, plain runs came out as another image (55.8/255) and then black, with entail on or off, until a restart; with the fix they match a fresh session pixel for pixel (3/3). NoobAI-XL-Vpred with and without a zsnr=false node, both orders: without entail the later runs took the other setting pixel for pixel; with entail all 12 images match a fresh session. The first-call check alone (guard left out) prevents the black images but leaves 2-11/255. An Anima workflow and all other runs are identical with entail on and off, at the same speed |
+
+| **vLLM server:** a tool-call parser that does not read the format the model declares (a Qwen3 model, which emits hermes calls, served with `--tool-call-parser pythonic`): the call comes back as plain text | switched to a parser measured to read the declared format | vLLM 0.30.0, Qwen3-4B: the tool call is returned as a structured call again |
+| **diffusers:** a VAE loaded on its own takes another model's latent scale (an SDXL VAE read as SD1.5's) | the scale a manifest declares for the model is applied | 15-16/255 from the reference image without entail, pixel-identical with it (3 seeds) |
 
 **Checks** (and reports what nothing can resolve)
 
@@ -117,6 +130,10 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
   and SGLang
 - image models on ComfyUI and diffusers: the prediction type and latent scale a checkpoint, folder or manifest
   declares against the sampler and the VAE, and a LoRA's modules against the model it is applied to
+- on vLLM's OpenAI server, per request: a chat template other than the declared one, reasoning history dropped
+  where the model declares it is kept, and request fields or template settings that nothing reads
+- in debug mode, the boundaries you declare in your own code (`@entail.boundary`: what each argument means);
+  a strided layout, a quantized value and chunk-relative positions are converted where the reader needs it
 
 `entail preflight --model /path/to/model --engine sglang --list` runs the start-up checks without starting a server.
 
@@ -180,6 +197,39 @@ captured in a CUDA graph (int4, batch 8), it takes 1.005-1.007x the time of the 
 hand kernel, and 1.020-1.024x with FlexAttention. Of 16 reproduction cases, 9 are refused or repaired while tracing
 and 2 more when the program is bound to its tensors; no fixed version is refused.
 
+## How it was measured
+
+For 1.0 every measurement of the development milestones was run again on the final code, on one RTX 4070 Ti.
+
+- **Healthy runs** (Qwen3-4B, Llama-3.2-3B-Instruct and gemma-2-2b-it on transformers, vLLM and SGLang, each
+  engine's defaults): no false alarm. Two repairs, both where a backend drops Gemma 2's soft-capping. Every fact
+  the model folders declare for loading reached a decision.
+- **31 test problems** (16 reproduction cases, 8 field cases, 7 simulated market incidents): each defect was
+  repaired; where no repair exists, it was reported at the boundary and fact where it happened while the run
+  went on, or stopped with `ENTAIL_ON_BROKEN=stop`. No fixed version was flagged. (The two ComfyUI cases were
+  measured before 1.0 and not run again.)
+- **Cost:** at load, 0.3-2.6% of the load time. Always on, vLLM's CUDA-graph path 0.999-1.000x (two runs without
+  entail: 0.997-0.999x). About 60 us per request on vLLM's server. The diagnosis mode 1.74x (eager) and 1.85x
+  (sdpa). With `ENTAIL` unset, 0.27 ms per Python start and no module imported.
+- **Next to post-hoc detection:** GSM8K (500 problems, greedy) caught the RoPE loss above and a planted weight
+  shift, but not a backend that drops Gemma 2's soft-capping: SGLang `torch_native` 313 against `triton` 316
+  (McNemar p = 0.66); measured before 1.0, transformers `sdpa` against `eager` 337 against 339 (2B) and 442
+  against 443 (9B).
+  Comparing the outputs with a healthy run found it (198 of 500 answers differ, none between two healthy runs),
+  where such a run exists. entail repairs it at load.
+- **Locating:** 11 of 11 planted defects located.
+
+## Known gaps
+
+- The chat template is compared with the declared one on vLLM's OpenAI server only. transformers'
+  `apply_chat_template` and SGLang's server use it without a check.
+- RoPE fields outside the vocabulary (Llama 3's `low_freq_factor` and `high_freq_factor`) are read but not
+  compared, and nothing says so while the model runs.
+- The always-on KV contract on transformers' dynamic cache costs about 4% of decode time (target: 2%). On vLLM's
+  CUDA-graph path it is within noise.
+- One GPU. The reduction contracts (a value summed twice across ranks) were measured with one process standing
+  in for two ranks.
+
 ## Configuration
 
 | variable | values | meaning |
@@ -195,11 +245,12 @@ and 2 more when the program is bound to its tensors; no fixed version is refused
 | `ENTAIL_SKIP` | e.g. `comfyui_repair:install_buffer_guard` | leave out these entries (a bare name leaves out the whole adapter), to measure the rest without them |
 | `ENTAIL_VERBOSE` | `1` | print each adapter as it is installed |
 | `ENTAIL_SOURCE` | `1` | also compare loaded weights with the checkpoint file (vLLM, a little I/O at start-up) |
-| `ENTAIL_SEED` | test names | fault injection used to test the checks themselves; never set it in production |
+| `ENTAIL_MANIFESTS` | folders, separated by `:` (`;` on Windows) | where to look for manifests (`<sha256>.json`) of model files that do not declare what they mean. A file is hashed only when a manifest could be for it, and its hash is kept in `entail_hashes.json` in the first folder |
 
 ## Tested with
 
-transformers 5.12.1, 5.16.1 and 5.17.0, vLLM 0.30.0, SGLang 0.5.20, ComfyUI 0.34.1 (Windows), torch 2.13–2.14,
+transformers 5.12.1, 5.16.1 and 5.17.0, vLLM 0.30.0, SGLang 0.5.20, diffusers 0.40.0, ComfyUI 0.34.1 (Windows),
+torch 2.13–2.14,
 Python 3.12, one RTX 4070 Ti (12 GB). Other versions may work; `entail doctor` prints what is installed. On transformers 4.x the RoPE resolver
 has nothing to do and stays out of the way.
 
