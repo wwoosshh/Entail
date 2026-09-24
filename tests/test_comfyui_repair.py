@@ -1,13 +1,15 @@
-"""Tests for ownership.py: state stays with the object that set it. The loader below is the buffer handling of
-ComfyUI v0.34.1's ModelPatcherDynamic (load + restore_loaded_backups), nothing else - the defect reported as
-Comfy-Org/ComfyUI#16490. Run: python tests/test_ownership.py"""
+"""Tests for adapters/comfyui_repair.py, the engine-specific repair of ComfyUI's own defect (Comfy-Org/ComfyUI#16490;
+M6.2 moved it here from ownership.py): state stays with the object that set it. The loader below is the buffer
+handling of ComfyUI v0.34.1's ModelPatcherDynamic (load + restore_loaded_backups), nothing else.
+Run: python tests/test_comfyui_repair.py"""
+import io
 import os
 import sys
+from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-from entail import ownership  # noqa: E402
-from entail.adapters import _shared  # noqa: E402
+from entail.adapters import comfyui_repair as ownership  # noqa: E402
 
 
 def _schedule_class():
@@ -48,7 +50,7 @@ class _Dynamic:
         if self.guarded:
             moved = ownership.return_foreign(self.model, self.backup_buffers, _resolve_attr)
             if moved:
-                ownership.say_returned(moved, "test")
+                ownership.say_returned(moved)
         for key in list(self.backup_buffers.keys()):
             _set_attr_buffer(self.model, key, self.backup_buffers.pop(key))
 
@@ -82,17 +84,20 @@ def test_the_loader_moves_a_node_schedule_into_the_model():
 
 
 def test_guard_keeps_each_schedule_with_its_object():
-    before = len(_shared.RESOLUTIONS)
-    model_max, node_max = _node_then_plain(guarded=True)
+    printed = io.StringIO()
+    with redirect_stdout(printed):
+        model_max, node_max = _node_then_plain(guarded=True)
     assert abs(model_max - 14.6) < 1e-4 and abs(node_max - 4518.8) < 1e-2
-    assert any(r.get("fact") == "ownership" for r in _shared.RESOLUTIONS[before:])
+    assert "handed it back to its own object" in printed.getvalue()
+    assert "engine-specific repair, Comfy-Org/ComfyUI#16490" in printed.getvalue()
 
 
 def test_guard_says_nothing_when_the_values_are_the_same():
     """Two objects with the same schedule (a prediction-type switch keeps the schedule): nothing to hand back."""
-    before = len(_shared.RESOLUTIONS)
-    assert abs(_node_then_plain(guarded=True, node_max=14.6)[0] - 14.6) < 1e-4
-    assert not any(r.get("fact") == "ownership" for r in _shared.RESOLUTIONS[before:])
+    printed = io.StringIO()
+    with redirect_stdout(printed):
+        assert abs(_node_then_plain(guarded=True, node_max=14.6)[0] - 14.6) < 1e-4
+    assert printed.getvalue() == ""
 
 
 def test_drift_and_put_back():
@@ -108,7 +113,10 @@ def test_drift_and_put_back():
         ms.register_buffer("sigmas", torch.linspace(0.03, 4518.8, 1000))  # another object's schedule written in
         found = ownership.drift(ms)
         assert list(found) == ["sigmas"]
-        ownership.put_back(ms, found, "test")
+        printed = io.StringIO()
+        with redirect_stdout(printed):
+            ownership.put_back(ms, found, "test")
+        assert "put back the registered one" in printed.getvalue()
         assert ownership.drift(ms) == {} and abs(float(ms.sigmas[-1]) - 14.6) < 1e-4
         ms.set_sigmas(torch.linspace(0.03, 20.0, 1000))  # a setter call is a legitimate change: recorded anew
         assert ownership.drift(ms) == {}

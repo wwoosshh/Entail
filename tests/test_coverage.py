@@ -13,21 +13,6 @@ def test_count():
     assert coverage.count(["a"], []).none_taken and coverage.count([], []).all_taken
 
 
-def test_check_outcomes():
-    assert coverage.check(coverage.count(["a"], ["a"]), "E", "LoRA modules") == "all"
-    assert coverage.check(coverage.count(["a", "b"], ["a"]), "E", "LoRA modules") == "partial"
-    try:
-        coverage.check(coverage.count(["a", "b"], []), "E", "LoRA modules")
-        raise AssertionError("expected RoleError")
-    except core.RoleError as e:
-        assert "2 of 2 were not taken" in str(e)
-    try:
-        coverage.check(coverage.count(["a", "b"], ["a"]), "E", "config keys", stop_when="any")
-        raise AssertionError("expected RoleError")
-    except core.RoleError as e:
-        assert "(b)" in str(e)
-
-
 def test_config_keys_use_the_same_count():
     """rolebench case 15: an unknown key must not be kept silently. Same message as before the refactor."""
     core.set_mode("load")

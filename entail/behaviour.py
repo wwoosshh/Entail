@@ -3,7 +3,9 @@
 At the noisiest step the input is almost pure noise. An eps model returns that noise (cosine with its input
 ~1.00, measured on 8 SDXL checkpoints); a converged v-prediction model returns something unrelated to it (~0.01,
 NoobAI-XL-Vpred). This is only evidence: a model switching objective from eps to v read 0.94 while its file says v
-(issue_track/comfyui_field_test/VPRED_PROTOCOL.md M7), so a declaration in the file comes first (contract.py).
+(issue_track/comfyui_field_test/VPRED_PROTOCOL.md M7), so a declaration comes first (load.prediction). Since M6.2 no
+adapter runs this probe: evidence is never the basis for a change (principle 5). It is kept as the probe a manifest
+draft or a cross-check can use (LIBRARY_DESIGN.md 10, 11 M6.2).
 """
 from .facts import Prediction
 

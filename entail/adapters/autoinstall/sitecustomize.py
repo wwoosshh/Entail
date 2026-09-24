@@ -32,17 +32,19 @@ TARGETS = {
     "vllm.parser.parser_manager": ["entail.adapters.vllm_serve:install_parsers"],
     "vllm.renderers.hf": ["entail.adapters.vllm_serve:install_render"],
     "vllm.entrypoints.openai.chat_completion.serving": ["entail.adapters.vllm_serve:install_serving"],
-    # ComfyUI: the LoRA check sits where LoRAs are applied; the node hook only adds the file name to the message.
+    # ComfyUI (M6.2): the loaders keep what a checkpoint declares with its model, the LoRA contract sits where LoRAs
+    # are applied, the prediction and latent scale are decided at sampling; the node hook only names the LoRA file.
     "comfy.sd": ["entail.adapters.comfyui"],
     "comfy.sample": ["entail.adapters.comfyui:install_sampling"],
     "nodes": ["entail.adapters.comfyui:install_nodes"],
-    # A sampling schedule stays with its own object: record it where it is set, guard the loader that moved it,
-    # and check it at the first model call.
-    "comfy.model_sampling": ["entail.adapters.comfyui:install_schedule_record"],
-    "comfy.model_patcher": ["entail.adapters.comfyui:install_buffer_guard"],
-    "comfy.model_base": ["entail.adapters.comfyui:install_schedule_check"],
-    # diffusers: the same declaration and LoRA checks, hooked where diffusers loads single files and LoRAs.
+    # ENGINE-SPECIFIC repair of ComfyUI's own defect (Comfy-Org/ComfyUI#16490): a sampling schedule stays with its own
+    # object - recorded where it is set, the loader that moved it guarded, checked at the first model call.
+    "comfy.model_sampling": ["entail.adapters.comfyui_repair:install_schedule_record"],
+    "comfy.model_patcher": ["entail.adapters.comfyui_repair:install_buffer_guard"],
+    "comfy.model_base": ["entail.adapters.comfyui_repair:install_schedule_check"],
+    # diffusers (M6.2): single files, local folders and a VAE put in later, and LoRAs.
     "diffusers.loaders.single_file": ["entail.adapters.diffusers_adapter"],
+    "diffusers.pipelines.pipeline_utils": ["entail.adapters.diffusers_adapter:install_pipeline"],
     "diffusers.loaders.lora_pipeline": ["entail.adapters.diffusers_adapter:install_lora"],
 }
 # A one-shot probe of SGLang's request bookkeeping, used while writing the cache contract.
@@ -72,7 +74,7 @@ if os.environ.get("ENTAIL_ONLY"):
     TARGETS = {mod: [a for a in adapters if a.partition(":")[0].rsplit(".", 1)[-1] in _only]
                for mod, adapters in TARGETS.items()}
     TARGETS = {mod: adapters for mod, adapters in TARGETS.items() if adapters}
-# ENTAIL_SKIP=comfyui:install_buffer_guard leaves out single entries (to measure what the others do without them);
+# ENTAIL_SKIP=comfyui_repair:install_buffer_guard leaves out single entries (to measure what the others do without them);
 # a bare module name leaves out all of its entries.
 if os.environ.get("ENTAIL_SKIP"):
     _skip = {s.strip() for s in os.environ["ENTAIL_SKIP"].split(",") if s.strip()}

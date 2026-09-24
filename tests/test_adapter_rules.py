@@ -6,12 +6,15 @@ rules, and is therefore refused here:
   - importing from entail anything but the entry points: load (the load-time contracts, resolve, enforce),
     kv_contract and epochs (the container contracts, M5.1 and M5.2), request_contract (the request contract, M5.3),
     policies.current,
-    core.mode, readers.rotary_of / config_dict (to turn what it read into a fact value), facts (fact classes), base
-    (Hook). Not caps, contracts, sources, preflight or _shared: they hold tables, verdicts and precedence.
+    core.mode, readers.rotary_of / config_dict / prediction_kind / lora_modules / is_text_module / lora_base (to turn
+    what it read into a fact value, M6.2), facts (fact classes), base (Hook). Not caps, contracts, sources or
+    preflight: they hold tables, verdicts and precedence.
   - raising RoleError itself: stopping is load.enforce's, on a blocking decision.
   - a module-level table (a dict, list, set or tuple literal of more than three entries): tables are data files.
   - reading the mismatch policy (core.policy): the policy is applied by the core's decide.
-Every file in adapters/ is either on this interface or listed in LEGACY with the stage that moves it.
+Every file in adapters/ is either on this interface, listed in LEGACY with the stage that moves it, or listed in
+ENGINE_SPECIFIC: a repair of one engine's own defect, which the design keeps out of the core and marks as the engine's
+(M6.2: ComfyUI #16490).
 """
 import ast
 import os
@@ -20,19 +23,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ADAPTERS = os.path.join(os.path.dirname(HERE), "entail", "adapters")
 V2 = ("transformers_adapter", "transformers_config", "sglang_adapter", "vllm_attention", "vllm_loader",
       "vllm_source", "rope_alias", "vllm_layout", "cache_contract", "vllm_cache_contract", "sglang_cache_contract",
-      "vllm_serve")
+      "vllm_serve", "comfyui", "diffusers_adapter")
 LEGACY = {   # not yet on the v2 interface: where they move, and why they have not yet
-    "comfyui": "M6.2", "diffusers_adapter": "M6.2",
     "vllm_ledger": "research tool: moves to tools/ (LIBRARY_DESIGN.md 10)",
     "vllm_seed": "research tool: plants defects for measurements",
     "sglang_seed": "research tool: plants defects for measurements",
     "sglang_cache_probe": "research tool: moves to tools/",
-    "_shared": "helpers the M6 adapters still use; nothing on v2 imports it",
+}
+ENGINE_SPECIFIC = {   # repairs of one engine's own defect: not contracts of entail, kept out of the core (M6.2)
+    "comfyui_repair": "ComfyUI's dynamic VRAM loader writes one object's schedule into another (Comfy-Org/ComfyUI#16490)",
 }
 NOT_ADAPTERS = ("__init__", "base")
 ALLOWED = {"load": None, "kv_contract": None, "epochs": None, "request_contract": None, "policies": {"current"},
            "core": {"mode"},
-           "readers": {"rotary_of", "config_dict"}, "facts": None, "base": {"Hook"}}
+           "readers": {"rotary_of", "config_dict", "prediction_kind", "lora_modules", "is_text_module", "lora_base"},
+           "facts": None, "base": {"Hook"}}
 REQUIRED = ("hooks", "read_choice", "handles", "install", "engine", "versions")
 
 
@@ -97,9 +102,16 @@ def code_lines(path):
 
 def test_every_adapter_file_is_classified():
     files = {f[:-3] for f in os.listdir(ADAPTERS) if f.endswith(".py")}
-    unclassified = files - set(V2) - set(LEGACY) - set(NOT_ADAPTERS)
-    assert not unclassified, f"adapters neither on v2 nor listed as legacy: {sorted(unclassified)}"
-    assert set(V2) <= files and set(LEGACY) <= files
+    unclassified = files - set(V2) - set(LEGACY) - set(ENGINE_SPECIFIC) - set(NOT_ADAPTERS)
+    assert not unclassified, f"adapters neither on v2 nor listed as legacy or engine-specific: {sorted(unclassified)}"
+    assert set(V2) <= files and set(LEGACY) <= files and set(ENGINE_SPECIFIC) <= files
+
+
+def test_an_engine_specific_repair_says_so_first():
+    """A repair of one engine's own defect is marked where a reader starts: the first word of its docstring."""
+    for name in ENGINE_SPECIFIC:
+        doc = ast.get_docstring(ast.parse(open(os.path.join(ADAPTERS, name + ".py"), encoding="utf-8").read()))
+        assert doc and doc.startswith("ENGINE-SPECIFIC"), name
 
 
 def test_v2_adapters_hold_no_rules():

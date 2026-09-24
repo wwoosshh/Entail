@@ -9,8 +9,9 @@ No rule logic: comparing, deciding and recording belong to contracts.py and reco
 that fails when an adapter file contains rules. If an engine version moves a hook, the adapter reports
 "hook not found" instead of turning itself off quietly.
 
-The LLM adapters are on this interface (M3.3, M4.2, M5.1; tests/test_adapter_rules.py checks it). The image adapters
-(comfyui, diffusers_adapter) predate it and are rewritten to it in M6.2.
+The LLM adapters are on this interface (M3.3, M4.2, M5.1; tests/test_adapter_rules.py checks it), and so are the
+image adapters (comfyui, diffusers_adapter) since M6.2. A repair of one engine's own defect is not an adapter: it
+says so at the top of its file (comfyui_repair.py, ENGINE-SPECIFIC).
 """
 from typing import Any, Callable, Dict, List, NamedTuple, Protocol
 

@@ -49,13 +49,16 @@ def test_only_matches_the_module_not_the_function():
 
 
 def test_skip_leaves_out_one_entry_or_a_whole_module():
-    t = _load(ENTAIL_SKIP="comfyui:install_buffer_guard").TARGETS
-    assert "comfy.model_patcher" not in t and t["comfy.model_base"] == ["entail.adapters.comfyui:install_schedule_check"]
+    t = _load(ENTAIL_SKIP="comfyui_repair:install_buffer_guard").TARGETS
+    assert "comfy.model_patcher" not in t
+    assert t["comfy.model_base"] == ["entail.adapters.comfyui_repair:install_schedule_check"], t
     assert t["comfy.sd"] == ["entail.adapters.comfyui"], t  # a bare entry is the module's install()
     t = _load(ENTAIL_SKIP="comfyui:install").TARGETS
     assert "comfy.sd" not in t and "comfy.sample" in t, t
     t = _load(ENTAIL_SKIP="comfyui").TARGETS
-    assert not any("comfyui" in a for adapters in t.values() for a in adapters), t
+    left = [a for adapters in t.values() for a in adapters]
+    assert not any(a.partition(":")[0].endswith(".comfyui") for a in left), t
+    assert "entail.adapters.comfyui_repair:install_buffer_guard" in left, "another module is not left out with it"
 
 
 if __name__ == "__main__":

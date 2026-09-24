@@ -33,6 +33,8 @@ them and stops the run on a blocking one - under the default policy only what th
                        boundary that encodes and decodes applies; resolution: apply the declared scale (M6.1)
   lora(...)            Coverage: the modules a LoRA carries weights for against the ones the engine finds in the model
                        (M6.1)
+  remember/remembered  the declarations of a model an engine built, kept with the model object, for a contract decided
+                       later (a sampler set up at each run, M6.2)
   cannot_check(...)    a boundary the adapter could not check, reported as such (never a silent pass)
   safely(...)          runs an adapter's reading and deciding so that an error inside entail never breaks the run
 """
@@ -656,33 +658,38 @@ def _consumer_fact(name: str, value, label: str, explicit: bool) -> Fact:
     return Fact(name, value, Source("engine", f"{label}, as the engine set it up"), Certainty.VERIFIED)
 
 
-def prediction(engine: str, consumer: str, facts: Declared, used, explicit: bool = False, can_switch: bool = True,
-               policy: Optional[Policy] = None, where: str = "") -> List[Decision]:
+def prediction(engine: str, consumer: str, facts: Declared, used, explicit: bool = False, can_switch=True,
+               policy: Optional[Policy] = None, where: str = "", note: str = "") -> List[Decision]:
     """What a diffusion model's network predicts (Prediction: eps, v, x0, flow, edm; zero terminal SNR), as its file
     (ModelSpec metadata, kohya metadata, the v_pred / ztsnr marker keys), a diffusers scheduler config, a manifest or
     the user declares it, against what the sampler is set up for (`used`, the Prediction an adapter read; None when
     it could not). fd-m7 and market I04: the file declares v, the engine reads only a marker key or nothing, and the
     sampler stays at eps; the images are broken and the run succeeds.
       - agrees (a field the declaration leaves open, e.g. zero terminal SNR, is not compared)  -> pass
-      - differs, and the sampler can be set up again (`can_switch`)                              -> resolved: handle
+      - differs, and the sampler can be set up again (`can_switch`: True, or the prediction kinds the adapter's
+        handle can set up, M6.2)                                                                   -> resolved: handle
         "switch_prediction", target the declared Prediction with the fields it leaves open kept as the sampler had them
       - differs, set explicitly by the user (`explicit`: a sampling node, a scheduler argument)  -> broken, not overridden
       - differs, nothing can set it up again                                                      -> broken
       - nothing declares it                                                                        -> unknown, reported
     Broken stops only where the policy stops (M5.4); unknown only under ENTAIL_UNKNOWN=require/stop (principle 4).
-    How the running model behaves is never the basis for a change (principle 5)."""
+    How the running model behaves is never the basis for a change (principle 5). `note` says why an adapter cannot
+    set the sampler up again, for a decision that is not a pass."""
     label = f"{consumer} ({where})" if where else consumer
     candidates = [f for f in facts.get("Prediction") if f.value is not None]
+    kinds = None if can_switch is True else tuple(can_switch or ())
     switch = Resolution("set the sampler up for the declared prediction", "switch_prediction",
+                        when=lambda d, c: kinds is None or d.value.kind in kinds,
                         target=lambda d, c: _open_kept(d.value, c.value))
     contract = Contract(f"load:{engine}.prediction", consumer, ("Prediction",), ("Prediction",))
-    return decide(contract, {"Prediction": tuple(candidates)},
-                  {"Prediction": _consumer_fact("Prediction", used, label, explicit)}, policy,
-                  resolutions={"Prediction": [switch] if can_switch else []})
+    out = decide(contract, {"Prediction": tuple(candidates)},
+                 {"Prediction": _consumer_fact("Prediction", used, label, explicit)}, policy,
+                 resolutions={"Prediction": [switch] if kinds is None or kinds else []})
+    return [replace(d, note=note) if note and d.verdict is not Verdict.PASS else d for d in out]
 
 
 def latent_scale(engine: str, consumer: str, facts: Declared, used, explicit: bool = False, can_switch: bool = True,
-                 policy: Optional[Policy] = None, where: str = "") -> List[Decision]:
+                 policy: Optional[Policy] = None, where: str = "", note: str = "") -> List[Decision]:
     """The scale (and shift) between a VAE's latents and the latents the diffusion model works in (LatentScale), as
     the model's files (a diffusers folder's vae/config.json) or a manifest declare it, against what the boundary that
     encodes and decodes applies (`used`, read by an adapter: the VAE's config in diffusers, the model's latent format
@@ -699,22 +706,30 @@ def latent_scale(engine: str, consumer: str, facts: Declared, used, explicit: bo
     apply = Resolution("apply the declared latent scale at the encoder and decoder", "set_latent_scale",
                        target=lambda d, c: _open_kept(d.value, c.value))
     contract = Contract(f"load:{engine}.latent_scale", consumer, ("LatentScale",), ("LatentScale",))
-    return decide(contract, {"LatentScale": tuple(candidates)},
-                  {"LatentScale": _consumer_fact("LatentScale", used, label, explicit)}, policy,
-                  resolutions={"LatentScale": [apply] if can_switch else []})
+    out = decide(contract, {"LatentScale": tuple(candidates)},
+                 {"LatentScale": _consumer_fact("LatentScale", used, label, explicit)}, policy,
+                 resolutions={"LatentScale": [apply] if can_switch else []})
+    return [replace(d, note=note) if note and d.verdict is not Verdict.PASS else d for d in out]
 
 
 def lora(engine: str, where: str, given: Sequence[str], taken: Sequence[str], base: Optional[str] = None,
-         policy: Optional[Policy] = None) -> List[Decision]:
+         policy: Optional[Policy] = None, carried: Sequence[str] = ()) -> List[Decision]:
     """Coverage of a LoRA (fd-lora, market I01): the modules it carries weights for, for the parts it is applied to
     (`given`: the model, and the text encoder when that is given a strength), against the ones the engine's key
     mapping finds in the loaded model (`taken`). A LoRA made for another base model, or written in a key format the
     loader does not know, changes nothing and the run succeeds. Every module reaches -> pass. None or only some ->
     broken (refused where the policy stops): no key mapping is registered, and the engine has converted the formats it
-    knows before this is decided. `base` - what the LoRA's metadata says it was trained on - goes into the note."""
+    knows before this is decided. `base` - what the LoRA's metadata says it was trained on - goes into the note.
+    `carried` is every module the LoRA has: applied only to parts it carries nothing for (a text-encoder LoRA given to
+    the model alone), it changes nothing either, so all of them count as given and none as taken (M6.2)."""
     from .coverage import Coverage
 
     given = set(given)
+    if not given and carried:
+        given, taken = set(carried), ()
+        extra = "it carries nothing for the parts it was applied to"
+    else:
+        extra = ""
     if not given:
         return []
     got = set(taken) & given
@@ -725,9 +740,25 @@ def lora(engine: str, where: str, given: Sequence[str], taken: Sequence[str], ba
                   Certainty.VERIFIED)
     contract = Contract(f"load:{engine}.lora", f"{engine}.lora_loader", ("Coverage",), ("Coverage",))
     out = decide(contract, {"Coverage": declared_fact}, {"Coverage": chosen}, policy)
-    if base:
-        out = [d if d.verdict is Verdict.PASS else replace(d, note=f"the LoRA's metadata says {base}") for d in out]
+    note = "; ".join(x for x in (extra, f"the LoRA's metadata says {base}" if base else "") if x)
+    if note:
+        out = [d if d.verdict is Verdict.PASS else replace(d, note=note) for d in out]
     return out
+
+
+_CARRIED = ByObject()   # an engine's model object -> its Declared
+
+
+def remember(obj, facts: Declared) -> None:
+    """Keep the declarations of a model an engine built with the model object, for a contract decided later - the
+    sampler is set up at every run, long after the checkpoint was read (M6.2). An object that takes no weak reference
+    is not remembered."""
+    _CARRIED.set(obj, facts)
+
+
+def remembered(obj) -> Optional[Declared]:
+    """The declarations remembered for this model object, or None when it was built before entail looked."""
+    return _CARRIED.get(obj)
 
 
 def cannot_check(boundary: str, consumer: str, name: str, why: str, policy: Optional[Policy] = None,
@@ -788,27 +819,55 @@ def resolve(decisions: Sequence[Decision], handles: Dict[str, object]) -> Dict[s
 
 
 LEDGER = _record.Ledger()   # every decision this process made at its boundaries
+_ENFORCED = ByObject()      # an object -> the decisions already recorded for it (enforce's once_for)
 
 
-def enforce(decisions: Sequence[Decision], quiet_pass: Optional[bool] = None) -> List[Decision]:
+def _same(d: Decision) -> tuple:
+    """What makes two decisions the same for enforce's once_for: where, which fact, the outcome and the values."""
+    def text(fact):
+        return None if fact is None or fact.value is None else str(fact.value)
+
+    return (d.contract.boundary, d.name, d.verdict, d.rule, text(d.declared), text(d.chosen), d.resolution, d.note)
+
+
+def enforce(decisions: Sequence[Decision], quiet_pass: Optional[bool] = None, once_for=None) -> List[Decision]:
     """Record the decisions, print them, and stop on a blocking one.
 
     Every decision goes to the process ledger (LEDGER) and, with ENTAIL_RECORD=<file>, as one JSON line to that file
     (engines run their model in child processes; the file collects all of them). Anything but a pass is printed as
     one line; passes too with ENTAIL_VERBOSE. A blocking decision raises RoleError before any output is produced;
     under the default policy only the ones a user chose to stop at are blocking (M5.4), and a broken decision is
-    printed and recorded while the run goes on."""
+    printed and recorded while the run goes on.
+    `once_for`: an object a contract is decided for again and again (a model at every sampling run, M6.2): a decision
+    the same as one already recorded for it is not recorded or printed again. A blocking one still stops every run."""
     from .core import RoleError
 
     decisions = list(decisions)
-    LEDGER.extend(decisions)
-    for d in decisions:
+    fresh = decisions
+    if once_for is not None:
+        seen = _ENFORCED.get(once_for)
+        if seen is None:
+            seen = set()
+            if not _ENFORCED.set(once_for, seen):
+                seen = None
+        if seen is not None:
+            fresh = [d for d in decisions if _same(d) not in seen]
+            seen.update(_same(d) for d in fresh)
+    LEDGER.extend(fresh)
+    for d in fresh:
         _write({"pid": os.getpid(), **_record.decision_json(d)})
     verbose = bool(os.environ.get("ENTAIL_VERBOSE")) if quiet_pass is None else not quiet_pass
-    for d in decisions:
+    for d in fresh:
         if d.verdict is not Verdict.PASS or verbose:
             print(_record.line(d), flush=True)
     stops = [d for d in decisions if d.blocking]
     if stops:
         raise RoleError("\n".join(_record.line(d) for d in stops))
     return decisions
+
+
+def say(where: str, text: str) -> None:
+    """A line that is not a decision - what an engine-specific repair did (ComfyUI #16490, M6.2) - printed, and
+    written to the record file with the decisions."""
+    print(f"[entail] {where}: {text}", flush=True)
+    _write({"pid": os.getpid(), "said": where, "text": text})
