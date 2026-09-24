@@ -10,6 +10,10 @@ Format (JSON, schema 1):
               "evidence": ["..."]}, ...]}
   The key is the SHA-256 of the artifact file; for a model folder, of its config.json (or model_index.json).
   A fact whose value is null is a slot nobody has filled yet (certainty "unknown").
+  "fingerprint" (M6.3, optional): the SHA-256 of the key file's size and its first and last 4 MiB. It only says
+  which files a manifest could be for: `find` hashes a file in full only when some manifest's fingerprint matches it
+  (or some manifest has none). Hashing a 6.9 GB checkpoint on every load cost 18 s (testbed/results/m63); files of one
+  architecture have the same size, so the size alone does not tell them apart.
 
 Life cycle: `infer` writes a draft from what the artifact itself declares, plus empty slots for the facts that
 matter for its kind; a person reviews it and fills the slots; `pin` marks it reviewed and turns every filled
@@ -38,6 +42,7 @@ class Manifest:
     pinned: bool = False
     file: Optional[str] = None
     problems: Tuple[str, ...] = ()   # what the readers could not represent when the draft was made
+    fingerprint: Optional[str] = None   # quick_fingerprint of the artifact (M6.3): which files it could be for
 
 
 # --- values <-> JSON ------------------------------------------------------------------------------------------
@@ -81,6 +86,22 @@ def key_file(path):
     return path
 
 
+_EDGE = 4 << 20   # bytes read at each end for the quick fingerprint
+
+
+def quick_fingerprint(path):
+    """SHA-256 of the key file's size and its first and last 4 MiB: cheap, and different for different weights."""
+    path = key_file(path)
+    size = os.path.getsize(path)
+    h = hashlib.sha256(str(size).encode())
+    with open(path, "rb") as f:
+        h.update(f.read(_EDGE))
+        if size > _EDGE:
+            f.seek(max(_EDGE, size - _EDGE))
+            h.update(f.read(_EDGE))
+    return h.hexdigest()
+
+
 def sha256_of(path):
     path = key_file(path)
     st = os.stat(path)
@@ -98,7 +119,7 @@ def sha256_of(path):
 
 def to_json(m: Manifest) -> dict:
     return {"schema": SCHEMA_VERSION, "sha256": m.sha256, "file": m.file, "pinned": m.pinned,
-            "problems": list(m.problems),
+            "fingerprint": m.fingerprint, "problems": list(m.problems),
             "facts": [{"name": f.name, "value": value_to_json(f.value), "certainty": f.certainty.value,
                        "evidence": list(m.evidence.get(f.name, []))} for f in m.facts]}
 
@@ -124,7 +145,10 @@ def from_json(data: dict, where: str) -> Manifest:
         facts.append(Fact(name, value, Source("manifest", f"{where}#{name}"), certainty))
         if entry.get("evidence"):
             evidence[name] = list(entry["evidence"])
-    return Manifest(sha, tuple(facts), evidence, pinned, data.get("file"), tuple(data.get("problems", [])))
+    fp = data.get("fingerprint")
+    if fp is not None and not (isinstance(fp, str) and len(fp) == 64 and all(c in "0123456789abcdef" for c in fp)):
+        raise ValueError(f"manifest {where}: fingerprint must be 64 lowercase hex digits, got {fp!r}")
+    return Manifest(sha, tuple(facts), evidence, pinned, data.get("file"), tuple(data.get("problems", [])), fp)
 
 
 def load(path: str) -> Manifest:
@@ -137,9 +161,38 @@ def save(m: Manifest, path: str) -> None:
         json.dump(to_json(m), f, ensure_ascii=False, indent=1)
 
 
+_FINGERPRINTS = {}   # search dir -> (its mtime, the fingerprints its manifests record; None for one without)
+
+
+def _fingerprints(d):
+    try:
+        mtime = os.stat(d).st_mtime_ns
+    except OSError:
+        return set()
+    cached = _FINGERPRINTS.get(d)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    out = set()
+    for name in os.listdir(d):
+        if name.endswith(".json"):
+            try:
+                with open(os.path.join(d, name), encoding="utf-8") as f:
+                    out.add(json.load(f).get("fingerprint"))
+            except (OSError, ValueError, AttributeError):
+                out.add(None)   # unreadable here: not ruled out, find() reports it when it loads it
+    _FINGERPRINTS[d] = (mtime, out)
+    return out
+
+
 def find(artifact_path: str, search_dirs: Sequence[str]) -> Optional[Manifest]:
     """The manifest for this artifact: a sidecar `<artifact>.entail.json`, or `<sha256>.json` in a search dir.
-    A manifest whose sha256 does not match the artifact is not used (it describes another file)."""
+    A manifest whose sha256 does not match the artifact is not used (it describes another file). The artifact is
+    hashed in full only when a sidecar exists or a manifest in the search dirs could be for it: its fingerprint
+    matches, or it records none (written before M6.3)."""
+    if not os.path.isfile(key_file(artifact_path) + SIDECAR):
+        prints = set().union(*(_fingerprints(d) for d in search_dirs)) if search_dirs else set()
+        if None not in prints and quick_fingerprint(artifact_path) not in prints:
+            return None
     sha = sha256_of(artifact_path)
     candidates = [key_file(artifact_path) + SIDECAR] + [os.path.join(d, f"{sha}.json") for d in search_dirs]
     for p in candidates:
@@ -186,7 +239,7 @@ def infer(artifact_path: str) -> Manifest:
             facts.append(Fact(name, None, Source("manifest", f"draft#{name}"), Certainty.UNKNOWN))
             evidence[name] = ["not declared by the artifact: fill in after review"]
     return Manifest(sha256_of(artifact_path), tuple(facts), evidence, False, os.path.basename(artifact_path),
-                    tuple(result.problems))
+                    tuple(result.problems), quick_fingerprint(artifact_path))
 
 
 def pin(m: Manifest) -> Manifest:

@@ -89,6 +89,34 @@ def test_found_only_for_its_own_file():
     assert dec.rule == contracts.RULES["consumer_unknown"]   # declared now; only the consumer's choice is missing
 
 
+def test_a_file_no_manifest_could_be_for_is_not_hashed():
+    """M6.3: hashing a 6.9 GB checkpoint on every load cost 18 s. A manifest records a quick fingerprint; a file whose
+    fingerprint no manifest has is not hashed in full, and the one it is for still is (the key stays its SHA-256)."""
+    d = tempfile.mkdtemp()
+    mine, other, dirs = os.path.join(d, "a.bin"), os.path.join(d, "b.bin"), os.path.join(d, "manifests")
+    os.makedirs(dirs)
+    for p, byte in ((mine, b"a"), (other, b"b")):   # the same size, as two checkpoints of one architecture are
+        with open(p, "wb") as f:
+            f.write(byte * (9 << 20))
+    m = manifest.pin(manifest.Manifest(manifest.sha256_of(mine), (), file="a.bin",
+                                       fingerprint=manifest.quick_fingerprint(mine)))
+    manifest.save(m, os.path.join(dirs, f"{m.sha256}.json"))
+    hashed, real = [], manifest.sha256_of
+    manifest.sha256_of = lambda p: (hashed.append(p), real(p))[1]
+    try:
+        assert manifest.find(other, [dirs]) is None and hashed == [], "another file: not hashed"
+        assert manifest.find(mine, [dirs]).sha256 == m.sha256 and hashed == [mine], "its own file: hashed to verify"
+        old = dict(manifest.to_json(m), fingerprint=None)   # a manifest written before M6.3
+        with open(os.path.join(dirs, "old.json"), "w", encoding="utf-8") as f:
+            json.dump(old, f)
+        hashed.clear()
+        assert manifest.find(other, [dirs]) is None and hashed == [other], "without fingerprints every file is a candidate"
+    finally:
+        manifest.sha256_of = real
+    assert manifest.load(os.path.join(dirs, f"{m.sha256}.json")).fingerprint == m.fingerprint
+    assert manifest.infer(mine).fingerprint == manifest.quick_fingerprint(mine), "a draft records it"
+
+
 def test_bad_manifests_are_refused_with_the_reason():
     ok = {"schema": 1, "sha256": "a" * 64, "facts": []}
     raises(lambda: manifest.from_json({**ok, "schema": 2}, "m"), "manifest m: schema 2, this library reads 1")
