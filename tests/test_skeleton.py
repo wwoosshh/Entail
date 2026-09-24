@@ -7,14 +7,13 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 import entail  # noqa: E402
-from entail import boundaries, caps, contracts, core, facts, manifest, policies, record, sites, sources, testing  # noqa: E402
+from entail import boundaries, caps, contracts, core, facts, manifest, policies, record, sites, sources  # noqa: E402
 from entail.adapters import base  # noqa: E402
 
 PLANNED = [   # built since M0.3: contracts, policies, the ledger, sources and readers (M1, M2), manifests (M2.3),
     #             the capability table and probes (M3.1), the load contracts (M3.2), entail check (M3.4)
     (sites.at_container, (None, "w", None), "M5.1"),
     (sites.at_request, ({}, {}, None), "M5.3"),
-    (testing.problems, (), "M7.2"),
 ]
 
 

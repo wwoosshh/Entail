@@ -35,6 +35,10 @@ Issues = "https://github.com/wwoosshh/entail/issues"
 entail = "entail.cli:main"
 entail-preflight = "entail.preflight:main"
 
+# The pytest plugin (entail/pytest_plugin.py) does nothing until a run asks for it with --entail or a test is marked.
+[project.entry-points.pytest11]
+entail = "entail.pytest_plugin"
+
 [tool.setuptools.dynamic]
 version = { attr = "entail.__version__" }
 
