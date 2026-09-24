@@ -158,6 +158,28 @@ says where. A test that takes the `entail_condition` fixture, marked `@pytest.ma
 runs once per condition the model's declarations put at stake: one token under, at and over its sliding window, around
 where a scaled RoPE takes over, a second turn when it declares how earlier reasoning is kept.
 
+### For new code: a role-typed front end (experimental)
+
+`entail.frontend` is for code written from scratch - a model's decode step, the caller of a kernel. Every value has a
+type (named dims, dtype, what it is - a query, a key, a value - and the facts it carries), every operation takes its
+arguments by keyword, and a program is traced once from the types of its inputs. A key passed as a value, a length
+used as the last key index, a weight in a format no kernel reads, a cache read in its version before a write, a sum
+reduced twice: each is refused before anything runs. What can be repaired - chunk-relative positions with their
+offset, a quantized value with its scale, a softcap the chosen kernel ignores - is repaired then, and said.
+
+```python
+from entail.frontend import qwen3
+
+program = qwen3.trace_decode(model.config, batch=8, slots=640, attention="triton")    # every check runs here
+step = qwen3.bind(program, model, cache, tokens, positions, until)          # the load contract
+logits = step()["logits"]                                                              # no checks left
+```
+
+Qwen3-4B's decode step written this way gives transformers' logits bit for bit with the torch lowering. Compiled and
+captured in a CUDA graph (int4, batch 8), it takes 1.005-1.007x the time of the same step assembled by hand with the
+hand kernel, and 1.020-1.024x with FlexAttention. Of 16 reproduction cases, 9 are refused or repaired while tracing
+and 2 more when the program is bound to its tensors; no fixed version is refused.
+
 ## Configuration
 
 | variable | values | meaning |

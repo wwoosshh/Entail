@@ -134,6 +134,20 @@ print("\n".join(entail.locate(output_wrong=True).lines()))
 
 시험에서는 `pytest --entail`이 시험마다 이렇게 돈다. 깨지면 시험이 실패하고, 실패한 시험의 보고가 그 곳을 짚는다. `entail_condition` 픽스처를 받고 `@pytest.mark.entail_conditions(model="...")`를 단 시험은 모델의 선언이 걸리는 조건마다 한 번씩 돈다. 슬라이딩 창의 한 토큰 아래·같음·위, 스케일된 RoPE가 넘겨받는 문맥 둘레, 이전 사고의 처리를 선언한 모델의 두 번째 차례가 그 예다.
 
+### 새 코드에는: 역할 타입 프런트엔드 (실험)
+
+`entail.frontend`는 처음부터 새로 쓰는 코드를 위한 것이다. 예를 들어 모델의 디코드 스텝이나 커널을 부르는 쪽이다. 값마다 타입이 있다. 이름 붙은 차원, dtype, 무엇인지(질의, 키, 값), 지닌 사실이 여기에 든다. 연산은 인자를 키워드로 받고, 프로그램은 입력의 타입으로 한 번 추적된다. 값 자리에 넘긴 키, 마지막 키 번호 자리에 쓴 길이, 어느 커널도 읽지 않는 형식의 가중치, 쓰기 전 판본으로 읽은 캐시, 두 번 합산한 합은 실행 전에 거부된다. 고칠 수 있는 것은 그때 고치고 알린다. 오프셋이 있는 청크 상대 위치, 스케일이 있는 양자화 값, 고른 커널이 무시하는 softcap이 그렇다.
+
+```python
+from entail.frontend import qwen3
+
+program = qwen3.trace_decode(model.config, batch=8, slots=640, attention="triton")    # 모든 검사가 여기서 돈다
+step = qwen3.bind(program, model, cache, tokens, positions, until)          # 적재 계약
+logits = step()["logits"]                                                              # 남은 검사가 없다
+```
+
+이렇게 쓴 Qwen3-4B 디코드 스텝은 torch 낮춤에서 transformers와 로짓이 비트 단위로 같다. 컴파일해 CUDA 그래프로 잡으면(int4, 배치 8), 같은 커널로 손수 짠 스텝의 1.005~1.007배(손 커널), 1.020~1.024배(FlexAttention) 시간이 든다. 재현 사례 16건 가운데 9건은 추적 때 거부되거나 고쳐지고, 2건은 프로그램을 텐서에 묶을 때 거부된다. 수정 판이 거부된 것은 없다.
+
 ## 설정
 
 | 변수 | 값 | 뜻 |
