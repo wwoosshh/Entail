@@ -89,7 +89,10 @@ class FromSingleFileMixin:
 
 class StableDiffusionXLLoraLoaderMixin:
     def load_lora_weights(self, source, adapter_name=None, **kw):
-        """Adds the adapter to the modules the LoRA names that the model has; silently skips the rest."""
+        """Adds the adapter to the modules the LoRA names that the model has; silently skips the rest. Without the
+        PEFT backend diffusers refuses to load at all."""
+        if getattr(self, "no_peft", False):
+            raise ValueError("PEFT backend is required for this method. (the loader)")
         name = adapter_name or "default_0"
         for key in source:
             mod = key.split(".lora_A")[0].split(".lora_B")[0].removeprefix("unet.")
@@ -234,6 +237,23 @@ def test_a_lora_that_reaches_nothing_is_reported():
     other = {"transformer.blocks.0.attn.q.lora_A.weight": 0, "transformer.blocks.1.attn.q.lora_A.weight": 0}
     _, printed = run(lambda: pipe.load_lora_weights(other, adapter_name="b"))
     assert "broken at load:diffusers.lora" in printed and "taken=0" in printed and "reported, not stopped" in printed
+
+
+def test_without_the_peft_backend_the_loader_says_so_not_entail():
+    """diffusers without PEFT raises in get_list_adapters as it does in the loader (found in M6.3): the caller sees the
+    loader's own error, not one raised from inside entail (principle 12)."""
+    class NoPeft(SDXLPipeline):
+        no_peft = True
+
+        def get_list_adapters(self):
+            raise ValueError("PEFT backend is required for this method.")
+
+    pipe = NoPeft(Scheduler(prediction_type="epsilon"), VAE(scaling_factor=0.13025))
+    try:
+        run(lambda: pipe.load_lora_weights({"unet.down.0.to_q.lora_A.weight": 0}, adapter_name="a"))
+        raise AssertionError("the loader raises without PEFT")
+    except ValueError as e:
+        assert str(e) == "PEFT backend is required for this method. (the loader)", str(e)
 
 
 if __name__ == "__main__":

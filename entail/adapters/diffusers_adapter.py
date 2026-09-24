@@ -242,8 +242,14 @@ def _lora_given(pipe, source, kw):
 
 
 def _adapters(pipe):
+    """The adapter names the pipeline lists, or none. Without the PEFT backend diffusers raises here, before the
+    loader would raise the same thing itself: that is the loader's to say, not entail's (principle 12; found in M6.3)."""
     get = getattr(pipe, "get_list_adapters", None)
-    return set().union(*get().values()) if callable(get) and get() else set()
+    try:
+        listed = get() if callable(get) else None
+    except Exception:  # noqa: BLE001 - reading what the engine holds must never break its call
+        return set()
+    return set().union(*listed.values()) if listed else set()
 
 
 def uninstall():
