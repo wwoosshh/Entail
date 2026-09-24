@@ -40,7 +40,6 @@ them and stops the run on a blocking one - under the default policy only what th
 """
 import json
 import os
-import sys
 import time
 import weakref
 from dataclasses import dataclass, field, fields, replace
@@ -795,15 +794,9 @@ def safely(boundary: str, consumer: str, name: str, work, default=None):
 
 
 def _write(obj) -> None:
-    """One JSON line to the ENTAIL_RECORD file, if one is set; recording never breaks the run (principle 12)."""
-    path = os.environ.get("ENTAIL_RECORD")
-    if not path:
-        return
-    try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-    except OSError as e:
-        print(f"[entail] could not write the record to {path}: {e}", file=sys.stderr, flush=True)
+    """One JSON line to the record: the ENTAIL_RECORD file, or the project's entail_logs folder whenever entail is on
+    (record.write_json, M6.4); recording never breaks the run (principle 12)."""
+    _record.write_json(obj)
 
 def resolve(decisions: Sequence[Decision], handles: Dict[str, object]) -> Dict[str, object]:
     """Carry out every resolved decision with the adapter's handle of that name, given the decision's target.
@@ -833,9 +826,10 @@ def _same(d: Decision) -> tuple:
 def enforce(decisions: Sequence[Decision], quiet_pass: Optional[bool] = None, once_for=None) -> List[Decision]:
     """Record the decisions, print them, and stop on a blocking one.
 
-    Every decision goes to the process ledger (LEDGER) and, with ENTAIL_RECORD=<file>, as one JSON line to that file
-    (engines run their model in child processes; the file collects all of them). Anything but a pass is printed as
-    one line; passes too with ENTAIL_VERBOSE. A blocking decision raises RoleError before any output is produced;
+    Every decision goes to the process ledger (LEDGER) and as one JSON line to the record - the project's
+    entail_logs folder whenever entail is on, or the ENTAIL_RECORD file (engines run their model in child processes;
+    the record collects all of them). Anything but a pass is said as one line - printed and kept in the log (M6.4);
+    passes too with ENTAIL_VERBOSE. A blocking decision raises RoleError before any output is produced;
     under the default policy only the ones a user chose to stop at are blocking (M5.4), and a broken decision is
     printed and recorded while the run goes on.
     `once_for`: an object a contract is decided for again and again (a model at every sampling run, M6.2): a decision
@@ -859,7 +853,7 @@ def enforce(decisions: Sequence[Decision], quiet_pass: Optional[bool] = None, on
     verbose = bool(os.environ.get("ENTAIL_VERBOSE")) if quiet_pass is None else not quiet_pass
     for d in fresh:
         if d.verdict is not Verdict.PASS or verbose:
-            print(_record.line(d), flush=True)
+            _record.say(_record.line(d))
     stops = [d for d in decisions if d.blocking]
     if stops:
         raise RoleError("\n".join(_record.line(d) for d in stops))
@@ -869,5 +863,5 @@ def enforce(decisions: Sequence[Decision], quiet_pass: Optional[bool] = None, on
 def say(where: str, text: str) -> None:
     """A line that is not a decision - what an engine-specific repair did (ComfyUI #16490, M6.2) - printed, and
     written to the record file with the decisions."""
-    print(f"[entail] {where}: {text}", flush=True)
+    _record.say(f"[entail] {where}: {text}")
     _write({"pid": os.getpid(), "said": where, "text": text})

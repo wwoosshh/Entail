@@ -16,7 +16,6 @@ Shared guards:
                   never breaks the engine (principle 12); a refusal passes through
 """
 import atexit
-import json
 import os
 import sys
 from collections import OrderedDict
@@ -116,16 +115,12 @@ def reset(boundary: Optional[str] = None) -> None:
 
 
 def write_summary(counted: dict) -> None:
-    summary = {"pid": os.getpid(), "boundaries": counted}
+    """The counts of this process's boundaries, as one JSON line to the record (record.write_json, M6.4)."""
+    from . import record
+
     if os.environ.get("ENTAIL_VERBOSE"):
-        print(f"[entail] boundaries in pid {os.getpid()}: {counted}", flush=True)
-    path = os.environ.get("ENTAIL_RECORD")
-    if path:
-        try:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(summary, ensure_ascii=False) + "\n")
-        except OSError:
-            pass
+        record.say(f"[entail] boundaries in pid {os.getpid()}: {counted}")
+    record.write_json({"pid": os.getpid(), "boundaries": counted})
 
 
 @atexit.register

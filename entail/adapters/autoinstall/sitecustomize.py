@@ -95,9 +95,18 @@ def _install(adapter):
         mod = __import__(name, fromlist=["install"])
         getattr(mod, func or "install")()
         if os.environ.get("ENTAIL_VERBOSE"):
-            print(f"[entail] installed {adapter} in pid {os.getpid()}", flush=True)
+            _say(f"[entail] installed {adapter} in pid {os.getpid()}")
     except Exception as e:  # never break the host program because a check could not be installed
-        print(f"[entail] could not install {adapter}: {type(e).__name__}: {e}", flush=True)
+        _say(f"[entail] could not install {adapter}: {type(e).__name__}: {e}")
+
+
+def _say(text):
+    """Printed, and kept in the project's entail_logs folder (M6.4)."""
+    try:
+        from entail import record
+        record.say(text)
+    except Exception:  # noqa: BLE001 - the message itself must get out
+        print(text, flush=True)
 
 
 class _PatchAfterImport:
@@ -137,7 +146,13 @@ def install_now():
 
 
 def activate():
-    """Watch for the target modules and patch the ones already imported. Safe to call more than once."""
+    """Watch for the target modules and patch the ones already imported. Safe to call more than once. The log folder
+    is fixed here, where the program starts, so the processes an engine spawns write to the same one (M6.4)."""
+    try:
+        from entail import record
+        record.log_dir()
+    except Exception:  # noqa: BLE001 - a log folder that cannot be named does not stop the checks
+        pass
     if not any(isinstance(f, _PatchAfterImport) for f in sys.meta_path):
         sys.meta_path.insert(0, _PatchAfterImport())
     install_now()

@@ -117,6 +117,47 @@ def test_a_file_no_manifest_could_be_for_is_not_hashed():
     assert manifest.infer(mine).fingerprint == manifest.quick_fingerprint(mine), "a draft records it"
 
 
+def test_a_hashed_file_is_remembered_next_to_the_manifests():
+    """M6.4: the full hash of a file with a manifest is kept in entail_hashes.json in the manifest folder, used again
+    while the file's size and modification time are unchanged, and made again when they change; a cache that cannot
+    be written is said once and the lookup goes on."""
+    import io
+    from contextlib import redirect_stdout
+
+    d = tempfile.mkdtemp()
+    art, dirs = os.path.join(d, "a.bin"), os.path.join(d, "manifests")
+    os.makedirs(dirs)
+    with open(art, "wb") as f:
+        f.write(b"a" * (9 << 20))
+    m = manifest.pin(manifest.Manifest(manifest.sha256_of(art), (), file="a.bin",
+                                       fingerprint=manifest.quick_fingerprint(art)))
+    manifest.save(m, os.path.join(dirs, f"{m.sha256}.json"))
+    manifest._HASHES.clear()
+    assert manifest.find(art, [dirs]).sha256 == m.sha256
+    cache = json.load(open(os.path.join(dirs, manifest.HASH_CACHE), encoding="utf-8"))["files"]
+    assert [e["sha256"] for e in cache.values()] == [m.sha256]
+    hashed, real = [], manifest.sha256_of
+    manifest.sha256_of = lambda p: (hashed.append(p), real(p))[1]
+    try:
+        manifest._HASHES.clear()   # as a new process would
+        assert manifest.find(art, [dirs]).sha256 == m.sha256 and hashed == [], "from the cache"
+        st = os.stat(art)
+        os.utime(art, ns=(st.st_atime_ns, st.st_mtime_ns + 10 ** 9))   # touched: it may have changed
+        manifest._HASHES.clear()
+        assert manifest.find(art, [dirs]).sha256 == m.sha256 and hashed == [art], "hashed again"
+        os.remove(os.path.join(dirs, manifest.HASH_CACHE))
+        os.makedirs(os.path.join(dirs, manifest.HASH_CACHE))   # a cache that cannot be written
+        manifest._HASHES.clear()
+        printed = io.StringIO()
+        with redirect_stdout(printed):
+            assert manifest.find(art, [dirs]).sha256 == m.sha256
+            manifest._HASHES.clear()
+            manifest.find(art, [dirs])
+        assert printed.getvalue().count("could not write the hash cache") == 1
+    finally:
+        manifest.sha256_of = real
+
+
 def test_bad_manifests_are_refused_with_the_reason():
     ok = {"schema": 1, "sha256": "a" * 64, "facts": []}
     raises(lambda: manifest.from_json({**ok, "schema": 2}, "m"), "manifest m: schema 2, this library reads 1")

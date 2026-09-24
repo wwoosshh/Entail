@@ -11,9 +11,80 @@ the place where it broke is the problem area):
   - some boundaries could not be checked                 -> they and the layers beside them stay suspect, so the
                                                             precision depends on how densely meaning is checked (S1)
 Diagnosis is secondary: it is what preservation makes possible, not a separate bug hunt.
+
+Where it goes (M6.4, the researcher's decision of 2026-09-24): every line entail says is printed, and - whenever
+entail is on - also kept in the project, in `entail_logs/` in the folder the program was started from, where a
+developer finds it without having asked for it beforehand:
+  entail-<date>.log     the lines, each with its time and process
+  record-<date>.jsonl   every decision as one JSON line (or the file ENTAIL_RECORD names, as before)
+  .gitignore            so the folder stays out of the project's history
+ENTAIL_LOG_DIR moves the folder, or turns the files off ("off"). A folder that cannot be written is said once, and the
+run goes on (principle 12).
 """
+import json
+import os
+import sys
+import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
+
+LOG_DIR_NAME = "entail_logs"
+_READY = set()    # log folders made (with their .gitignore) in this process
+_WARNED = set()   # files this process could not write, said once
+
+
+def log_dir() -> Optional[str]:
+    """The folder entail's log and record files go to, or None. ENTAIL_LOG_DIR names it ("off": none). Unset, it is
+    entail_logs in the folder the program was started from, whenever entail is on (ENTAIL=load or debug, which
+    entail.enable() sets too); code that only sets the mode (tests, harnesses) writes nothing. The first answer is put
+    in the environment, so the processes an engine starts afterwards write to the same folder."""
+    d = os.environ.get("ENTAIL_LOG_DIR")
+    if d:
+        return None if d.strip().lower() == "off" else d
+    if os.environ.get("ENTAIL") not in ("load", "debug"):
+        return None
+    d = os.path.join(os.getcwd(), LOG_DIR_NAME)
+    os.environ["ENTAIL_LOG_DIR"] = d
+    return d
+
+
+def _append(path, text) -> None:
+    folder = os.path.dirname(path)
+    try:
+        if folder and folder not in _READY:
+            os.makedirs(folder, exist_ok=True)
+            ignore = os.path.join(folder, ".gitignore")
+            if os.path.basename(folder) == LOG_DIR_NAME and not os.path.exists(ignore):
+                with open(ignore, "w", encoding="utf-8") as f:
+                    f.write("# written by entail: what it said about this project's runs, not part of the project\n*\n")
+            _READY.add(folder)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(text)
+    except OSError as e:
+        if path not in _WARNED:
+            _WARNED.add(path)
+            print(f"[entail] could not write {path}: {e}; what entail says goes to the console only",
+                  file=sys.stderr, flush=True)
+
+
+def write_json(obj) -> None:
+    """One JSON line: to the file ENTAIL_RECORD names, else to record-<date>.jsonl in the log folder, if any."""
+    path = os.environ.get("ENTAIL_RECORD")
+    if not path:
+        folder = log_dir()
+        if folder is None:
+            return
+        path = os.path.join(folder, f"record-{time.strftime('%Y-%m-%d')}.jsonl")
+    _append(path, json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def say(text: str) -> None:
+    """A line entail says: printed, and kept in entail-<date>.log in the log folder with its time and process."""
+    print(text, flush=True)
+    folder = log_dir()
+    if folder is not None:
+        _append(os.path.join(folder, f"entail-{time.strftime('%Y-%m-%d')}.log"),
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')} pid {os.getpid()} {text}\n")
 
 
 @dataclass(frozen=True)

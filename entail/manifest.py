@@ -14,6 +14,10 @@ Format (JSON, schema 1):
   which files a manifest could be for: `find` hashes a file in full only when some manifest's fingerprint matches it
   (or some manifest has none). Hashing a 6.9 GB checkpoint on every load cost 18 s (testbed/results/m63); files of one
   architecture have the same size, so the size alone does not tell them apart.
+Hash cache (M6.4, the researcher's decision): a file hashed to find its manifest is remembered in `entail_hashes.json`
+in the first manifest folder - where the manifests are, and a person finds it - by its path, size and modification
+time, so it is not hashed again while it is unchanged. A folder that cannot be written is said once, and the file is
+hashed again next time.
 
 Life cycle: `infer` writes a draft from what the artifact itself declares, plus empty slots for the facts that
 matter for its kind; a person reviews it and fills the slots; `pin` marks it reviewed and turns every filled
@@ -162,6 +166,44 @@ def save(m: Manifest, path: str) -> None:
 
 
 _FINGERPRINTS = {}   # search dir -> (its mtime, the fingerprints its manifests record; None for one without)
+HASH_CACHE = "entail_hashes.json"
+_CACHE_WARNED = set()
+
+
+def _cached_sha256(path, folder):
+    """The file's SHA-256 from the hash cache in `folder` while its size and modification time are unchanged; else
+    hashed, and written there (atomically: another process may be writing too)."""
+    key = os.path.realpath(key_file(path))
+    st = os.stat(key)
+    cache_path = os.path.join(folder, HASH_CACHE)
+    try:
+        with open(cache_path, encoding="utf-8") as f:
+            files = json.load(f).get("files", {})
+    except (OSError, ValueError, AttributeError):
+        files = {}
+    entry = files.get(key)
+    if isinstance(entry, dict) and entry.get("size") == st.st_size and entry.get("mtime_ns") == st.st_mtime_ns \
+            and isinstance(entry.get("sha256"), str):
+        _HASHES[(os.path.abspath(key), st.st_size, st.st_mtime_ns)] = entry["sha256"]
+        return entry["sha256"]
+    sha = sha256_of(path)
+    files[key] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "sha256": sha}
+    tmp = f"{cache_path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"about": "SHA-256 of the files entail looked up manifests for (path, size, modification time); "
+                                "safe to delete", "files": files}, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, cache_path)
+    except OSError as e:
+        if cache_path not in _CACHE_WARNED:
+            _CACHE_WARNED.add(cache_path)
+            from . import record
+            record.say(f"[entail] could not write the hash cache {cache_path}: {e}; the file is hashed again next time")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    return sha
 
 
 def _fingerprints(d):
@@ -193,7 +235,7 @@ def find(artifact_path: str, search_dirs: Sequence[str]) -> Optional[Manifest]:
         prints = set().union(*(_fingerprints(d) for d in search_dirs)) if search_dirs else set()
         if None not in prints and quick_fingerprint(artifact_path) not in prints:
             return None
-    sha = sha256_of(artifact_path)
+    sha = _cached_sha256(artifact_path, search_dirs[0]) if search_dirs else sha256_of(artifact_path)
     candidates = [key_file(artifact_path) + SIDECAR] + [os.path.join(d, f"{sha}.json") for d in search_dirs]
     for p in candidates:
         if os.path.isfile(p):

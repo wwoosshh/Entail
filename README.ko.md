@@ -114,9 +114,10 @@ vLLM과 SGLang은 모델을 자기가 새로 띄운 프로세스에서 돌린다
 |---|---|---|
 | `ENTAIL` | `off`(기본), `load`, `debug` | `load`는 시작 검사와 해소기를 켠다. `debug`는 선언된 모든 경계까지 보고, 덮지 못하는 경우를 오류로 만든다 |
 | `ENTAIL_POLICY` | `resolve`(기본), `refuse` | `refuse`는 아무것도 고치지 않고, 어긋남을 알리기만 한다 |
-| `ENTAIL_ON_BROKEN` | `report`(기본), `stop` | 고칠 수 없는 어긋남을 로그와 `ENTAIL_RECORD`에 남기고 실행을 잇거나, 결과가 나오기 전에 멈춘다(요청이면 서버의 오류 응답). `ENTAIL_FACT_POLICY=Layout=stop`처럼 사실 종류별로도 멈출 수 있다 |
+| `ENTAIL_ON_BROKEN` | `report`(기본), `stop` | 고칠 수 없는 어긋남을 로그(`entail_logs/`)에 남기고 실행을 잇거나, 결과가 나오기 전에 멈춘다(요청이면 서버의 오류 응답). `ENTAIL_FACT_POLICY=Layout=stop`처럼 사실 종류별로도 멈출 수 있다 |
 | `ENTAIL_UNKNOWN` | `report`(기본), `require`, `stop` | 아무도 선언하지 않은 뜻을 바꾸는 사실: 알리거나, 선언될 때까지 진행하지 않는다 |
-| `ENTAIL_RECORD` | 파일 | 모든 판정을 JSON 한 줄씩 적는다. 엔진이 띄우는 모든 프로세스의 것이 모인다 |
+| `ENTAIL_LOG_DIR` | 폴더, 또는 `off` | entail이 말한 것을 남기는 곳이다. 정하지 않으면, entail이 켜져 있을 때 프로그램을 실행한 폴더의 `entail_logs/`에 날마다 로그(`entail-<날짜>.log`, 줄마다 시각과 프로세스)와 기록(`record-<날짜>.jsonl`, 모든 판정의 JSON)을 남긴다. 프로젝트 기록에 섞이지 않게 `.gitignore`도 둔다. 엔진이 띄우는 모든 프로세스도 같은 곳에 쓴다 |
+| `ENTAIL_RECORD` | 파일 | JSON 기록을 `record-<날짜>.jsonl` 대신 이 파일에 적는다 |
 | `ENTAIL_RESPONSE_NOTE` | `1` | vLLM 서버: 요청에서 깨진 것을 응답에도 적는다(`entail` 필드, 스트림이면 데이터 앞의 SSE 주석 줄) |
 | `ENTAIL_ONLY` | 예: `rope_alias,sglang_adapter` | 적은 어댑터만 설치한다 |
 | `ENTAIL_SKIP` | 예: `comfyui_repair:install_buffer_guard` | 적은 항목만 빼고 설치한다(어댑터 이름만 적으면 그 어댑터 전체를 뺀다). 나머지가 그것 없이 무엇을 하는지 잴 때 쓴다 |
