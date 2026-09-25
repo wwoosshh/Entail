@@ -54,7 +54,9 @@ def check_static(model_path: str, engine: str, settings: dict):
             core.set_mode("off")
             from transformers import AutoConfig
 
-            config = AutoConfig.from_pretrained(path)
+            # a static check runs no code from the model folder and asks no question: a remote-code model fails at
+            # once (transformers would otherwise prompt, and wait 15 s where there is no terminal); nothing is fetched
+            config = AutoConfig.from_pretrained(path, trust_remote_code=False, local_files_only=True)
         except ImportError:
             notes.append("transformers is not installed: class defaults and config key coverage are not checked")
         except Exception as e:  # noqa: BLE001 - the check reports it and goes on with the files alone

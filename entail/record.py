@@ -78,9 +78,11 @@ def write_json(obj) -> None:
     _append(path, json.dumps(obj, ensure_ascii=False) + "\n")
 
 
-def say(text: str) -> None:
-    """A line entail says: printed, and kept in entail-<date>.log in the log folder with its time and process."""
-    print(text, flush=True)
+def say(text: str, console: bool = True) -> None:
+    """A line entail says: printed (unless `console` is False: a non-blocking unknown under ENTAIL_QUIET=unknown),
+    and kept in entail-<date>.log in the log folder with its time and process."""
+    if console:
+        print(text, flush=True)
     folder = log_dir()
     if folder is not None:
         _append(os.path.join(folder, f"entail-{time.strftime('%Y-%m-%d')}.log"),

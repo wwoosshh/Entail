@@ -25,6 +25,27 @@ The name is the logical sense of *entail*: what a checkpoint declares must entai
 > entail does not look for defects inside a model, a compiler, a kernel or the hardware: when every boundary it
 > checked held and the output is still wrong, it says so and narrows where to look.
 
+## What it does to your environment
+
+- `pip install entail-ai` adds one package (import name `entail`, no dependencies) and one line to `site-packages`
+  (`entail-autoinstall.pth`), which is how entail reaches the worker processes an engine starts. With `ENTAIL`
+  unset that line returns at once: 0.2-0.3 ms per Python start, no module imported. `entail hook status` shows it
+  and `entail hook uninstall` removes it.
+- With `ENTAIL=load`, everything entail says goes to `entail_logs/` in the folder the program was started from (a
+  log and a JSON record per day, with a `.gitignore`). `ENTAIL_LOG_DIR=off` writes nothing; `ENTAIL_LOG_DIR=<folder>`
+  moves it. `ENTAIL_QUIET=unknown` keeps the non-blocking `unknown` lines off the console.
+- The adapters hook internal functions of the engine versions they were measured on, listed below. On another
+  version an adapter that cannot install says so once (`could not install ...`) and stays out; the rest run.
+  `entail doctor` prints what is installed and what would hook.
+
+| engine | measured on | what its adapters check |
+|---|---|---|
+| transformers | 5.12.1, 5.16.1, 5.17.0 | attention backend, tied head, config keys, RoPE names, KV cache, chat template |
+| vLLM | 0.30.0 | attention backend, loader, weight layout after repacking, KV cache, OpenAI server, weights against the file |
+| SGLang | 0.5.20 | attention backends, loader, KV cache, server |
+| diffusers | 0.40.0 | prediction type, VAE scale, LoRA reach |
+| ComfyUI | 0.34.1 | prediction type, VAE scale, LoRA reach, and one engine-specific repair (marked as such) |
+
 ## Why: a case measured end to end
 
 Restating a model's **own** `rope_scaling` at launch — the route model cards give for enabling YaRN — drops
@@ -258,6 +279,7 @@ For 1.0 every measurement of the development milestones was run again on the fin
 | `ENTAIL_ONLY` | e.g. `rope_alias,sglang_adapter` | install only these adapters |
 | `ENTAIL_SKIP` | e.g. `comfyui_repair:install_buffer_guard` | leave out these entries (a bare name leaves out the whole adapter), to measure the rest without them |
 | `ENTAIL_VERBOSE` | `1` | print each adapter as it is installed |
+| `ENTAIL_QUIET` | `unknown` | keep non-blocking `unknown` decisions off the console; they stay in the log and the record, and the console says so once per process |
 | `ENTAIL_SOURCE` | `1` | also compare loaded weights with the checkpoint file (vLLM, a little I/O at start-up) |
 | `ENTAIL_MANIFESTS` | folders, separated by `:` (`;` on Windows) | where to look for manifests (`<sha256>.json`) of model files that do not declare what they mean. A file is hashed only when a manifest could be for it, and its hash is kept in `entail_hashes.json` in the first folder |
 

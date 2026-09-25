@@ -374,10 +374,25 @@ def _scalars(obj, out=None):
     return out
 
 
+def _distinctive(v) -> bool:
+    """A scalar whose equality with another field's value is evidence that the key was renamed on the way in, not
+    chance: a float, a string of four characters or more, or an integer beyond the small numbers configs share
+    (heads, layers, flags). Booleans, None and small integers are not (M12.1: an unread key with the value 1 was
+    taken as read because some field held a 1)."""
+    if v is None or isinstance(v, bool):
+        return False
+    if isinstance(v, float):
+        return True
+    if isinstance(v, int):
+        return abs(v) >= 256
+    return isinstance(v, str) and len(v) >= 4
+
+
 def keys_taken(raw: dict, known: set, resolved: dict):
     """Which keys of a config dict the consumer's config class took (the rule of audits/W_MORE_FACTS.md: unknown to
     the class AND its value in no known field -> not taken; 0 false positives on healthy models, catches rolebench
-    15). Keys listed in data/config_keys.json as read elsewhere are notes, not losses.
+    15). A key that looks like a misspelling of a key the vocabulary maps is never rescued by its value (M12.1).
+    Keys listed in data/config_keys.json as read elsewhere are notes, not losses.
     Returns (taken, left, notes)."""
     survived = _scalars({k: v for k, v in resolved.items() if k in known})
     elsewhere = CONFIG_KEYS["read_elsewhere"]
@@ -387,9 +402,11 @@ def keys_taken(raw: dict, known: set, resolved: dict):
         leaves = _scalars(v) - {("NoneType", None)} if isinstance(v, (dict, list)) else None
         if k == "text_config" or k in known:
             taken.append(k)
-        elif leaves is None and (type(v).__name__, v) in survived:
+        elif misspelt(k):
+            left.append(k)           # a misspelling of a key the vocabulary maps: lost, whatever its value holds
+        elif leaves is None and _distinctive(v) and (type(v).__name__, v) in survived:
             taken.append(k)          # renamed on the way in, but the value landed in a field the class knows
-        elif leaves and leaves <= survived:
+        elif leaves and leaves <= survived and any(_distinctive(x) for _, x in leaves):
             taken.append(k)          # a dict moved into another field (rope_scaling into rope_parameters)
         elif k in elsewhere:
             notes.append(f"{k} ({elsewhere[k]})")
@@ -990,13 +1007,32 @@ def enforce(decisions: Sequence[Decision], quiet_pass: Optional[bool] = None, on
     for d in fresh:
         _write({"pid": os.getpid(), **_record.decision_json(d)})
     verbose = bool(os.environ.get("ENTAIL_VERBOSE")) if quiet_pass is None else not quiet_pass
+    quiet = "unknown" in os.environ.get("ENTAIL_QUIET", "").replace(" ", "").split(",")
     for d in fresh:
-        if d.verdict is not Verdict.PASS or verbose:
-            _record.say(_record.line(d))
+        if d.verdict is Verdict.PASS and not verbose:
+            continue
+        console = not (quiet and d.verdict is Verdict.UNKNOWN and not d.blocking)
+        if not console:
+            _quiet_notice()
+        _record.say(_record.line(d), console=console)
     stops = [d for d in decisions if d.blocking]
     if stops:
         raise RoleError("\n".join(_record.line(d) for d in stops))
     return decisions
+
+
+_QUIET_SAID = False
+
+
+def _quiet_notice() -> None:
+    """Once per process, when ENTAIL_QUIET=unknown keeps the first non-blocking unknown off the console (M12.2): the
+    lines are still in the log and the record."""
+    global _QUIET_SAID
+    if not _QUIET_SAID:
+        _QUIET_SAID = True
+        where = _record.log_dir()
+        _record.say(f"[entail] unknown decisions are kept in the log and the record, not printed "
+                    f"(ENTAIL_QUIET=unknown){f': {where}' if where else ''}")
 
 
 def say(where: str, text: str) -> None:

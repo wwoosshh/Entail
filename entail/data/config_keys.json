@@ -2,6 +2,11 @@
  "_about": "config.json keys that are legitimately not fields of the model's config class (ROADMAP M3.2; moved from preflight.ELSEWHERE). Each entry says who reads the key instead, so the list stays a declaration and not a way to silence the check. Anything not listed is reported when the class does not take it and its value lands in no field the class knows (load.keys_taken). A dict value counts as taken when every value in it landed in a field the class knows (rope_scaling moved into rope_parameters).",
  "read_elsewhere": {
   "cache_implementation": "generation_config.json holds this one and GenerationConfig reads it (checked on a gemma-2-2b-it checkpoint)",
+  "bos_token_id": "read for generation: GenerationConfig.from_model_config builds the generation settings from the config's to_dict(), which keeps a key the class did not declare (transformers 5.17 generation/configuration_utils.py, from_model_config)",
+  "eos_token_id": "read for generation: GenerationConfig.from_model_config builds the generation settings from the config's to_dict(), which keeps a key the class did not declare (transformers 5.17 generation/configuration_utils.py, from_model_config)",
+  "pad_token_id": "read for generation: GenerationConfig.from_model_config builds the generation settings from the config's to_dict(), which keeps a key the class did not declare (transformers 5.17 generation/configuration_utils.py, from_model_config)",
+  "decoder_start_token_id": "read for generation: GenerationConfig.from_model_config builds the generation settings from the config's to_dict(), which keeps a key the class did not declare (transformers 5.17 generation/configuration_utils.py, from_model_config)",
+  "use_cache": "read for generation: GenerationConfig.from_model_config builds the generation settings from the config's to_dict(), which keeps a key the class did not declare (transformers 5.17 generation/configuration_utils.py, from_model_config)",
   "_name_or_path": "where the checkpoint was loaded from, not a fact about the model",
   "architectures": "the loader picks the class from it before the config object exists",
   "torch_dtype": "read by from_pretrained, not stored as a config field",

@@ -46,6 +46,26 @@ def test_the_model_contracts_run_once_per_model():
     assert len(rope) == 1 and rope[0].verdict is Verdict.PASS
 
 
+def test_the_fields_a_class_knows_include_the_names_it_renames():
+    """M12.1: GPT-2 stores hidden_size as n_embd (attribute_map); a config.json that says hidden_size is read."""
+    from entail.adapters import transformers_config as tc
+
+    class Plain:
+        def to_dict(self):
+            return {"n_embd": 8, "n_layer": 2}
+
+    class Renaming(Plain):
+        attribute_map = {"hidden_size": "n_embd", "num_hidden_layers": "n_layer"}
+
+    class Broken:
+        def __init__(self):
+            raise ValueError("needs arguments")
+
+    assert tc._known(Plain) == frozenset({"n_embd", "n_layer"})
+    assert tc._known(Renaming) == frozenset({"n_embd", "n_layer", "hidden_size", "num_hidden_layers"})
+    assert tc._known(Broken) is None
+
+
 def test_what_the_loader_left_is_read_from_the_model():
     """M11.2: after tie_weights the adapter reads whether the head shares the embedding's tensor, and only at a call
     that has the weights (from_pretrained's passes missing_keys; a meta model's post_init call is skipped)."""

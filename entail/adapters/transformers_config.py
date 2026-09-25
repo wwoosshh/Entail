@@ -30,11 +30,17 @@ def handles():
 
 @functools.lru_cache(maxsize=None)
 def _known(cls):
-    """The fields a config class declares: the keys of a default instance's to_dict(), or None if it cannot be built."""
+    """The fields a config class declares: the keys of a default instance's to_dict(), and the standard names the
+    class renames on the way in (`attribute_map`: GPT-2 stores hidden_size as n_embd; M12.1), or None if it cannot
+    be built."""
     try:
-        return frozenset(cls().to_dict())
+        known = set(cls().to_dict())
     except Exception:  # noqa: BLE001 - a class that cannot be built with defaults gives no answer
         return None
+    renamed = getattr(cls, "attribute_map", None)
+    if isinstance(renamed, dict):
+        known |= set(renamed)
+    return frozenset(known)
 
 
 def read_choice(config, raw):

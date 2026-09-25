@@ -274,6 +274,42 @@ def test_config_keys():
     assert load.misspelt("rope_scale") == "rope_scaling" and load.misspelt("text_config.rope_theta_") == "rope_theta"
     assert load.misspelt("tie_word_embedding") == "tie_word_embeddings" and load.misspelt("rope_scaling") is None
     assert load.misspelt("dtype") is None and load.misspelt("swiglu_limit") is None   # type is no target; not close
+    # M12.1 (an external review's case): a value that some field happens to share does not make an unread key a
+    # renamed one - 8 is hidden_size here - and a misspelt vocabulary key is lost whatever its value holds
+    shared = dict(raw, foo=8, flag=True, tie_word_embedding=True)
+    r = only(load.config_keys("transformers", [("", shared, known, resolved)], "c", LOAD))
+    assert r.verdict is Verdict.REFUSED and r.chosen.value == Coverage(8, 5, ("flag", "foo", "tie_word_embedding"))
+    assert "misspelt: tie_word_embedding (nearest key the vocabulary maps: tie_word_embeddings)" in r.note
+    assert "read by nothing entail knows: flag, foo" in r.note
+    r = only(load.config_keys("transformers", [("", dict(raw, foo=8), known, resolved)], "c", LOAD))
+    assert r.verdict is Verdict.UNKNOWN and r.chosen.value.left == ("foo",)
+    renamed = dict((k, v) for k, v in raw.items() if k != "rope_theta")
+    renamed["theta_rope"] = 500000.0                 # a rename entail does not know, but a distinctive value survives
+    assert only(load.config_keys("transformers", [("", renamed, known, resolved)], "c", LOAD)).verdict is Verdict.PASS
+    assert [load._distinctive(v) for v in (1, True, None, 3.0, "ab", "yarn", 255, 256, -300)] == \
+        [False, False, False, True, False, True, False, True, True]
+
+
+def test_quiet_unknown_keeps_the_line_off_the_console():
+    """M12.2: ENTAIL_QUIET=unknown - a non-blocking unknown is recorded and logged, not printed; said once."""
+    d = load.cannot_check("load:x.y", "x.y", "Layout", "nothing to read", Policy(mode="load"))
+    os.environ["ENTAIL_QUIET"] = "unknown"
+    load._QUIET_SAID = False
+    try:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            load.enforce([d])
+            load.enforce([d])
+        printed = out.getvalue()
+        assert "kept in the log and the record" in printed and printed.count("[entail]") == 1, printed
+        assert "unknown at load:x.y" not in printed and load.LEDGER.decisions[-1] is d
+    finally:
+        os.environ.pop("ENTAIL_QUIET", None)
+        load._QUIET_SAID = False
+    out = io.StringIO()
+    with redirect_stdout(out):
+        load.enforce([d])
+    assert "unknown at load:x.y" in out.getvalue()
 
 
 # --- rotary (fd-rope) ----------------------------------------------------------------------------------------------

@@ -1,8 +1,35 @@
 # Changelog
 
+## 1.0.2
+
+Unreleased. What an external review of 1.0.1 found, and what its readers will ask first.
+
+**Fixed**
+- Config keys (`load.keys_taken`): a key the class does not take counted as renamed when its value appeared in any
+  field the class knows, so an unread key holding a 1 or a `true` was silently taken as read, and a misspelt
+  vocabulary key with such a value (`tie_word_embedding: true`) escaped the misspelling rule. Now a misspelling of a
+  key the vocabulary maps is lost whatever its value holds, and a value counts as evidence of a rename only when it
+  is distinctive (a float, a string of four characters or more, an integer of 256 or more). The names a class
+  renames on the way in (`attribute_map`, GPT-2's `hidden_size` for `n_embd`) are taken by name, and the token ids
+  and `use_cache` that `GenerationConfig.from_model_config` reads off any config are listed as read elsewhere. The
+  stricter rule reports more keys as read by nothing entail knows (`head_dim`, `max_window_layers` on classes that
+  keep them as plain attributes, which their model code may read): on the 230 popular configs, 165 carry one such
+  `unknown` line instead of 92. `ENTAIL_QUIET=unknown` keeps it off the console.
+- `entail check` builds the config with `trust_remote_code=False` and `local_files_only=True`: a model with its own
+  code fails at once instead of prompting (which waited 15 s per model where there was no terminal), and nothing is
+  fetched.
+
+**Added**
+- `ENTAIL_QUIET=unknown`: non-blocking `unknown` decisions go to the log and the record only; the console says so
+  once per process. 1.0.1 printed one such line per boundary that could not be decided (69 lines over 81 loads of
+  30 popular models).
+- README: what the package does to an environment (the start-up hook and how to remove it, the log folder and how to
+  turn it off, the engine versions each adapter was measured against, the import name); the Korean README carries
+  the 1.0.1 and 1.0.2 changes.
+
 ## 1.0.1
 
-Unreleased. False alarms found when 1.0.0 was run on 30 popular models, three engines each (81 runs: it never broke a
+False alarms found when 1.0.0 was run on 30 popular models, three engines each (81 runs: it never broke a
 run and every output was identical, but 17 runs carried a report that was wrong; `testbed/results/m10/E2_SUMMARY.md`
 in the research repository). Nothing in the vocabulary or the verdicts changes; what changes is what counts as
 evidence at five boundaries, and how much is said.
