@@ -134,10 +134,14 @@ def _rotary(result, spec, theta, theta_key, where, source_kind="config", local_t
     short_sha, short_n = _factor_digest(short_factor)
     if long_n is not None and short_n is not None and long_n != short_n:
         result.problems.append(f"{where}: long_factor has {long_n} terms and short_factor {short_n}")
+    _, mrope_section = _first(spec, keys["mrope_section"])
+    _, mrope_interleaved = _first(spec, keys["mrope_interleaved"])
+    if mrope_section is not None:
+        mrope_section = tuple(int(x) for x in mrope_section) if isinstance(mrope_section, (list, tuple)) else None
     carried = set(keys["type"] + keys["factor"] + keys["original_max_position"] + keys["theta"]
                   + keys["low_freq_factor"] + keys["high_freq_factor"] + keys["beta_fast"] + keys["beta_slow"]
                   + keys["attention_factor"] + keys["mscale"] + keys["mscale_all_dim"] + keys["truncate"]
-                  + keys["long_factor"] + keys["short_factor"])
+                  + keys["long_factor"] + keys["short_factor"] + keys["mrope_section"] + keys["mrope_interleaved"])
     left = sorted(k for k, v in spec.items() if k not in carried and v is not None)
     if left:   # a key the vocabulary has no field for: say so instead of dropping it
         result.problems.append(f"{where}: RoPE keys {left} are not in vocabulary v{VOCAB_VERSION}; the Rotary fact "
@@ -153,7 +157,9 @@ def _rotary(result, spec, theta, theta_key, where, source_kind="config", local_t
         long_factor_sha256=long_sha, short_factor_sha256=short_sha, factor_terms=long_n or short_n,
         local_theta=None if local_theta is None else float(local_theta),
         partial_rotary_factor=None if partial is None else float(partial),
-        local_factor=None if local_factor is None else float(local_factor)), source_kind, where)
+        local_factor=None if local_factor is None else float(local_factor),
+        mrope_section=mrope_section,
+        mrope_interleaved=None if mrope_interleaved is None else bool(mrope_interleaved)), source_kind, where)
 
 
 def _props(result, props, used, source_kind, file):

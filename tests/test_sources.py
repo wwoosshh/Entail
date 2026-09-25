@@ -100,8 +100,8 @@ def test_hf_config_rope_parameters_and_the_old_names():
                                                                  "layer_b": {"rope_theta": 1e4}}}}))
     assert not [f for f in r.facts if f.name == "Rotary"]
     assert any("RoPE set per layer type (['layer_a', 'layer_b'])" in p for p in r.problems)
-    _, r = facts_of(folder({"config.json": {"rope_scaling": {"rope_type": "mrope"}, "rope_theta": 1e6}}))
-    assert any(f"rope type 'mrope' is not in vocabulary v{VOCAB_VERSION}" in p for p in r.problems), r.problems
+    _, r = facts_of(folder({"config.json": {"rope_scaling": {"rope_type": "made_up_rope"}, "rope_theta": 1e6}}))
+    assert any(f"rope type 'made_up_rope' is not in vocabulary v{VOCAB_VERSION}" in p for p in r.problems), r.problems
 
 
 def test_hf_config_nested_text_config_and_bad_values():
@@ -279,6 +279,17 @@ def test_phis_top_level_rope_keys_and_gemma3s_local_scaling_are_read():
         "sliding_attention": {"rope_theta": 1e4, "rope_type": "linear", "factor": 8.0}}}}))
     [leaked] = [v for n, v in got if n == "Rotary"]
     assert leaked.local_factor == 8.0 and leaked != clean, leaked
+
+
+
+def test_mrope_of_the_qwen_vl_family_is_in_the_vocabulary():
+    """M15.7 sweep: 25 of the 230 most-downloaded models (Qwen2.5-VL, Qwen3-VL) declare mrope; before v6 the whole
+    Rotary fact was refused as an unknown rope type."""
+    got, r = facts_of(folder({"config.json": {"text_config": {"rope_theta": 1e6, "rope_scaling": {
+        "rope_type": "mrope", "mrope_section": [16, 24, 24], "mrope_interleaved": True}}}}))
+    [rot] = [v for n, v in got if n == "Rotary"]
+    assert rot.rope_type == "mrope" and rot.mrope_section == (16, 24, 24) and rot.mrope_interleaved is True, rot
+    assert not any("not in vocabulary" in p for p in r.problems), r.problems
 
 
 if __name__ == "__main__":

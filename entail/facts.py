@@ -35,7 +35,8 @@ ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("
             ("Rotary", "beta_fast"): 6, ("Rotary", "beta_slow"): 6, ("Rotary", "attention_factor"): 6,
             ("Rotary", "mscale"): 6, ("Rotary", "mscale_all_dim"): 6, ("Rotary", "truncate"): 6,
             ("Rotary", "long_factor_sha256"): 6, ("Rotary", "short_factor_sha256"): 6, ("Rotary", "factor_terms"): 6,
-            ("Rotary", "local_theta"): 6, ("Rotary", "partial_rotary_factor"): 6, ("Rotary", "local_factor"): 6}
+            ("Rotary", "local_theta"): 6, ("Rotary", "partial_rotary_factor"): 6, ("Rotary", "local_factor"): 6,
+            ("Rotary", "mrope_section"): 6, ("Rotary", "mrope_interleaved"): 6}
 
 
 def _closed(cls_name, field, value, allowed, optional=True):
@@ -111,7 +112,9 @@ class Quantized:
 # --- FRAME ----------------------------------------------------------------------------------------------------
 
 POSITION_FRAMES = frozenset({"absolute", "chunk_relative"})
-ROPE_TYPES = frozenset({"default", "linear", "dynamic", "yarn", "longrope", "llama3"})
+ROPE_TYPES = frozenset({"default", "linear", "dynamic", "yarn", "longrope", "llama3", "mrope"})
+# mrope (v6, M15.7 sweep: 25 of the 230 most-downloaded models, the Qwen-VL family): the rotary dimensions split
+# among time, height and width, and whether the split interleaves
 
 
 @dataclass(frozen=True)
@@ -152,9 +155,18 @@ class Rotary:
     # nothing, which is what Gemma 3 declares; an engine that applies the global factor to them is caught)
     partial_rotary_factor: Optional[float] = None
     local_factor: Optional[float] = None
+    mrope_section: Optional[Tuple[int, ...]] = None
+    mrope_interleaved: Optional[bool] = None
 
     def __post_init__(self):
         _closed("Rotary", "rope_type", self.rope_type, ROPE_TYPES, optional=False)
+        if self.mrope_section is not None:
+            ok = isinstance(self.mrope_section, tuple) and self.mrope_section and all(
+                isinstance(x, int) and not isinstance(x, bool) and x > 0 for x in self.mrope_section)
+            if not ok:
+                raise ValueError(f"Rotary.mrope_section: expected a tuple of positive ints, got {self.mrope_section!r}")
+        if self.mrope_interleaved is not None and not isinstance(self.mrope_interleaved, bool):
+            raise ValueError(f"Rotary.mrope_interleaved: expected a bool, got {self.mrope_interleaved!r}")
         _number("Rotary", "theta", self.theta, 0, strict=True)
         _number("Rotary", "factor", self.factor, 0, strict=True)
         _number("Rotary", "original_max_position", self.original_max_position, 0, integer=True, strict=True)
