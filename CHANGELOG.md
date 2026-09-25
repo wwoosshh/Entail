@@ -2,7 +2,8 @@
 
 ## 1.1.0
 
-Unreleased. A new fact, from the low-level study (codebook v2): a class of wrong output that 1.0 did not read.
+Released 2026-09-26. Five facts from the low-level study (codebook v2): classes of wrong output that 1.0 did not read,
+each measured on the real bug it comes from.
 
 **Added**
 - Fact vocabulary v5: `Identity` (TIME) — what a stored or cached item stands for, so a store keyed by identity does

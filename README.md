@@ -36,7 +36,7 @@ run goes on (it stops only if you ask it to); said to be "unknown" when nobody d
 default stand in silently. The name is the logical sense of *entail*: what a checkpoint declares must entail what
 the engine executes. (ent·**AI**·**L**: an AI library.)
 
-> **Status: 1.1.0 (unreleased), measured on one machine.** Everything below was measured on the engines and
+> **Status: 1.1.0, measured on one machine.** Everything below was measured on the engines and
 > versions under [Tested with](#tested-with), on one RTX 4070 Ti. The evaluation is summarised under
 > [How it was measured](#how-it-was-measured), and what it found missing under [Known gaps](#known-gaps). 1.1.0
 > adds five facts the 1.0 evaluation showed it did not read (a stale cache identity, a padding token type, a kernel
