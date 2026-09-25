@@ -194,6 +194,32 @@ class HfConfig:
         return read_hf_dict(_load_json(file), file)
 
 
+def _stops(result, cfg, text, prefix, source_kind, keys):
+    """One Stops fact from a config-like dict: eos (an id or a list), bos and pad, from the top level first and the
+    nested text_config second. A negative id (-1 on some test checkpoints) is no id: read as unset, and said."""
+    def ids(field):
+        for scope, p in ((cfg, ""), (text, "text_config.")):
+            if scope is cfg or scope is not cfg:
+                key, v = _first(scope, keys[field])
+                if key is None:
+                    continue
+                vals = v if isinstance(v, list) else [v]
+                good = [int(x) for x in vals if isinstance(x, int) and not isinstance(x, bool) and x >= 0]
+                bad = [x for x in vals if not (isinstance(x, int) and not isinstance(x, bool)) or x < 0]
+                if bad:
+                    result.problems.append(f"{prefix}{p}{key}: {bad} are no token ids; read as unset")
+                return good, f"{prefix}{p}{key}"
+        return [], None
+
+    eos, where = ids("eos")
+    bos, _ = ids("bos")
+    pad, _ = ids("pad")
+    if eos or bos or pad:
+        from .facts import Stops
+        _emit(result, "Stops", lambda: Stops(eos=tuple(eos), bos=bos[0] if bos else None, pad=pad[0] if pad else None),
+              source_kind, where or f"{prefix}bos_token_id/pad_token_id")
+
+
 def read_hf_dict(cfg, label, source_kind="config", from_object=False):
     """The facts a Hugging Face config states, from its dict: config.json as read from disk, or the config object an
     engine holds (config_dict below, from_object=True). `label` names it in every Source."""
@@ -225,6 +251,11 @@ def read_hf_dict(cfg, label, source_kind="config", from_object=False):
             props["tie_word_embeddings"], used = v, used + [p + key]
             break
     _props(r, props, used, source_kind, file)
+
+    # Stops (v7, M15.8): the ids config.json calls the end, beginning and padding of a generation. Only the file:
+    # the object an engine holds is not the declaration, and the engine's stop set is the consumer
+    if not from_object:
+        _stops(r, cfg, text, f"{file}#", source_kind, ALIASES["Stops"]["hf_ids"])
 
     # Rotary: transformers 5 writes rope_parameters; older files write rope_theta and rope_scaling
     rk = ALIASES["Rotary"]["hf_config"]
@@ -565,4 +596,21 @@ class GgufMeta:
         return r
 
 
-READERS = [HfConfig(), HfTemplate(), DiffusersConfig(), SafetensorsMeta(), GgufMeta()]
+class HfGenerationConfig:
+    """generation_config.json: what the model's author declares for generation - here the ids that end it (Stops,
+    v7). transformers reads this file for generate(), vLLM and SGLang read it for their stop sets."""
+    name = "hf_generation_config"
+
+    def applies_to(self, path):
+        return os.path.isdir(path) and os.path.isfile(os.path.join(path, "generation_config.json"))
+
+    def read(self, path):
+        r = ReadResult()
+        p = os.path.join(path, "generation_config.json")
+        d = _load_json(p)
+        if isinstance(d, dict):
+            _stops(r, d, {}, f"{p}#", "config", ALIASES["Stops"]["hf_generation_config"])
+        return r
+
+
+READERS = [HfConfig(), HfTemplate(), HfGenerationConfig(), DiffusersConfig(), SafetensorsMeta(), GgufMeta()]

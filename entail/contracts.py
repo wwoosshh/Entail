@@ -89,6 +89,8 @@ RULES = {
     "tile_over_block": "the kernel steps a dimension in a tile that is not a divisor of the quantization block",
     # the tokenizer the engine holds against the model's vocabulary (vocab_contract.py, M15.3)
     "vocab_out_of_range": "the tokenizer can produce ids the model's embedding has no row for",
+    "stop_dropped": "the consumer's stop set lacks an id the model's files declare as the end of a generation",
+    "stop_id_out_of_range": "a declared eos, bos or pad id is past the tokenizer's highest id: no token, no stop",
     "vocab_not_the_models": "the folder declares two vocabularies and the engine loaded the one that is not the "
                             "model's",
 }

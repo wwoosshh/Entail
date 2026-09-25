@@ -99,6 +99,8 @@ def check_static(model_path: str, engine: str, settings: dict):
         checks.append(("layout", lambda: load.layout(f"{engine}.linear.unknown", facts, table,
                                                      observe.scale_format(path), policy)))
 
+    built = {}   # what the tokenizer said about itself, for the stop-set check below
+
     def tokenizer():
         """The tokenizer transformers builds for the folder against the model's vocabulary (M15.3). vLLM and SGLang
         build theirs through the same AutoTokenizer, so the static verdict stands for the three engines."""
@@ -124,6 +126,8 @@ def check_static(model_path: str, engine: str, settings: dict):
             tok = AutoTokenizer.from_pretrained(path, trust_remote_code=False, local_files_only=True)
             size, n = transformers_tokenizer.read_choice(tok)
             where = f"{type(tok).__name__} built by transformers from the folder"
+            built.update(name=type(tok).__name__, size=n, eos=getattr(tok, "eos_token_id", None),
+                         special=list(getattr(tok, "all_special_ids", None) or []))
         except ImportError:
             notes.append("transformers is not installed: the tokenizer is not built; its files are read alone")
         except Exception as e:  # noqa: BLE001 - reported; the files are still compared with each other
@@ -134,6 +138,25 @@ def check_static(model_path: str, engine: str, settings: dict):
                                     policy=policy, record=False)
 
     checks.append(("tokenizer", tokenizer))
+
+    def stops():
+        """Every end the files declare against the stop set `engine` builds from them (data/stops_sources.json;
+        M15.8). The tokenizer's eos, when one was built above, is a declaration too."""
+        from . import stops_contract
+        from .facts import Certainty, Fact, Source, Stops
+
+        if built.get("eos") is not None:
+            facts.facts.setdefault("Stops", []).append(
+                Fact("Stops", Stops(eos=(int(built["eos"]),)),
+                     Source("file", f"the tokenizer's eos_token (id {built['eos']}, {built['name']} built from the "
+                                    f"folder)"), Certainty.DECLARED))
+        held = stops_contract.held_by(engine, facts, tokenizer_eos=built.get("eos"))
+        return stops_contract.check(f"load:{engine}.stop_set", f"{engine}.stop_set", facts, held,
+                                    f"the stop set {engine} builds from these files (data/stops_sources.json)",
+                                    tokenizer_size=built.get("size"), special_ids=built.get("special"),
+                                    policy=policy, record=False)
+
+    checks.append(("stops", stops))
     for label, run in checks:
         try:
             model += run()

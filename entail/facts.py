@@ -16,8 +16,10 @@ readers named them as not carried, and nothing said so while the model ran (M9.1
 Identity: what a stored or cached item stands for, so a store keyed by identity (vLLM's prefix-cache block hashes)
 does not serve one sequence's KV under another's key (codebook v2 I; vllm#49377, #49449). v6 (M15) adds TokenType:
 the token type id a position is given by its role (padding), so a server that pads a cross-encoder's input does not
-give the padding the last real token's segment (vllm#58138; codebook v2 G). Each version only adds
-optional fields or whole classes, so an older fact is a newer fact with
+give the padding the last real token's segment (vllm#58138; codebook v2 G). v7 (M15.8) adds Stops: the ids at
+which a generation ends (and begins, and is padded), declared in up to three files that each engine reads a
+different subset of (Llama 3, April 2024: config.json named one end, the model emitted another). Each version only
+adds optional fields or whole classes, so an older fact is a newer fact with
 them open, and a fact written with an older version is still read (READABLE_VERSIONS); it may not state a field its
 version did not have (ADDED_IN).
 
@@ -28,8 +30,8 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Optional, Tuple
 
-VOCAB_VERSION = 6
-READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6})   # a later version only adds optional fields or classes; fields in ADDED_IN
+VOCAB_VERSION = 7
+READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7})   # a later version only adds optional fields or classes; fields in ADDED_IN
 ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("Template", "tool_call_format"): 3,
             ("Rotary", "low_freq_factor"): 4, ("Rotary", "high_freq_factor"): 4,
             ("Rotary", "beta_fast"): 6, ("Rotary", "beta_slow"): 6, ("Rotary", "attention_factor"): 6,
@@ -433,6 +435,27 @@ class TokenType:
             raise ValueError("TokenType.type_id: required")
 
 
+@dataclass(frozen=True)
+class Stops:
+    """Where a generation ends (v7, M15.8): the token ids a model emits to end its output (`eos`), and the ids it
+    begins with (`bos`) and pads with (`pad`), as ONE source states them. The same meaning is declared in up to three
+    files - generation_config.json, config.json and the tokenizer's eos_token - and every engine builds its stop set
+    from a different subset (data/stops_sources.json). The contract takes the union: an id any file calls an end is
+    an end, and a consumer whose set lacks it runs past the end of an answer (stops_contract.py)."""
+    eos: Tuple[int, ...] = ()
+    bos: Optional[int] = None
+    pad: Optional[int] = None
+
+    def __post_init__(self):
+        if not isinstance(self.eos, tuple) or any(isinstance(i, bool) or not isinstance(i, int) or i < 0
+                                                  for i in self.eos):
+            raise ValueError(f"Stops.eos: expected a tuple of token ids (ints >= 0), got {self.eos!r}")
+        _number("Stops", "bos", self.bos, 0, integer=True)
+        _number("Stops", "pad", self.pad, 0, integer=True)
+        if not self.eos and self.bos is None and self.pad is None:
+            raise ValueError("Stops: at least one of eos, bos or pad is required")
+
+
 # --- not in the vocabulary ------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -475,12 +498,12 @@ VOCABULARY = {
     "KvExtent": "RANGE", "ModelProps": "PROPERTY", "Prediction": "PROPERTY", "LatentScale": "PROPERTY",
     "Template": "PROPERTY", "Coverage": "MAPPING", "TokenType": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME",
     "Identity": "TIME", "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE", "KernelConfig": "LAYOUT",
-    "Vocab": "MAPPING",
+    "Vocab": "MAPPING", "Stops": "MAPPING",
 }
 _HERE = {"Layout": Layout, "Quantized": Quantized, "Rotary": Rotary, "Positions": Positions, "Valid": Valid,
          "ModelProps": ModelProps, "Prediction": Prediction, "LatentScale": LatentScale, "Template": Template,
          "TokenType": TokenType, "Reduction": Reduction, "Epoch": Epoch, "Identity": Identity, "Assumed": Assumed,
-         "Origin": Origin, "KernelConfig": KernelConfig, "Vocab": Vocab}
+         "Origin": Origin, "KernelConfig": KernelConfig, "Vocab": Vocab, "Stops": Stops}
 
 
 def vocabulary_class(name):

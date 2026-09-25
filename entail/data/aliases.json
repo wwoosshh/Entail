@@ -287,5 +287,30 @@
     "fmt"
    ]
   }
+ },
+ "Stops": {
+  "_about": "eos/bos/pad ids as config.json and generation_config.json write them; not under 'hf_config' on purpose: the Coverage rule reads hf_config as the top-level keys the vocabulary maps, and these three are already listed as read elsewhere (config_keys.json) - and near names (sep_token_id, cls_token_id) must not be called misspellings of them",
+  "hf_ids": {
+   "eos": [
+    "eos_token_id"
+   ],
+   "bos": [
+    "bos_token_id"
+   ],
+   "pad": [
+    "pad_token_id"
+   ]
+  },
+  "hf_generation_config": {
+   "eos": [
+    "eos_token_id"
+   ],
+   "bos": [
+    "bos_token_id"
+   ],
+   "pad": [
+    "pad_token_id"
+   ]
+  }
  }
 }

@@ -22,7 +22,7 @@ TARGETS = {
     # Before any model config class exists: each one copies the __setattr__ it inherits when it is created.
     # rope_alias first: both wrap from_dict, and the key coverage check reads the config rope_alias has settled.
     "transformers.configuration_utils": ["entail.adapters.rope_alias", "entail.adapters.transformers_config"],
-    "transformers.modeling_utils": ["entail.adapters.transformers_adapter"],
+    "transformers.modeling_utils": ["entail.adapters.transformers_adapter", "entail.adapters.transformers_stops"],
     "sglang.srt.model_executor.model_runner": ["entail.adapters.sglang_adapter"],
     "sglang.srt.managers.schedule_batch": ["entail.adapters.sglang_cache_contract"],
     "vllm.model_executor.model_loader.utils": ["entail.adapters.vllm_layout", "entail.adapters.vllm_loader"],
@@ -31,6 +31,9 @@ TARGETS = {
     "vllm.v1.core.kv_cache_manager": ["entail.adapters.vllm_cache_contract"],
     "vllm.v1.core.sched.scheduler": ["entail.adapters.vllm_identity"],
     "vllm.entrypoints.pooling.scoring.io_processor": ["entail.adapters.vllm_scoring"],
+    # the stop set (M15.8): vLLM keeps it on the input processor, SGLang on its model config
+    "vllm.v1.engine.input_processor": ["entail.adapters.vllm_stops"],
+    "sglang.srt.configs.model_config": ["entail.adapters.sglang_stops"],
     "sglang.kernels.ops.quantization.fp8_kernel": ["entail.adapters.sglang_fp8_tile"],
     # the fused-MoE config lookup: wrapped right after its module runs, so the kernel module binds the wrapped name
     "sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_config":

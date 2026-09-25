@@ -1,0 +1,20 @@
+{
+ "_about": "Which declarations each engine builds its stop set from (M15.8): the static check (entail check) derives the set an engine would hold from the files by this table; at run time the adapters read the set the engine holds. Evidence is the engine's code, read 2026-09-26; 'fallback' is what stands in when generation_config.json is absent. A row is data, not a rule: the rule (every declared end is an end) is in stops_contract.py.",
+ "transformers": {
+  "reads": ["generation_config"],
+  "fallback": "config",
+  "version": "5.17.0",
+  "ref": "modeling_utils.py from_pretrained (L1277): model.generation_config = GenerationConfig.from_pretrained(...) when generation_config.json exists, else GenerationConfig.from_model_config(config); generate() stops on generation_config.eos_token_id (an id or a list). The tokenizer's eos_token is not consulted."
+ },
+ "vllm": {
+  "reads": ["tokenizer", "generation_config"],
+  "fallback": "config",
+  "version": "0.30.0",
+  "ref": "v1/engine/input_processor.py L55: generation_config_fields = model_config.try_get_generation_config() (config/model.py L1693: generation_config.json; transformers' try_get_generation_config falls back to GenerationConfig.from_model_config); L373: sampling_params.update_from_generation_config(fields, renderer.get_eos_token_id()) - the stop set is the tokenizer's eos plus the generation config's eos ids (sampling_params.py L690)."
+ },
+ "sglang": {
+  "reads": ["config", "generation_config"],
+  "version": "0.5.20",
+  "ref": "srt/configs/model_config.py L1903 _get_hf_eos_token_id: hf_config.eos_token_id | hf_generation_config.eos_token_id, cached as hf_eos_token_id (L698) and read by the scheduler (managers/scheduler.py L2771, L2837)."
+ }
+}

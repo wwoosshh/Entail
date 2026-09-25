@@ -1,7 +1,7 @@
 {
  "_about": "What each consumer does with a declared fact, as data (LIBRARY_DESIGN.md 4.4; ROADMAP M3.1). One row per consumer and fact field. 'honours' true: the consumer applies the declared value; false: it runs without it. 'evidence' says how that is known: measured (a probe: runs with the fact bound and removed differ, and two control runs agree), code (read in the installed source), documented (the engine's documentation). A probe that shows a difference only proves that some path reads the fact; where a code reading found a path that drops it, the row says false and the note keeps the measurement. Consumers are named engine.role.name, and engine.role is a group of consumers that can stand in for one another; 'prefer' lists, per group, the consumers a resolution may route to, in order. transformers.paged_attention is its own group: continuous batching can only switch to another paged kernel, and none is measured to honour softcap. Only rows with measured evidence count for routing. Measured rows: Gemma 2 2B (gemma-2-2b-it) on an RTX 4070 Ti (sm_89). Tool parsers (M5.3) are consumers of Template.tool_call_format: a parser reads one format whatever the model declares ('reads'), so a model is served right only by a parser that reads its format; those rows are code readings of the markers each parser looks for, and a resolution may switch to a parser only where the table has seen it read the declared format (measured).",
  "schema": 1,
- "vocab_version": 6,
+ "vocab_version": 7,
  "prefer": {
   "transformers.attention": [
    "eager",

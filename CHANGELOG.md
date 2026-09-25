@@ -64,6 +64,15 @@ Unreleased. A new fact, from the low-level study (codebook v2): a class of wrong
   judged. Tokenizers built outside `PreTrainedTokenizerBase.from_pretrained` (Mistral, tiktoken, GGUF) are not
   checked at run time; `entail check` says so when Mistral files are present.
 
+- Fact vocabulary v7: `Stops` (MAPPING) - the token ids a generation ends with (and begins with, and is padded
+  with), as each file states them: generation_config.json, config.json and the tokenizer's eos_token. Every engine
+  builds its stop set from a different subset (`data/stops_sources.json`: transformers from generation_config.json
+  alone, vLLM from the tokenizer's eos plus generation_config.json, SGLang from config.json plus
+  generation_config.json), so an end one file declares can be one the engine never sees and the model runs past
+  the end of its answer (Llama 3, April 2024). `stops_contract.py` takes the union: a consumer whose set lacks a
+  declared end is resolved by adding it (adapters `transformers_stops`, `vllm_stops`, `sglang_stops`), a declared
+  id past the tokenizer is broken; `entail check` decides the set each engine would build.
+
 **Changed**
 - Config coverage: a key the class does not take but the vocabulary maps and compares elsewhere (Qwen2.5 and Qwen3
   write `rope_scaling: null`) is a pass that names it, not an unknown; before, it was 240 of the 394 unknown lines
@@ -94,7 +103,8 @@ engine's defaults): no run broken by entail, 0 broken or refused decisions, 2 re
 measured row (Gemma 2's softcap), outputs identical to the run without entail in 99 of 100 comparisons (the one
 difference is an engine's own nondeterminism, seen off-vs-off too), 76 unknown lines in all (from 364 before the
 Coverage change and the once-per-process record), the library's share of load time 1.2% median. Statically over
-230 popular configs: Coverage and Vocab broken 0. The Identity hook fires only on streaming-session updates, which
+230 popular configs: Coverage, Vocab and Rotary broken 0 (Rotary pass 196, unknown 6: DeepSeek-V4's per-layer split
+and `attn_factor`, both said as not compared). The Identity hook fires only on streaming-session updates, which
 ordinary generation never triggers.
 
 ## 1.0.2

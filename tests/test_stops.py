@@ -1,0 +1,238 @@
+"""Tests for the stop-set contract in the core (ROADMAP M15.8; vocabulary v7 Stops): what the files declare about the
+end of a generation, the union over sources, the two rules, the repair, and the static per-engine table. Pure
+Python: temp folders, no torch, no engine. Run: python tests/test_stops.py"""
+import io
+import json
+import os
+import sys
+import tempfile
+from contextlib import redirect_stdout
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+from entail import core, load, sources, stops_contract  # noqa: E402
+from entail.contracts import RULES, Verdict  # noqa: E402
+from entail.facts import Certainty, Fact, Source, Stops  # noqa: E402
+
+B, C = "load:test.stop_set", "test.stop_set"
+
+
+def folder(config=None, generation=None):
+    d = tempfile.mkdtemp()
+    if config is not None:
+        json.dump(dict({"model_type": "llama", "architectures": ["LlamaForCausalLM"]}, **config),
+                  open(os.path.join(d, "config.json"), "w", encoding="utf-8"))
+    if generation is not None:
+        json.dump(generation, open(os.path.join(d, "generation_config.json"), "w", encoding="utf-8"))
+    return d
+
+
+def raises(fn, text):
+    try:
+        fn()
+    except (ValueError, TypeError) as e:
+        assert text in str(e), (text, str(e))
+    else:
+        raise AssertionError(f"expected an error containing {text!r}")
+
+
+def one(decisions):
+    assert len(decisions) == 1, decisions
+    return decisions[0]
+
+
+def tok_fact(eos):
+    return Fact("Stops", Stops(eos=(eos,)), Source("file", "tokenizer_config.json#eos_token (the tokenizer's id)"),
+                Certainty.DECLARED)
+
+
+def test_the_fact_takes_ids_only():
+    Stops(eos=(2,))
+    Stops(bos=1)
+    raises(lambda: Stops(eos=(2, -1)), "Stops.eos")
+    raises(lambda: Stops(eos=[2]), "Stops.eos")
+    raises(lambda: Stops(), "at least one")
+
+
+def test_the_files_declare_stops_from_both_files_and_a_negative_id_is_unset():
+    """Llama 3's shape: config.json names one end, generation_config.json the two the model emits."""
+    d = folder({"eos_token_id": 128001, "bos_token_id": 128000, "pad_token_id": -1},
+               {"eos_token_id": [128001, 128009], "bos_token_id": 128000})
+    r = sources.read_all(d)
+    got = sorted(((f.value, f.source.where.split("/")[-1]) for f in r.facts if f.name == "Stops"), key=lambda x: x[1])
+    assert got == [(Stops(eos=(128001,), bos=128000), "config.json#eos_token_id"),
+                   (Stops(eos=(128001, 128009), bos=128000), "generation_config.json#eos_token_id")], got
+    assert any("pad_token_id: [-1] are no token ids" in p for p in r.problems), r.problems
+    ids, stops = stops_contract.declared_stops(load.declared(d))
+    assert set(ids) == {128001, 128009} and len(ids[128001]) == 2 and len(stops) == 2
+
+
+def test_a_consumer_whose_set_covers_every_declared_end_passes_even_with_more():
+    d = folder({"eos_token_id": 2}, {"eos_token_id": [2, 7]})
+    r = one(stops_contract.check(B, C, load.declared(d), {2, 7, 9}, "the engine's stop set", record=False))
+    assert r.verdict is Verdict.PASS and r.rule == RULES["match"] and r.declared.value == Stops(eos=(2, 7)), r
+
+
+def test_a_dropped_end_is_resolved_by_adding_it_or_broken_without_a_repair():
+    """The Llama 3 class: transformers holds generation_config's ids; config.json's own end is left out when the
+    author narrowed the list (saiga_llama3: 128001 vs 128009)."""
+    d = folder({"eos_token_id": 128001}, {"eos_token_id": 128009})
+    added = []
+    facts = load.declared(d)
+    r = one(stops_contract.check(B, C, facts, {128009}, "generation_config as the model holds it",
+                                 add_stops=lambda ids: added.append(tuple(ids)) or True, record=False))
+    assert r.verdict is Verdict.RESOLVED and r.handle == "add_stops" and r.target == (128001,), r
+    assert "lacks 128001" in r.note and "config.json#eos_token_id" in r.note
+    # record=False does not run the handle; the recording path does (through load.resolve)
+    assert added == []
+    n = len(load.LEDGER.decisions)
+    core.set_mode("load")
+    try:
+        with redirect_stdout(io.StringIO()):
+            stops_contract.check(B, C, facts, {128009}, "held", add_stops=lambda ids: added.append(tuple(ids)) or True)
+    finally:
+        core.set_mode("off")
+    assert added == [(128001,)] and load.LEDGER.decisions[n].verdict is Verdict.RESOLVED
+    # no repair offered: broken under the default policy, refused where the policy stops
+    r = one(stops_contract.check(B, C, facts, {128009}, "held", record=False))
+    assert r.verdict is Verdict.BROKEN and r.rule == RULES["stop_dropped"] and not r.blocking, r
+    os.environ["ENTAIL_ON_BROKEN"] = "stop"      # stopping is chosen (M5.4); the policy is read from the environment
+    try:
+        r = one(stops_contract.check(B, C, facts, {128009}, "held", record=False))
+        assert r.verdict is Verdict.REFUSED and r.blocking, r
+    finally:
+        os.environ.pop("ENTAIL_ON_BROKEN", None)
+    stops_contract.reset(B)
+
+
+def test_an_id_past_the_tokenizer_is_broken():
+    d = folder({"eos_token_id": 2}, {"eos_token_id": [2, 40000]})
+    r = stops_contract.check(B, C, load.declared(d), {2, 40000}, "held", tokenizer_size=32000, record=False)
+    bad = [x for x in r if x.rule == RULES["stop_id_out_of_range"]]
+    assert len(bad) == 1 and bad[0].verdict is Verdict.BROKEN and "eos id 40000" in bad[0].note, r
+
+
+def test_an_eos_that_is_not_special_is_noted_on_a_pass():
+    d = folder({"eos_token_id": 2}, {"eos_token_id": [2, 7]})
+    r = one(stops_contract.check(B, C, load.declared(d), {2, 7}, "held", special_ids=[2], record=False))
+    assert r.verdict is Verdict.PASS and "eos id(s) 7 are not special" in r.note, r
+
+
+def test_no_declaration_decides_nothing_and_an_unread_set_only_checks_the_ids():
+    assert stops_contract.check(B, C, load.declared(folder({"hidden_size": 8})), {2}, "held", record=False) == []
+    d = folder({"eos_token_id": 2})
+    r = one(stops_contract.check(B, C, load.declared(d), None, "held", tokenizer_size=10, record=False))
+    assert r.verdict is Verdict.PASS and r.chosen.value == Stops(eos=(2,)), r
+
+
+def test_the_static_table_builds_each_engines_set_as_its_code_does():
+    """transformers: generation_config only (config when absent); vLLM: the tokenizer's eos plus generation_config;
+    SGLang: config plus generation_config (data/stops_sources.json)."""
+    d = folder({"eos_token_id": 128001}, {"eos_token_id": 128009})
+    facts = load.declared(d)
+    assert stops_contract.held_by("transformers", facts) == {128009}
+    assert stops_contract.held_by("vllm", facts, tokenizer_eos=128001) == {128001, 128009}
+    assert stops_contract.held_by("sglang", facts) == {128001, 128009}
+    assert stops_contract.held_by("nothing", facts) is None
+    # no generation_config.json: transformers and vLLM fall back to config.json
+    d = folder({"eos_token_id": [1, 107]})
+    facts = load.declared(d)
+    assert stops_contract.held_by("transformers", facts) == {1, 107}
+    assert stops_contract.held_by("vllm", facts, tokenizer_eos=1) == {1, 107}
+    # the tokenizer's own fact counts as the tokenizer source
+    facts.facts.setdefault("Stops", []).append(tok_fact(5))
+    assert stops_contract.held_by("vllm", facts) == {1, 107, 5}
+    assert stops_contract.held_by("transformers", facts) == {1, 107}
+    for eng, entry in stops_contract.sources_table().items():
+        if eng.startswith("_"):
+            continue
+        assert entry["ref"] and entry["version"] and entry["reads"], eng
+
+
+def decided(fn):
+    """Run an adapter's decision in load mode, quietly; return the decisions it recorded."""
+    n = len(load.LEDGER.decisions)
+    core.set_mode("load")
+    try:
+        with redirect_stdout(io.StringIO()):
+            fn()
+    finally:
+        core.set_mode("off")
+    return load.LEDGER.decisions[n:]
+
+
+def test_the_transformers_adapter_adds_a_dropped_end_to_generation_config():
+    from types import SimpleNamespace
+    from entail.adapters import transformers_stops
+    d = folder({"eos_token_id": 128001}, {"eos_token_id": 128009})
+    model = SimpleNamespace(generation_config=SimpleNamespace(eos_token_id=128009))
+    r = decided(lambda: transformers_stops._decide(d, {}, model))
+    assert len(r) == 1 and r[0].verdict is Verdict.RESOLVED and model.generation_config.eos_token_id == [128001, 128009], r
+    # the repaired model again: its set now covers every declared end, a pass
+    again = decided(lambda: transformers_stops._decide(d, {}, model))
+    assert all(x.verdict is Verdict.PASS for x in again), again
+    # a model without a generation config decides nothing
+    assert decided(lambda: transformers_stops._decide(d, {}, SimpleNamespace())) == []
+    transformers_stops.reset()
+
+
+def test_the_vllm_adapter_counts_the_tokenizers_eos_and_writes_the_fields():
+    from types import SimpleNamespace
+    from entail.adapters import vllm_stops
+    d = folder({"eos_token_id": 128001}, {"eos_token_id": 128009})
+    tok = SimpleNamespace(all_special_ids=[128000, 128001, 128009], __len__=lambda self: 128256)
+    proc = SimpleNamespace(model_config=SimpleNamespace(model=d, hf_config_path=None, revision=None),
+                           generation_config_fields={"eos_token_id": 128009},
+                           renderer=SimpleNamespace(get_eos_token_id=lambda: 128001), tokenizer=None)
+    r = decided(lambda: vllm_stops._decide(proc))
+    assert r == [] or all(x.verdict is Verdict.PASS for x in r), r     # the tokenizer's eos covers config.json's
+    held, tok_eos, size, special = vllm_stops.read_choice(proc)
+    assert held == {128001, 128009} and tok_eos == 128001 and size is None
+    # the fields alone, without the tokenizer's eos: the dropped end is written into the fields
+    proc2 = SimpleNamespace(model_config=SimpleNamespace(model=d, hf_config_path=None, revision=None),
+                            generation_config_fields={"eos_token_id": [128009]},
+                            renderer=SimpleNamespace(get_eos_token_id=lambda: None), tokenizer=None)
+    vllm_stops.reset()
+    r = decided(lambda: vllm_stops._decide(proc2))
+    assert [x.verdict for x in r] == [Verdict.RESOLVED] and proc2.generation_config_fields["eos_token_id"] == [128001, 128009], r
+    vllm_stops.reset()
+
+
+def test_the_sglang_adapter_holds_both_files_and_passes():
+    from types import SimpleNamespace
+    from entail.adapters import sglang_stops
+    d = folder({"eos_token_id": 128001}, {"eos_token_id": 128009})
+    mc = SimpleNamespace(model_path=d, revision=None, hf_eos_token_id={128001, 128009})
+    r = decided(lambda: sglang_stops._decide(mc))
+    assert r == [] or all(x.verdict is Verdict.PASS for x in r), r
+    mc2 = SimpleNamespace(model_path=d, revision=None, hf_eos_token_id={128009})
+    sglang_stops.reset()
+    r = decided(lambda: sglang_stops._decide(mc2))
+    assert [x.verdict for x in r] == [Verdict.RESOLVED] and mc2.hf_eos_token_id == {128001, 128009}, r
+    sglang_stops.reset()
+
+
+def test_entail_check_decides_the_stop_set_the_engine_builds():
+    """The static check: transformers drops config.json's end when generation_config.json narrows the list; vLLM
+    keeps it through the tokenizer's eos (when a tokenizer can be built; here none can, so vLLM sees the files)."""
+    from entail import sites
+    try:
+        import transformers  # noqa: F401
+    except ImportError:
+        print("skip: transformers not installed")
+        return
+    d = folder({"hidden_size": 16, "num_attention_heads": 2, "num_hidden_layers": 1, "vocab_size": 32,
+                "eos_token_id": 3}, {"eos_token_id": 5})
+    _, model, notes = sites.check_static(d, "transformers", {"attention": "sdpa"})
+    st = [x for x in model if x.name == "Stops"]
+    assert st and st[0].verdict is Verdict.BROKEN and st[0].rule == RULES["stop_dropped"] and "lacks 3" in st[0].note, (st, notes)
+    _, model, notes = sites.check_static(d, "sglang", {"attention": "triton"})
+    st = [x for x in model if x.name == "Stops"]
+    assert st and st[0].verdict is Verdict.PASS, (st, notes)
+
+
+if __name__ == "__main__":
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print("ok", name)
