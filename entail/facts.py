@@ -112,7 +112,8 @@ class Quantized:
 # --- FRAME ----------------------------------------------------------------------------------------------------
 
 POSITION_FRAMES = frozenset({"absolute", "chunk_relative"})
-ROPE_TYPES = frozenset({"default", "linear", "dynamic", "yarn", "longrope", "llama3", "mrope"})
+ROPE_TYPES = frozenset({"default", "linear", "dynamic", "yarn", "longrope", "llama3", "mrope", "proportional"})
+# proportional (v6, M15.7 sweep: the Gemma 4 family, 5 of 230): scaling in proportion to the position, with `factor`
 # mrope (v6, M15.7 sweep: 25 of the 230 most-downloaded models, the Qwen-VL family): the rotary dimensions split
 # among time, height and width, and whether the split interleaves
 

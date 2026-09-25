@@ -138,10 +138,14 @@ def _rotary(result, spec, theta, theta_key, where, source_kind="config", local_t
     _, mrope_interleaved = _first(spec, keys["mrope_interleaved"])
     if mrope_section is not None:
         mrope_section = tuple(int(x) for x in mrope_section) if isinstance(mrope_section, (list, tuple)) else None
+    _, partial_in = _first(spec, keys["partial_rotary_factor"])   # transformers 5 keeps it inside rope_parameters
+    if partial_in is not None:
+        partial = partial_in
     carried = set(keys["type"] + keys["factor"] + keys["original_max_position"] + keys["theta"]
                   + keys["low_freq_factor"] + keys["high_freq_factor"] + keys["beta_fast"] + keys["beta_slow"]
                   + keys["attention_factor"] + keys["mscale"] + keys["mscale_all_dim"] + keys["truncate"]
-                  + keys["long_factor"] + keys["short_factor"] + keys["mrope_section"] + keys["mrope_interleaved"])
+                  + keys["long_factor"] + keys["short_factor"] + keys["mrope_section"] + keys["mrope_interleaved"]
+                  + keys["partial_rotary_factor"])
     left = sorted(k for k, v in spec.items() if k not in carried and v is not None)
     if left:   # a key the vocabulary has no field for: say so instead of dropping it
         result.problems.append(f"{where}: RoPE keys {left} are not in vocabulary v{VOCAB_VERSION}; the Rotary fact "
@@ -246,7 +250,7 @@ def read_hf_dict(cfg, label, source_kind="config", from_object=False):
                 if lfactor is not None and not local_scaled:
                     local_scaled = True   # a factor with no type: the file means scaling
                 extra = sorted(k for k in local if k not in rk["theta"] + rk["type"] + rk["factor"]
-                               and local[k] is not None)
+                               + rk["partial_rotary_factor"] and local[k] is not None)
                 if extra:
                     r.problems.append(f"{file}#{prefix}{pkey}.sliding_attention: keys {extra} beyond the local "
                                       f"base and scaling are not in vocabulary v{VOCAB_VERSION}")
