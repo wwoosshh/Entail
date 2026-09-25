@@ -18,7 +18,6 @@ engine = "transformers"
 versions = "5.12.1, 5.16.1, 5.17.0"
 _ORIG = None
 _MINE = None   # our wrapper, so uninstall restores only what it replaced (rope_alias wraps from_dict too)
-_OWNERS = {}   # (config class name, the file's own name) -> the object enforce's once_for keys on (see decide)
 
 
 def hooks():
@@ -92,8 +91,7 @@ def install():
             # the tokenizer and the scheduler; transformers: AutoConfig, then the model class), and each build said
             # the same unread keys again - 69 unknown lines became 306 over 81 runs (M15.6 E2). The same decision for
             # the same class and file name is recorded once per process; a different decision still is.
-            owner = _OWNERS.setdefault((type(config).__name__, own), object())
-            load.enforce(decisions, once_for=owner)
+            load.enforce(decisions, once_for=(type(config).__name__, own))
 
         load.safely(f"load:{engine}.config", f"{engine}.config", "Coverage", decide)
         return out
@@ -113,5 +111,4 @@ def uninstall():
         PreTrainedConfig.from_dict = classmethod(_ORIG)
     _ORIG = _MINE = None
     _known.cache_clear()
-    _OWNERS.clear()
     return 1

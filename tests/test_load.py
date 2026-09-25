@@ -251,13 +251,23 @@ def test_config_keys():
     r = only(load.config_keys("transformers", [("", moved, known, held)], "config.json", LOAD))
     assert r.verdict is Verdict.PASS and "quantization_config" in r.note   # a dict that moved; a key read elsewhere
     # a key the vocabulary maps, spelt right, that the class did not take: its own fact's contract decides it where
-    # a consumer reads it; here it is unknown, not broken (M11.1)
+    # a consumer reads it; here it is a pass that names it, not broken (M11.1) and not unknown (M15.7: Qwen's
+    # rope_scaling: null made 240 unknown lines in 114 runs where nothing was in doubt)
     lost = dict(raw, rope_scaling={"rope_type": "yarn", "factor": 4.0})
     r = only(load.config_keys("transformers", [("", lost, known, held)], "c", LOAD))
-    assert r.verdict is Verdict.UNKNOWN and not r.blocking and r.chosen.value.left == ("rope_scaling",)
+    assert r.verdict is Verdict.PASS and not r.blocking and r.chosen.value.left == ("rope_scaling",)
     assert "compared where a consumer of the fact reads it: rope_scaling (Rotary.scaling)" in r.note
+    # ... unless a key entail has no reader for is left beside it: then the one unknown line names both
+    r = only(load.config_keys("transformers", [("", dict(lost, swiglu_limit=7.0), known, held)], "c", LOAD))
+    assert r.verdict is Verdict.UNKNOWN and "swiglu_limit" in r.note and "rope_scaling (Rotary.scaling)" in r.note
     r = only(load.config_keys("transformers", [("text_config.", {"rope_scale": 4.0}, known, resolved)], "c", LOAD))
     assert r.chosen.value.left == ("text_config.rope_scale",) and r.verdict is Verdict.REFUSED
+    # a top-level key near a field that lives only inside the scaling dict is not its misspelling: SmolLM2's
+    # rope_interleaved is unread, not a misspelt mrope_interleaved (M15.7; a broken on all three engines before)
+    assert load.misspelt("rope_interleaved") is None and load.misspelt("rope_interleave") is None
+    assert load.misspelt("rope_scale") == "rope_scaling" and "mrope_interleaved" not in load.VOCABULARY_KEYS
+    r = only(load.config_keys("transformers", [("", dict(raw, rope_interleaved=False), known, resolved)], "c", LOAD))
+    assert r.verdict is Verdict.UNKNOWN and "rope_interleaved" in r.note and not r.blocking, r
     # a key outside the vocabulary that the class did not take: one unknown line naming it, blocking only in debug
     # mode (M11.1; 1.0 called it broken on 17 of 81 runs of 30 popular models)
     other = dict(raw, swiglu_limit=7.0, task_specific_params={"a": 1})
@@ -510,6 +520,23 @@ def test_enforce_records_prints_and_stops():
         assert [x["verdict"] for x in lines] == ["pass", "resolved", "refused"] and lines[1]["target"] == "eager"
     finally:
         os.environ.pop("ENTAIL_RECORD")
+
+
+def test_enforce_once_for_an_owner_that_is_a_value():
+    """once_for keyed by a value (a folder path, a (class, name) tuple): the same decision for it is recorded once per
+    process, a different one still is (M15.7: a str owner was silently not remembered - ByObject takes weak
+    references only - and the tokenizer's pass was recorded at each of SGLang's tokenizer builds)."""
+    d1 = load.cannot_check("load:x.once", "x.once", "Vocab", "first", Policy(mode="load"))
+    d2 = load.cannot_check("load:x.once", "x.once", "Vocab", "second", Policy(mode="load"))
+    n = len(load.LEDGER.decisions)
+    with redirect_stdout(io.StringIO()):
+        load.enforce([d1], once_for="/models/a")
+        load.enforce([d1], once_for="/models/a")                # the same decision, the same owner: not again
+        load.enforce([d1], once_for=("Qwen3Config", "a"))       # another owner: recorded
+        load.enforce([d2], once_for="/models/a")                # a different decision: recorded
+        load.enforce([d1], once_for=["not", "hashable"])        # cannot be remembered: recorded every time
+        load.enforce([d1], once_for=["not", "hashable"])
+    assert [x.note for x in load.LEDGER.decisions[n:]] == ["first", "first", "second", "first", "first"]
 
 
 def test_at_load_puts_them_together():

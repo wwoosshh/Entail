@@ -165,6 +165,22 @@
     "mrope_interleaved"
    ]
   },
+  "nested_only": [
+   "type",
+   "factor",
+   "low_freq_factor",
+   "high_freq_factor",
+   "beta_fast",
+   "beta_slow",
+   "attention_factor",
+   "mscale",
+   "mscale_all_dim",
+   "truncate",
+   "long_factor",
+   "short_factor",
+   "mrope_section",
+   "mrope_interleaved"
+  ],
   "gguf": {
    "theta": [
     "{arch}.rope.freq_base"

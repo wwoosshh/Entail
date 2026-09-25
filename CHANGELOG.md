@@ -45,11 +45,14 @@ Unreleased. A new fact, from the low-level study (codebook v2): a class of wrong
   digest and their count; `partial_rotary_factor` (a top-level key, or inside `rope_parameters`); `local_theta` and
   `local_factor` for a model that alternates two RoPEs (Gemma 3: `rope_local_base_freq`, or `rope_parameters` split
   into full_attention/sliding_attention - the local layers declare no scaling, so an engine that scales them is
-  caught); `mrope_section` and `mrope_interleaved` with the rope type `mrope` (the Qwen-VL family); and the rope
-  type `proportional` (Gemma 4). `original_max_position_embeddings` is read from the config's top level when the
-  scaling dict has none (Phi). Over the 230 most-downloaded models, RoPE declarations outside the vocabulary went
-  from 34 to 0, and a RoPE key the ENGINE's config holds that the vocabulary cannot carry is now reported at the
-  RoPE boundary instead of dropped.
+  caught; a stated local RoPE without a factor is `local_factor` 1.0, a definite value); `mrope_section` and
+  `mrope_interleaved` (the Qwen-VL family; `mrope` is not a rope type - transformers 5 normalises the old spelling
+  `{"type": "mrope"}` to `default`, and the fact of mrope is its section); and the rope type `proportional`
+  (Gemma 4). `original_max_position_embeddings` is read from the config's top level when the scaling dict has none
+  (Phi). A local `partial_rotary_factor` or scaling type different from the global one is reported as beyond the
+  vocabulary, not dropped. Over the 230 most-downloaded models, RoPE declarations outside the vocabulary went from
+  34 to 0, and a RoPE key the ENGINE's config holds that the vocabulary cannot carry is now reported at the RoPE
+  boundary instead of dropped.
 - `sglang_fp8_tile` also wraps the fused-MoE config lookup (`try_get_optimal_moe_config`), which has no sanitiser:
   SGLang 0.5.20 ships an H100 config for E=512, N=256, fp8 block [128, 128] whose BLOCK_SIZE_K is 256; at the
   kernel level that returns 256 where 512 is right, and the clamp restores 512. The dense hot path now costs a
@@ -59,6 +62,25 @@ Unreleased. A new fact, from the low-level study (codebook v2): a class of wrong
   config's vocabulary of rows; a stale second tokenizer source that is not the model's vocabulary is unknown, not
   judged. Tokenizers built outside `PreTrainedTokenizerBase.from_pretrained` (Mistral, tiktoken, GGUF) are not
   checked at run time; `entail check` says so when Mistral files are present.
+
+**Changed**
+- Config coverage: a key the class does not take but the vocabulary maps and compares elsewhere (Qwen2.5 and Qwen3
+  write `rope_scaling: null`) is a pass that names it, not an unknown; before, it was 240 of the 394 unknown lines
+  in 114 healthy runs, on models where nothing was in doubt. The misspelling rule compares a top-level key with
+  top-level vocabulary keys only: a field that lives inside `rope_scaling`/`rope_parameters` (`factor`,
+  `beta_fast`, `mrope_interleaved` ...) is no target, so SmolLM2's `rope_interleaved` is an unread key, not a
+  misspelt `mrope_interleaved` (which 1.1.0.dev had called broken on all three engines). Checked over the 558
+  distinct keys of 230 popular configs: no top-level key is within the rule's distance of a vocabulary key.
+- A decision recorded once for an owner (`enforce(once_for=...)`) also works when the owner is a value (a folder
+  path, a (class, name) pair): before, such an owner was silently not remembered, and the tokenizer's pass was
+  recorded at every one of SGLang's tokenizer builds; the same config's coverage decision is now recorded once per
+  process instead of at every build (vLLM and SGLang build the same config several times).
+- Load cost: a model folder's vocabulary sources are read once per process and once per machine (a stamp of the
+  watched files keys an in-process cache and `entail_logs/vocab_sources.json`), tokenizer.json is counted only
+  when a second tokenizer source exists to compare with, and the tokenizer's highest id comes from its added-token
+  table instead of a full `get_vocab()`. On Qwen3-4B the library's time at load went from 264/872/999 ms
+  (transformers/vLLM/SGLang) to 32/185/94 ms; the median share of load time over nine runs of three models is 1.3%
+  (`testbed/results/m15/E2_RECOST_SUMMARY.md`).
 
 Older facts and files still read (`READABLE_VERSIONS`). Not yet measured for this release: normal-run false alarms
 across the 38-model set (S3) and the steady-state cost (S4); the hook fires only on streaming-session updates, which

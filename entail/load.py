@@ -437,13 +437,21 @@ def keys_taken(raw: dict, known: set, resolved: dict):
 
 
 def _vocabulary_keys() -> Dict[str, str]:
-    """config.json key -> the fact and field entail's readers map it to (the hf_config names of data/aliases.json)."""
+    """config.json key -> the fact and field entail's readers map it to (the hf_config names of data/aliases.json),
+    for the keys that stand at the top level of a config. A field that lives only inside another key's dict
+    (`nested_only`: Rotary's factor, beta_fast, mrope_interleaved ... inside rope_scaling/rope_parameters) is left
+    out: config_keys asks about top-level keys, and a top-level name near such a field is not its misspelling
+    (M15.7: with v6 the rule called SmolLM2's `rope_interleaved` a misspelling of `mrope_interleaved` and broke
+    the run's Coverage on all three engines; 9 of 230 popular configs carry rope_interleaved or rope_interleave)."""
     out = {}
     for fact, table in _readers.ALIASES.items():
         names = table.get("hf_config") if isinstance(table, dict) else None
         if not isinstance(names, dict):
             continue
+        nested = set(table.get("nested_only") or ())
         for field_name, keys in names.items():
+            if field_name in nested:
+                continue
             for k in (keys if isinstance(keys, list) else [keys]):
                 out.setdefault(k, f"{fact}.{field_name}")
     return out
@@ -468,7 +476,8 @@ def misspelt(key: str) -> Optional[str]:
     three edits and less than half the name away (rope_scale -> rope_scaling, rolebench 15). A name shorter than
     five characters (type) is no target: too much is one edit from it. The bound was chosen on data: of 215 keys
     left unread on 92 popular models, none is within three edits of a vocabulary name
-    (testbed/results/m10/e1_llm/coverage_rule_whatif_vocab.json)."""
+    (testbed/results/m10/e1_llm/coverage_rule_whatif_vocab.json); checked again with vocabulary v6 over the 558
+    distinct keys of 230 popular configs (testbed/results/m15/coverage_whatif_v6.json)."""
     base = key.rsplit(".", 1)[-1]
     best = None
     for name in VOCABULARY_KEYS:
@@ -528,6 +537,12 @@ def config_keys(engine: str, scopes: Sequence[tuple], where: str, policy: Option
         said.append(f"read elsewhere: {'; '.join(notes)}")
     if wrong or not left:
         out = decide(contract, {"Coverage": declared_fact}, {"Coverage": chosen}, policy)
+    elif not unread:
+        # every key left is one the vocabulary maps, spelt right: its fact is declared from the file and compared
+        # where a consumer of it reads it, so this boundary has nothing to decide and says so as a pass with the
+        # note (M15.7: Qwen2.5 and Qwen3 configs write rope_scaling: null, and the unknown this made was 240 of the
+        # 394 unknown lines in 114 E2 runs, on models where nothing was in doubt)
+        out = [Decision(contract, "Coverage", Verdict.PASS, RULES["match"], declared=declared_fact, chosen=chosen)]
     else:
         out = [Decision(contract, "Coverage", Verdict.UNKNOWN, RULES["declared_unread"], declared=declared_fact,
                         chosen=chosen, blocking=policy.mode == "debug")]
@@ -988,6 +1003,9 @@ def resolve(decisions: Sequence[Decision], handles: Dict[str, object]) -> Dict[s
 
 LEDGER = _record.Ledger()   # every decision this process made at its boundaries
 _ENFORCED = ByObject()      # an object -> the decisions already recorded for it (enforce's once_for)
+_ENFORCED_BY_VALUE = {}     # the same for an owner that takes no weak reference but is a value: a folder path, a
+                            # (class name, file name) tuple (M15.7: a str owner was silently not remembered, and
+                            # the tokenizer's pass was recorded at every one of SGLang's 5-6 tokenizer builds)
 
 
 def _same(d: Decision) -> tuple:
@@ -1018,7 +1036,10 @@ def enforce(decisions: Sequence[Decision], quiet_pass: Optional[bool] = None, on
         if seen is None:
             seen = set()
             if not _ENFORCED.set(once_for, seen):
-                seen = None
+                try:
+                    seen = _ENFORCED_BY_VALUE.setdefault(once_for, seen)
+                except TypeError:   # neither weakly referenced nor hashable: not remembered
+                    seen = None
         if seen is not None:
             fresh = [d for d in decisions if _same(d) not in seen]
             seen.update(_same(d) for d in fresh)
