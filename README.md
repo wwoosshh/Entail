@@ -36,9 +36,12 @@ run goes on (it stops only if you ask it to); said to be "unknown" when nobody d
 default stand in silently. The name is the logical sense of *entail*: what a checkpoint declares must entail what
 the engine executes. (ent·**AI**·**L**: an AI library.)
 
-> **Status: 1.0.2, measured on one machine.** Everything below was measured on the engines and versions under
-> [Tested with](#tested-with), on one RTX 4070 Ti. The 1.0 evaluation is summarised under
-> [How it was measured](#how-it-was-measured), and what it found missing under [Known gaps](#known-gaps).
+> **Status: 1.1.0 (unreleased), measured on one machine.** Everything below was measured on the engines and
+> versions under [Tested with](#tested-with), on one RTX 4070 Ti. The evaluation is summarised under
+> [How it was measured](#how-it-was-measured), and what it found missing under [Known gaps](#known-gaps). 1.1.0
+> adds five facts the 1.0 evaluation showed it did not read (a stale cache identity, a padding token type, a kernel
+> tile against a quantization block, a tokenizer's vocabulary, and where a generation ends), each measured on the
+> real bug it comes from.
 > entail does not look for defects inside a model, a compiler, a kernel or the hardware: when every boundary it
 > checked held and the output is still wrong, it says so and narrows where to look.
 
@@ -157,6 +160,9 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
 
 | **vLLM server:** a tool-call parser that does not read the format the model declares (a Qwen3 model, which emits hermes calls, served with `--tool-call-parser pythonic`): the call comes back as plain text | switched to a parser measured to read the declared format | vLLM 0.30.0, Qwen3-4B: the tool call is returned as a structured call again |
 | **diffusers:** a VAE loaded on its own takes another model's latent scale (an SDXL VAE read as SD1.5's) | the scale a manifest declares for the model is applied | 15-16/255 from the reference image without entail, pixel-identical with it (3 seeds) |
+| **vLLM:** a prefix-cache block hash that no longer stands for the tokens it was made from. A streaming-session update truncates a request's tokens but its block hashes are only ever appended, so a hash chained over discarded tokens survives, and a later request whose prefix matches the OLD tokens is served the NEW tokens' KV (vllm#49377, #49449; live in 0.30.0) | the stale hashes are forgotten from the first stale block on and the engine remakes them from the current tokens | vLLM 0.30.0, SmolLM2-135M-Instruct: without entail the rebuilt session got a false 16-token cache hit and a wrong continuation; with entail the hash is caught at the update, recomputed, and the output is the correct recomputed one |
+| **SGLang:** a block-FP8 kernel whose K tile is not a divisor of the weights' quantization block, so the scale steps once per tile and skips blocks (a hand-supplied config, sglang#39626; also one shipped H100 fused-MoE config for E=512, N=256 with BLOCK_SIZE_K 256 over a block of 128) | the tile is clamped to the block, the engine's own default | SGLang 0.5.20: the dense kernel returned 64 where 288 was right, 288 with the clamp; the shipped MoE config gave 256 where 512 was right at the kernel level, 512 with the clamp. All 1,538 other shipped block-FP8 entries divide, so ordinary runs decide nothing |
+| a generation that runs past its end because the file the engine reads for its stop ids is not the file that declares them. generation_config.json, config.json and the tokenizer each declare where a generation ends, and transformers reads only the first, vLLM the first plus the tokenizer, SGLang the first two (the April-2024 Llama 3 shape: config.json named one end, the model emitted another) | the ids the other files declare are added to the engine's stop set at load | transformers 5.17, Llama-3.2-3B-Instruct with a generation_config.json that lists only `<\|end_of_text\|>`: without entail all three test answers ran to the 160-token limit past their `<\|eot_id\|>`; with entail the end config.json declares was added at load and the answers stopped at 8, 18 and 37 tokens |
 
 **Checks** (and reports what nothing can resolve)
 
@@ -172,6 +178,15 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
   where the model declares it is kept, and request fields or template settings that nothing reads
 - where transformers applies a chat template - a script's `apply_chat_template`, SGLang's server - the template
   and the reasoning history the same way, and SGLang's own conversation templates (`--chat-template chatml`)
+- the tokenizer the engine built against the model's vocabulary: ids past the embedding, and a folder that
+  carries two vocabularies (vocab.txt of 100,000 next to a tokenizer.json of 32,000; transformers#48967) where the
+  engine built the one that is not the model's - reported at the tokenizer's load, refused before the first id
+  under `ENTAIL_ON_BROKEN=stop`, and exit 1 from `entail check`
+- on vLLM's scoring path, the token type a cross-encoder's padding is given against the tokenizer's declared pad
+  type (vllm#58138: the padding got the document's segment and the /rerank scores moved); vLLM 0.30 keeps token
+  types in a form that cannot carry the repair, so this is reported, and refused under `ENTAIL_ON_BROKEN=stop`
+- statically, per engine, the stop set each engine would build from a model folder against every end its files
+  declare (`entail check`)
 - in debug mode, the boundaries you declare in your own code (`@entail.boundary`: what each argument means);
   a strided layout, a quantized value and chunk-relative positions are converted where the reader needs it
 
@@ -249,6 +264,15 @@ For 1.0 every measurement of the development milestones was run again on the fin
   real loss - the five causes are in the changelog. With 1.0.1: no `broken`, no `refused`, two repairs (Gemma 2's
   soft-capping again, measured rows), every output identical to the run without entail, load cost median
   0.7-0.9%. What 1.0.1 cannot decide it now says as `unknown` (69 lines over the 81 runs, one per boundary).
+- **Real bugs, for 1.1.0:** of 8 reported bugs replayed from a random sample of 229 engine issues, 4 were of
+  the class entail targets and 1.0 passed all 4; 1.1.0 repairs 2 (vLLM's stale block hashes, SGLang's kernel
+  tile) and reports the other 2 at their boundary (the padding token type, the second vocabulary). The 3 out of
+  the class (a CUDA-graph weak reference, a parser's streaming logic, a scheduler's arithmetic) are, as designed,
+  not flagged. A fifth, the stop-id class, was replayed on transformers (table above). The 38 popular models on
+  three engines again (102 valid runs): no `broken`, no `refused`, the same two repairs, outputs identical in 99 of
+  100 comparisons (the one difference is an engine's own nondeterminism), 76 `unknown` lines in all, the library's
+  share of load time 1.2% at the median and 7.8% at the 90th percentile. Statically over 230 popular model
+  folders: no false `broken` from the new facts.
 - **31 test problems** (16 reproduction cases, 8 field cases, 7 simulated market incidents): each defect was
   repaired; where no repair exists, it was reported at the boundary and fact where it happened while the run
   went on, or stopped with `ENTAIL_ON_BROKEN=stop`. No fixed version was flagged. (The two ComfyUI cases were
@@ -272,8 +296,14 @@ For 1.0 every measurement of the development milestones was run again on the fin
   CUDA-graph path it is within noise.
 - A multimodal processor's `apply_chat_template` is not checked. A request SGLang's server refuses under
   `ENTAIL_ON_BROKEN=stop` gets SGLang's own error (500); vLLM's server answers 400.
-- RoPE keys the vocabulary does not carry (yarn's `beta_fast`, longrope's factor lists) are reported as not
-  compared.
+- A RoPE declaration the vocabulary does not carry is reported as not compared: over 230 popular folders that is
+  a per-layer-type split under names other than full/sliding attention (DeepSeek-V4), a local layer's own
+  `partial_rotary_factor` (Laguna) and `attn_factor`, a name no engine reads.
+- The padding token type on vLLM's scoring path is reported, not repaired: vLLM 0.30 keeps token types as the
+  index of the first 1, which cannot hold a pad type after the document. Tokenizers built outside transformers'
+  `PreTrainedTokenizerBase.from_pretrained` (Mistral's own files, tiktoken, GGUF) are not checked at run time.
+- The stop-set check at transformers' `from_pretrained` sees the two JSON files but not the tokenizer, which a
+  script loads separately; vLLM's check sees all three.
 - A mismatch the capability table knows only from reading an engine's code (SGLang flashinfer's sliding window) is
   reported as inferred, not repaired; only measured rows switch a backend. Config keys outside the vocabulary that
   a model's config class does not take are reported as unread, not as lost.

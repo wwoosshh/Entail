@@ -126,8 +126,12 @@ def check_static(model_path: str, engine: str, settings: dict):
             tok = AutoTokenizer.from_pretrained(path, trust_remote_code=False, local_files_only=True)
             size, n = transformers_tokenizer.read_choice(tok)
             where = f"{type(tok).__name__} built by transformers from the folder"
-            built.update(name=type(tok).__name__, size=n, eos=getattr(tok, "eos_token_id", None),
-                         special=list(getattr(tok, "all_special_ids", None) or []))
+            # a tokenizer built from a folder without a tokenizer source (a GGUF repository, a draft model: only
+            # tokenizer_config.json) is transformers' one-token Qwen2Tokenizer, no statement about the model
+            # (M15.8 first static run: its size of 1 put every declared id out of range)
+            if vocab_contract.sources(path).candidates:
+                built.update(name=type(tok).__name__, size=n, eos=getattr(tok, "eos_token_id", None),
+                             special=list(getattr(tok, "all_special_ids", None) or []))
         except ImportError:
             notes.append("transformers is not installed: the tokenizer is not built; its files are read alone")
         except Exception as e:  # noqa: BLE001 - reported; the files are still compared with each other
@@ -145,16 +149,19 @@ def check_static(model_path: str, engine: str, settings: dict):
         from . import stops_contract
         from .facts import Certainty, Fact, Source, Stops
 
-        if built.get("eos") is not None:
+        declared_by_file = any("tokenizer_config.json" in f.source.where for f in facts.get("Stops"))
+        if built.get("eos") is not None and not declared_by_file:
             facts.facts.setdefault("Stops", []).append(
                 Fact("Stops", Stops(eos=(int(built["eos"]),)),
                      Source("file", f"the tokenizer's eos_token (id {built['eos']}, {built['name']} built from the "
                                     f"folder)"), Certainty.DECLARED))
         held = stops_contract.held_by(engine, facts, tokenizer_eos=built.get("eos"))
+        # a dropped end is what entail adds at load (the adapters' add_stops): said so, as the attention checks say
+        # the backend they would switch to; the ids are recorded on the decision
         return stops_contract.check(f"load:{engine}.stop_set", f"{engine}.stop_set", facts, held,
                                     f"the stop set {engine} builds from these files (data/stops_sources.json)",
-                                    tokenizer_size=built.get("size"), special_ids=built.get("special"),
-                                    policy=policy, record=False)
+                                    add_stops=lambda ids: True, tokenizer_size=built.get("size"),
+                                    special_ids=built.get("special"), policy=policy, record=False)
 
     checks.append(("stops", stops))
     for label, run in checks:

@@ -1088,8 +1088,11 @@ def enforce(decisions: Sequence[Decision], quiet_pass: Optional[bool] = None, on
         console = not (quiet and d.verdict is Verdict.UNKNOWN and not d.blocking)
         if not console:
             _quiet_notice()
-        elif not d.blocking and _record.said_in_this_launch(_same(d)):
-            console = False   # another process of this launch (vLLM's engine core, SGLang's workers) said it
+        elif not d.blocking and _record.said_in_this_launch(_record.line(d)):
+            # the same line was said in this launch: by another process (vLLM's engine core, SGLang's workers) or
+            # by this one for a decision that differs only in what the line does not show (a second build of the
+            # same config with a key transformers added; M15.8). The record keeps every decision
+            console = False
         _record.say(_record.line(d), console=console)
     stops = [d for d in decisions if d.blocking]
     if stops:

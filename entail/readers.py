@@ -613,4 +613,46 @@ class HfGenerationConfig:
         return r
 
 
-READERS = [HfConfig(), HfTemplate(), HfGenerationConfig(), DiffusersConfig(), SafetensorsMeta(), GgufMeta()]
+class HfTokenizerConfig:
+    """tokenizer_config.json: the tokenizer's own statement of the end (eos_token), the beginning (bos_token) and the
+    padding (pad_token), as ids by the file's added_tokens_decoder - no tokenizer is built (M15.8: Nemotron-3-Nano
+    declares </s> in config.json and an auto-written generation_config.json, and <|im_end|> here and in its chat
+    template; transformers and SGLang build their stop set from the two JSON files alone). A token the file does not
+    list in added_tokens_decoder is left to a built tokenizer (the static check, the vLLM adapter)."""
+    name = "hf_tokenizer_config"
+
+    def applies_to(self, path):
+        return os.path.isdir(path) and os.path.isfile(os.path.join(path, "tokenizer_config.json"))
+
+    def read(self, path):
+        r = ReadResult()
+        p = os.path.join(path, "tokenizer_config.json")
+        d = _load_json(p)
+        if not isinstance(d, dict):
+            return r
+        added = d.get("added_tokens_decoder")
+        if not isinstance(added, dict):
+            return r
+        by_content = {}
+        for k, v in added.items():
+            if isinstance(v, dict) and isinstance(v.get("content"), str):
+                try:
+                    by_content.setdefault(v["content"], int(k))
+                except (TypeError, ValueError):
+                    pass
+        ids = {}
+        for field_name in ("eos", "bos", "pad"):
+            tok = d.get(f"{field_name}_token")
+            tok = tok.get("content") if isinstance(tok, dict) else tok
+            if isinstance(tok, str) and tok in by_content:
+                ids[field_name] = by_content[tok]
+        if ids:
+            from .facts import Stops
+            where = f"{p}#eos_token (id by added_tokens_decoder)" if "eos" in ids else f"{p}#bos_token/pad_token"
+            _emit(r, "Stops", lambda: Stops(eos=(ids["eos"],) if "eos" in ids else (), bos=ids.get("bos"),
+                                            pad=ids.get("pad")), "file", where)
+        return r
+
+
+READERS = [HfConfig(), HfTemplate(), HfGenerationConfig(), HfTokenizerConfig(), DiffusersConfig(), SafetensorsMeta(),
+           GgufMeta()]

@@ -452,8 +452,8 @@ class Stops:
             raise ValueError(f"Stops.eos: expected a tuple of token ids (ints >= 0), got {self.eos!r}")
         _number("Stops", "bos", self.bos, 0, integer=True)
         _number("Stops", "pad", self.pad, 0, integer=True)
-        if not self.eos and self.bos is None and self.pad is None:
-            raise ValueError("Stops: at least one of eos, bos or pad is required")
+        # an empty eos is a value: a consumer whose set holds no end (a generation config without eos_token_id;
+        # M15.8 E2: tiny-random-Llama's) - the readers emit a fact only when a file states something
 
 
 # --- not in the vocabulary ------------------------------------------------------------------------------------

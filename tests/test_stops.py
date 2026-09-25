@@ -51,7 +51,7 @@ def test_the_fact_takes_ids_only():
     Stops(bos=1)
     raises(lambda: Stops(eos=(2, -1)), "Stops.eos")
     raises(lambda: Stops(eos=[2]), "Stops.eos")
-    raises(lambda: Stops(), "at least one")
+    assert Stops().eos == ()          # a consumer that stops on nothing is a value, not an error
 
 
 def test_the_files_declare_stops_from_both_files_and_a_negative_id_is_unset():
@@ -65,6 +65,32 @@ def test_the_files_declare_stops_from_both_files_and_a_negative_id_is_unset():
     assert any("pad_token_id: [-1] are no token ids" in p for p in r.problems), r.problems
     ids, stops = stops_contract.declared_stops(load.declared(d))
     assert set(ids) == {128001, 128009} and len(ids[128001]) == 2 and len(stops) == 2
+
+
+def test_the_tokenizer_config_declares_the_end_by_its_own_added_tokens():
+    """Nemotron-3-Nano's shape: config.json and an auto-written generation_config.json say </s> (2); the tokenizer's
+    eos_token and the chat template say <|im_end|> (11). Read from tokenizer_config.json alone, no tokenizer built."""
+    d = folder({"eos_token_id": 2, "bos_token_id": 1}, {"eos_token_id": 2, "_from_model_config": True})
+    json.dump({"eos_token": "<|im_end|>", "bos_token": "<s>", "pad_token": None,
+               "added_tokens_decoder": {"1": {"content": "<s>", "special": True}, "2": {"content": "</s>", "special": True},
+                                        "11": {"content": "<|im_end|>", "special": True}}},
+              open(os.path.join(d, "tokenizer_config.json"), "w", encoding="utf-8"))
+    r = sources.read_all(d)
+    tok = [f for f in r.facts if f.name == "Stops" and "tokenizer_config.json" in f.source.where]
+    assert len(tok) == 1 and tok[0].value == Stops(eos=(11,), bos=1) and tok[0].source.kind == "file", tok
+    facts = load.declared(d)
+    ids, _ = stops_contract.declared_stops(facts)
+    assert set(ids) == {2, 11}
+    # transformers and SGLang build their sets from the two JSON files: 11 is dropped there, not on vLLM
+    assert stops_contract.held_by("transformers", facts) == {2} and stops_contract.held_by("sglang", facts) == {2}
+    assert stops_contract.held_by("vllm", facts) == {2, 11}
+    r = one(stops_contract.check(B, C, facts, {2}, "held", add_stops=lambda ids: True, record=False))
+    assert r.verdict is Verdict.RESOLVED and r.target == (11,) and "tokenizer_config.json#eos_token" in r.note, r
+    # an eos_token the file does not list as an added token gives no fact (left to a built tokenizer)
+    d2 = folder({"eos_token_id": 2})
+    json.dump({"eos_token": "<|end|>", "added_tokens_decoder": {"2": {"content": "</s>"}}},
+              open(os.path.join(d2, "tokenizer_config.json"), "w", encoding="utf-8"))
+    assert not [f for f in sources.read_all(d2).facts if f.name == "Stops" and "tokenizer_config" in f.source.where]
 
 
 def test_a_consumer_whose_set_covers_every_declared_end_passes_even_with_more():
@@ -116,6 +142,15 @@ def test_an_eos_that_is_not_special_is_noted_on_a_pass():
     d = folder({"eos_token_id": 2}, {"eos_token_id": [2, 7]})
     r = one(stops_contract.check(B, C, load.declared(d), {2, 7}, "held", special_ids=[2], record=False))
     assert r.verdict is Verdict.PASS and "eos id(s) 7 are not special" in r.note, r
+
+
+def test_a_consumer_that_holds_no_end_at_all_is_resolved_not_crashed():
+    """M15.8 E2: hmellor/tiny-random-LlamaForCausalLM ships a generation_config.json without eos_token_id, so
+    transformers' set is empty; the first build raised inside entail (an empty Stops was refused) and the run was
+    told 'entail failed here'."""
+    d = folder({"eos_token_id": 1}, {"do_sample": False})
+    r = one(stops_contract.check(B, C, load.declared(d), set(), "held", add_stops=lambda ids: True, record=False))
+    assert r.verdict is Verdict.RESOLVED and r.target == (1,) and r.chosen.value == Stops(), r
 
 
 def test_no_declaration_decides_nothing_and_an_unread_set_only_checks_the_ids():
@@ -225,7 +260,9 @@ def test_entail_check_decides_the_stop_set_the_engine_builds():
                 "eos_token_id": 3}, {"eos_token_id": 5})
     _, model, notes = sites.check_static(d, "transformers", {"attention": "sdpa"})
     st = [x for x in model if x.name == "Stops"]
-    assert st and st[0].verdict is Verdict.BROKEN and st[0].rule == RULES["stop_dropped"] and "lacks 3" in st[0].note, (st, notes)
+    # statically a dropped end is said as what entail adds at load (resolved), with the ids on the decision
+    assert st and st[0].verdict is Verdict.RESOLVED and st[0].rule == RULES["stop_dropped"] and st[0].target == (3,) \
+        and "lacks 3" in st[0].note, (st, notes)
     _, model, notes = sites.check_static(d, "sglang", {"attention": "triton"})
     st = [x for x in model if x.name == "Stops"]
     assert st and st[0].verdict is Verdict.PASS, (st, notes)

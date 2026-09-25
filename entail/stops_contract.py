@@ -53,7 +53,7 @@ def held_by(engine: str, facts, tokenizer_eos: Optional[int] = None, table=None)
     by_kind: Dict[str, Set[int]] = {}
     for f in stops:
         kind = "generation_config" if "generation_config.json" in f.source.where else \
-            "tokenizer" if "tokenizer" in f.source.where else "config"
+            "tokenizer" if "tokenizer" in f.source.where.lower() else "config"
         by_kind.setdefault(kind, set()).update(int(i) for i in f.value.eos)
     if tokenizer_eos is not None:
         by_kind.setdefault("tokenizer", set()).add(int(tokenizer_eos))
