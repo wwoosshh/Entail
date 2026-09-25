@@ -82,8 +82,17 @@ Unreleased. A new fact, from the low-level study (codebook v2): a class of wrong
   (transformers/vLLM/SGLang) to 32/185/94 ms; the median share of load time over nine runs of three models is 1.3%
   (`testbed/results/m15/E2_RECOST_SUMMARY.md`).
 
-Older facts and files still read (`READABLE_VERSIONS`). Not yet measured for this release: normal-run false alarms
-across the 38-model set (S3) and the steady-state cost (S4); the hook fires only on streaming-session updates, which
+Older facts and files still read (`READABLE_VERSIONS`).
+
+**Measured for this release** (`testbed/results/m15/SUMMARY.md`, `E2_SUMMARY.md`, `E2_RECOST_SUMMARY.md` in the
+research workspace): the four in-class defects of the M10 E3 sample are blocked (2 resolved: vllm#49377/#49449,
+sglang#39626) or reported at their boundary (2: vllm#58138, transformers#48967), where 1.0.0 passed all four; the
+three out-of-class ones are, as designed, not flagged. On 38 popular models x 3 engines (102 valid runs, each
+engine's defaults): no run broken by entail, 0 broken or refused decisions, 2 resolved decisions backed by a
+measured row (Gemma 2's softcap), outputs identical to the run without entail in 99 of 100 comparisons (the one
+difference is an engine's own nondeterminism, seen off-vs-off too), 76 unknown lines in all (from 364 before the
+Coverage change and the once-per-process record), the library's share of load time 1.2% median. Statically over
+230 popular configs: Coverage and Vocab broken 0. The Identity hook fires only on streaming-session updates, which
 ordinary generation never triggers.
 
 ## 1.0.2
