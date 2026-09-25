@@ -72,11 +72,12 @@ def test_hf_config_gemma2_qwen3_llama32():
         "rope_type": "llama3"}}}))
     assert got == {("Rotary", Rotary("llama3", 500000.0, 32.0, 8192, low_freq_factor=1.0, high_freq_factor=4.0))}, got
     assert not any("RoPE keys" in p for p in r.problems), r.problems
-    # a key the vocabulary still cannot carry is named, not dropped
+    # yarn's tuning is carried since v6; a key the vocabulary still cannot carry is named, not dropped
     got, r = facts_of(folder({"config.json": {"rope_theta": 1e6, "rope_scaling": {
-        "rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32768, "beta_fast": 32.0}}}))
-    assert got == {("Rotary", Rotary("yarn", 1e6, 4.0, 32768))}, got
-    assert any(f"RoPE keys ['beta_fast'] are not in vocabulary v{VOCAB_VERSION}" in p for p in r.problems), r.problems
+        "rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32768, "beta_fast": 32.0,
+        "made_up_key": 1}}}))
+    assert got == {("Rotary", Rotary("yarn", 1e6, 4.0, 32768, beta_fast=32.0))}, got
+    assert any(f"RoPE keys ['made_up_key'] are not in vocabulary v{VOCAB_VERSION}" in p for p in r.problems), r.problems
 
 
 def test_hf_config_rope_parameters_and_the_old_names():
@@ -88,10 +89,17 @@ def test_hf_config_rope_parameters_and_the_old_names():
     assert {f.value for f in rot} == {Rotary("yarn", 1000000.0, 4.0, 32768), Rotary(theta=10000.0)}
     chosen, conflicts = sources.merge(r.facts)
     assert len(conflicts) == 1 and conflicts[0].name == "Rotary"   # the file says two things: recorded, not hidden
-    _, r = facts_of(folder({"config.json": {"rope_parameters": {"full_attention": {"rope_theta": 1e6},
-                                                                 "sliding_attention": {"rope_theta": 1e4}}}}))
+    # Gemma 3's two RoPEs (v6): one fact, the local layers' base as local_theta
+    got, r = facts_of(folder({"config.json": {"rope_parameters": {
+        "full_attention": {"rope_theta": 1e6, "rope_type": "linear", "factor": 8.0},
+        "sliding_attention": {"rope_theta": 1e4}}}}))
+    assert got == {("Rotary", Rotary("linear", theta=1e6, factor=8.0, local_theta=1e4))}, got
+    assert not any("per layer type" in p for p in r.problems), r.problems
+    # any other split per layer type is still outside the vocabulary
+    _, r = facts_of(folder({"config.json": {"rope_parameters": {"layer_a": {"rope_theta": 1e6},
+                                                                 "layer_b": {"rope_theta": 1e4}}}}))
     assert not [f for f in r.facts if f.name == "Rotary"]
-    assert any("RoPE set per layer type (['full_attention', 'sliding_attention'])" in p for p in r.problems)
+    assert any("RoPE set per layer type (['layer_a', 'layer_b'])" in p for p in r.problems)
     _, r = facts_of(folder({"config.json": {"rope_scaling": {"rope_type": "mrope"}, "rope_theta": 1e6}}))
     assert any(f"rope type 'mrope' is not in vocabulary v{VOCAB_VERSION}" in p for p in r.problems), r.problems
 
@@ -207,6 +215,46 @@ def test_a_failing_reader_never_breaks_the_caller():
     assert {(f.name, f.value) for f in r.facts} == {("Template", Template(sha256_text("t")))}
     assert r.problems[0].startswith("hf_config: ") and "JSONDecodeError" in r.problems[0]
     assert sources.read_all(os.path.join(d, "missing.safetensors")).facts == []
+
+
+
+def test_rope_keys_added_in_v6_are_carried_and_compared_by_digest():
+    from entail.facts import ADDED_IN, Fact, Source
+    from entail.readers import _factor_digest
+    long = [1.0 + i / 10 for i in range(48)]
+    short = [1.0] * 48
+    # Phi-3.5 / Phi-4-mini: longrope with per-dimension factors, kept as a digest and their count
+    got, r = facts_of(folder({"config.json": {"rope_theta": 10000.0, "rope_scaling": {
+        "rope_type": "longrope", "long_factor": long, "short_factor": short, "original_max_position_embeddings": 4096}}}))
+    [rot] = [v for n, v in got if n == "Rotary"]
+    assert rot.rope_type == "longrope" and rot.factor_terms == 48 and rot.original_max_position == 4096
+    assert rot.long_factor_sha256 == _factor_digest(long)[0] and rot.short_factor_sha256 == _factor_digest(short)[0]
+    assert rot.long_factor_sha256 != rot.short_factor_sha256 and len(rot.long_factor_sha256) == 64
+    assert not any("not in vocabulary" in p for p in r.problems), r.problems
+    # a list with one term changed is another digest: the comparison is exact
+    other = list(long)
+    other[7] += 1e-6
+    assert _factor_digest(other)[0] != rot.long_factor_sha256
+    # gpt-oss: yarn with its tuning
+    got, r = facts_of(folder({"config.json": {"rope_theta": 150000.0, "rope_scaling": {
+        "rope_type": "yarn", "factor": 32.0, "beta_fast": 32.0, "beta_slow": 1.0, "truncate": False,
+        "original_max_position_embeddings": 4096}}}))
+    [rot] = [v for n, v in got if n == "Rotary"]
+    assert (rot.beta_fast, rot.beta_slow, rot.truncate, rot.factor) == (32.0, 1.0, False, 32.0), rot
+    assert not any("not in vocabulary" in p for p in r.problems), r.problems
+    # Gemma 3 in the old spelling: rope_local_base_freq beside rope_theta and rope_scaling
+    got, r = facts_of(folder({"config.json": {"rope_theta": 1e6, "rope_local_base_freq": 1e4,
+                                              "rope_scaling": {"rope_type": "linear", "factor": 8.0}}}))
+    [rot] = [v for n, v in got if n == "Rotary"]
+    assert rot.local_theta == 1e4 and rot.factor == 8.0, rot
+    # a fact written with vocabulary v5 cannot state a v6 field
+    assert ADDED_IN[("Rotary", "local_theta")] == 6
+    try:
+        Fact("Rotary", Rotary(theta=1e6, local_theta=1e4), Source("config", "x"), Certainty.DECLARED, vocab_version=5)
+    except ValueError as e:
+        assert "local_theta" in str(e)
+    else:
+        raise AssertionError("a v5 fact must not state local_theta")
 
 
 if __name__ == "__main__":

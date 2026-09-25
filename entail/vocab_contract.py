@@ -22,7 +22,7 @@ a decision names the source that is the model's, so the user can load from it.
 """
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional, Tuple
 
 from . import tally as _tally
@@ -183,10 +183,15 @@ def check(boundary: str, consumer: str, path: str, tokenizer_size: Optional[int]
             return Decision(contract, "Vocab", verdict, RULES[rule], declared=declared, chosen=held, blocking=blocking,
                             note=note)
 
-        if tokenizer_len is not None and model is not None and int(tokenizer_len) > int(model):
+        past = None if tokenizer_len is None or model is None or int(tokenizer_len) <= int(model) else \
+            f"added tokens reach id {int(tokenizer_len) - 1}, past the model's {model} rows ({s.rows_where}); " \
+            f"such an id is not produced by text (gemma-3-1b-it's <image_soft_token>), so this is noted, not broken"
+        if model is not None and int(tokenizer_size) > int(model):
+            # the BASE vocabulary past the embedding: ordinary ids with no row. Added tokens past the rows are only
+            # noted (the M15.3 review: a text-only Gemma 3 carries an image token past its rows)
             decisions.append(broken("vocab_out_of_range", rows_fact,
-                                    f"the tokenizer reaches id {int(tokenizer_len) - 1}; the model has {model} rows "
-                                    f"({s.rows_where})"))
+                                    f"the tokenizer's base vocabulary has {tokenizer_size} tokens; the model has "
+                                    f"{model} rows ({s.rows_where})"))
         elif len(sizes) > 1:
             named = ", ".join(f"{w} = {n}" for n, w in sorted(s.candidates))
             # the model's tokenizer is the source whose size IS the model's vocabulary (its rows or vocab_size);
@@ -219,6 +224,9 @@ def check(boundary: str, consumer: str, path: str, tokenizer_size: Optional[int]
             src = Fact("Vocab", Vocab(size=sizes[0]), Source("file", s.candidates[0][1]), Certainty.DECLARED) \
                 if sizes else rows_fact
             decisions.append(Decision(contract, "Vocab", Verdict.PASS, RULES["match"], declared=src, chosen=held))
+        if past:
+            decisions = [replace(d, note=(d.note + "; " if d.note else "") + past) if d.verdict is Verdict.PASS else d
+                         for d in decisions]
     if record:
         _tally.counts(boundary)["checks"] += 1
         if all(d.verdict is Verdict.PASS for d in decisions):

@@ -95,8 +95,17 @@ def rotary_of(params):
 
 # --- Hugging Face config.json ----------------------------------------------------------------------------------
 
-def _rotary(result, spec, theta, theta_key, where, source_kind="config"):
-    """One Rotary fact from a scaling/parameters dict (may be None) and a base."""
+def _factor_digest(value):
+    """A list of per-dimension factors (longrope's long_factor/short_factor) as (sha256 of its JSON, its length):
+    compared exactly, without carrying 48-64 floats in every record (v6)."""
+    if not isinstance(value, (list, tuple)) or not value:
+        return None, None
+    text = json.dumps([float(x) for x in value], separators=(",", ":"))
+    return hashlib.sha256(text.encode()).hexdigest(), len(value)
+
+
+def _rotary(result, spec, theta, theta_key, where, source_kind="config", local_theta=None):
+    """One Rotary fact from a scaling/parameters dict (may be None), a base, and (v6) the local layers' base."""
     keys = ALIASES["Rotary"]["hf_config"]
     spec = spec or {}
     type_key, raw_type = _first(spec, keys["type"])
@@ -108,14 +117,36 @@ def _rotary(result, spec, theta, theta_key, where, source_kind="config"):
     _, omp = _first(spec, keys["original_max_position"])
     _, low = _first(spec, keys["low_freq_factor"])
     _, high = _first(spec, keys["high_freq_factor"])
+    _, beta_fast = _first(spec, keys["beta_fast"])
+    _, beta_slow = _first(spec, keys["beta_slow"])
+    _, attention_factor = _first(spec, keys["attention_factor"])
+    _, mscale = _first(spec, keys["mscale"])
+    _, mscale_all_dim = _first(spec, keys["mscale_all_dim"])
+    _, truncate = _first(spec, keys["truncate"])
+    _, long_factor = _first(spec, keys["long_factor"])
+    _, short_factor = _first(spec, keys["short_factor"])
+    long_sha, long_n = _factor_digest(long_factor)
+    short_sha, short_n = _factor_digest(short_factor)
+    if long_n is not None and short_n is not None and long_n != short_n:
+        result.problems.append(f"{where}: long_factor has {long_n} terms and short_factor {short_n}")
     carried = set(keys["type"] + keys["factor"] + keys["original_max_position"] + keys["theta"]
-                  + keys["low_freq_factor"] + keys["high_freq_factor"])
+                  + keys["low_freq_factor"] + keys["high_freq_factor"] + keys["beta_fast"] + keys["beta_slow"]
+                  + keys["attention_factor"] + keys["mscale"] + keys["mscale_all_dim"] + keys["truncate"]
+                  + keys["long_factor"] + keys["short_factor"])
     left = sorted(k for k, v in spec.items() if k not in carried and v is not None)
-    if left:   # e.g. yarn's beta_fast: stated, but the vocabulary has no field for it; say so instead of dropping it
+    if left:   # a key the vocabulary has no field for: say so instead of dropping it
         result.problems.append(f"{where}: RoPE keys {left} are not in vocabulary v{VOCAB_VERSION}; the Rotary fact "
                                f"does not carry them")
-    _emit(result, "Rotary", lambda: Rotary(rope_type, theta=theta, factor=factor, original_max_position=omp,
-                                           low_freq_factor=low, high_freq_factor=high), source_kind, where)
+    _emit(result, "Rotary", lambda: Rotary(
+        rope_type, theta=theta, factor=factor, original_max_position=omp, low_freq_factor=low, high_freq_factor=high,
+        beta_fast=None if beta_fast is None else float(beta_fast),
+        beta_slow=None if beta_slow is None else float(beta_slow),
+        attention_factor=None if attention_factor is None else float(attention_factor),
+        mscale=None if mscale is None else float(mscale),
+        mscale_all_dim=None if mscale_all_dim is None else float(mscale_all_dim),
+        truncate=None if truncate is None else bool(truncate),
+        long_factor_sha256=long_sha, short_factor_sha256=short_sha, factor_terms=long_n or short_n,
+        local_theta=None if local_theta is None else float(local_theta)), source_kind, where)
 
 
 def _props(result, props, used, source_kind, file):
@@ -180,21 +211,38 @@ def read_hf_dict(cfg, label, source_kind="config", from_object=False):
 
     # Rotary: transformers 5 writes rope_parameters; older files write rope_theta and rope_scaling
     rk = ALIASES["Rotary"]["hf_config"]
+    _, local_theta = _first(text, rk["local_theta"])   # v6: Gemma 3's base for its local (sliding) layers
     pkey, params = _first(text, rk["parameters"])
     if pkey:
         if isinstance(params, dict) and params and all(isinstance(x, dict) for x in params.values()):
-            r.problems.append(f"{file}#{prefix}{pkey}: RoPE set per layer type ({sorted(params)}) "
-                              f"is not in vocabulary v{VOCAB_VERSION}")
+            # RoPE per layer type. The one shape the vocabulary carries (v6) is two RoPEs, global and local
+            # (Gemma 3: full_attention with its scaling, sliding_attention with its own base): one Rotary fact whose
+            # local_theta is the local layers' base. Any other split stays outside the vocabulary.
+            names = set(params)
+            if names <= {"full_attention", "sliding_attention"} and "full_attention" in params:
+                full, local = params["full_attention"], params.get("sliding_attention") or {}
+                _, theta = _first(full, rk["theta"])
+                _, ltheta = _first(local, rk["theta"])
+                extra = sorted(k for k in local if k not in rk["theta"] + rk["type"] and local[k] is not None)
+                if extra:
+                    r.problems.append(f"{file}#{prefix}{pkey}.sliding_attention: keys {extra} beyond the local "
+                                      f"base are not in vocabulary v{VOCAB_VERSION}")
+                _rotary(r, full, theta, None, f"{file}#{prefix}{pkey}", source_kind,
+                        local_theta=ltheta if ltheta is not None else local_theta)
+            else:
+                r.problems.append(f"{file}#{prefix}{pkey}: RoPE set per layer type ({sorted(params)}) "
+                                  f"is not in vocabulary v{VOCAB_VERSION}")
         elif isinstance(params, dict):
             _, theta = _first(params, rk["theta"])
-            _rotary(r, params, theta, None, f"{file}#{prefix}{pkey}", source_kind)
+            _rotary(r, params, theta, None, f"{file}#{prefix}{pkey}", source_kind, local_theta=local_theta)
     tkey, theta = _first(text, rk["theta"])
     skey, scaling = _first(text, rk["scaling"])
     # config.json may state both spellings: two facts, and sources.merge finds a disagreement. In the config object an
     # engine holds, the model reads rope_parameters only; a leftover old-name attribute is not a declaration.
     if (tkey or skey) and not (pkey and from_object):
         where = f"{file}#" + ",".join(prefix + x for x in (tkey, skey) if x)
-        _rotary(r, scaling if isinstance(scaling, dict) else None, theta, tkey, where, source_kind)
+        _rotary(r, scaling if isinstance(scaling, dict) else None, theta, tkey, where, source_kind,
+                local_theta=local_theta)
 
     # Layout of quantized weights
     qk = ALIASES["Layout"]["hf_quantization_config"]

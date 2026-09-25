@@ -102,6 +102,14 @@ def check_static(model_path: str, engine: str, settings: dict):
 
         size = n = None
         where = "no tokenizer built"
+        # a folder with Mistral's own tokenizer files is loaded by another tokenizer in vLLM's auto mode and by
+        # transformers' MistralCommonBackend, neither of which passes this check (M15.3 review): said, not silent
+        other = [f for f in ("tekken.json", "tokenizer.model.v3", "tokenizer.model.v7") if
+                 os.path.isfile(os.path.join(path, f))]
+        if other:
+            notes.append(f"{', '.join(other)} present: vLLM's auto mode and transformers' Mistral backend build the "
+                         f"tokenizer from it, outside this check; the verdict below is for transformers' AutoTokenizer "
+                         f"on the folder's other files")
         was = core.mode()
         try:
             core.set_mode("off")

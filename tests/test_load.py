@@ -355,9 +355,15 @@ def test_rotary_held_against_the_files_and_the_users_write():
     load.rotary_write("vllm", "LlamaConfig", "rope_scaling", meant, meant, policy=LOAD, config=mine)
     r = only(load.rotary_held("vllm", load.declared(d, mine), mine, LOAD))
     assert r.verdict is Verdict.PASS and r.declared.source.kind == "user" and r.conflict
+    # two RoPEs per layer type (Gemma 3's shape) are one Rotary since v6, the local base as local_theta: read and
+    # compared, so a held config that differs from the files is refused here, not left unknown
     per_layer = Held(rope_parameters={"full_attention": {"rope_type": "default", "rope_theta": 1e6},
                                       "sliding_attention": {"rope_type": "default", "rope_theta": 1e4}})
     r = only(load.rotary_held("t", load.declared(d, per_layer), per_layer, LOAD))
+    assert r.verdict is Verdict.REFUSED and r.chosen.value.theta == 1e6 and r.chosen.value.local_theta == 1e4, r
+    # ... and any other split per layer type is still not compared
+    other = Held(rope_parameters={"layer_a": {"rope_theta": 1e6}, "layer_b": {"rope_theta": 1e4}})
+    r = only(load.rotary_held("t", load.declared(d, other), other, LOAD))
     assert r.verdict is Verdict.UNKNOWN and not r.blocking and "per layer type" in r.note
     shutil.rmtree(d)
 
@@ -375,12 +381,22 @@ def test_rotary_held_carries_llama3s_frequencies_and_says_what_it_cannot():
     r = only(load.rotary_held("vllm", load.declared(d, lost), lost, LOAD))
     assert r.verdict is Verdict.REFUSED and r.chosen.value.high_freq_factor is None, r
     shutil.rmtree(d)
+    # yarn's tuning is carried since v6 (M15.4): compared, not left as "not compared"; a key the vocabulary still
+    # has no field for is still said at the boundary
     yarn = {"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32768, "beta_fast": 32.0}
     d = model_folder({"rope_theta": 1e6, "rope_scaling": yarn})
     held = Held(rope_parameters=dict(yarn, rope_theta=1e6))
     ds = load.rotary_held("vllm", load.declared(d, held), held, LOAD)
-    assert [x.verdict for x in ds] == [Verdict.PASS, Verdict.UNKNOWN], ds
-    assert "beta_fast" in ds[1].note and "not compared" in ds[1].note and not ds[1].blocking, ds[1]
+    assert [x.verdict for x in ds] == [Verdict.PASS] and ds[0].chosen.value.beta_fast == 32.0, ds
+    lost = Held(rope_parameters=dict({k: v for k, v in yarn.items() if k != "beta_fast"}, rope_theta=1e6))
+    r = only(load.rotary_held("vllm", load.declared(d, lost), lost, LOAD))
+    assert r.verdict is Verdict.REFUSED and r.chosen.value.beta_fast is None, r   # an engine that lost it is caught
+    shutil.rmtree(d)
+    odd = dict(yarn, made_up_key=1)
+    d = model_folder({"rope_theta": 1e6, "rope_scaling": odd})
+    held = Held(rope_parameters=dict(odd, rope_theta=1e6))
+    ds = load.rotary_held("vllm", load.declared(d, held), held, LOAD)
+    assert [x.verdict for x in ds] == [Verdict.PASS, Verdict.UNKNOWN] and "made_up_key" in ds[1].note, ds
     shutil.rmtree(d)
 
 

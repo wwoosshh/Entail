@@ -130,6 +130,39 @@ def test_recording_goes_through_the_ledger_and_stops_only_where_the_policy_says(
     vocab_contract.reset(B)
 
 
+
+def test_an_added_token_past_the_rows_is_noted_not_broken():
+    """gemma-3-1b-it: base 262,144 = rows, but an added <image_soft_token> sits at id 262,144 (M15.3 review)."""
+    d = one(vocab_contract.check(B, C, folder(tokenizer_json=10, config_vocab=10, rows=10), 10, 11, "t", record=False))
+    assert d.verdict is Verdict.PASS and "added tokens reach id 10" in d.note and "noted, not broken" in d.note, d
+
+
+def test_a_base_vocabulary_past_the_rows_is_broken():
+    d = one(vocab_contract.check(B, C, folder(tokenizer_json=12, config_vocab=10, rows=10), 12, 12, "t", record=False))
+    assert d.verdict is Verdict.BROKEN and d.rule == RULES["vocab_out_of_range"], d
+
+
+def test_a_position_embedding_under_a_similar_name_does_not_stand_in_for_the_rows():
+    """A checkpoint whose first embedding-like tensor is a position embedding (77 rows, CLIP style): the token
+    embedding is the one with at least the config's vocabulary of rows (M15.3 review)."""
+    d = folder(tokenizer_json=10, config_vocab=10)
+    header = json.dumps({"text.position_embedding.weight": {"dtype": "F32", "shape": [7, 4], "data_offsets": [0, 112]},
+                         "text.token_embedding.weight": {"dtype": "F32", "shape": [10, 4],
+                                                          "data_offsets": [112, 272]}}).encode()
+    with open(os.path.join(d, "model.safetensors"), "wb") as f:
+        f.write(struct.pack("<Q", len(header)) + header + bytes(272))
+    s = vocab_contract.sources(d)
+    assert (s.rows, s.rows_verified) == (10, True) and "token_embedding" in s.rows_where, (s.rows, s.rows_where)
+
+
+def test_two_sources_neither_equal_to_the_model_are_unknown_not_judged():
+    """A stale, larger vocab.json beside the model's tokenizer.json, rows equal to neither: no source IS the model's
+    vocabulary, so which one the engine should hold is not decided (M15.3 review: no 'largest below the rows')."""
+    d = one(vocab_contract.check(B, C, folder(tokenizer_json=9, vocab_json=11, config_vocab=10, rows=10), 9, 9, "t",
+                                 record=False))
+    assert d.verdict is Verdict.UNKNOWN and "picks none" in d.note, d
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

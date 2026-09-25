@@ -40,6 +40,20 @@ Unreleased. A new fact, from the low-level study (codebook v2): a class of wrong
   broken, refused before the first id under `ENTAIL_ON_BROKEN=stop`, exit 1 from `entail check`.
 - Start-up hook: the target table had the tokenizer module keyed twice, so the second adapter was silently dropped;
   one entry now, and a test guards the table against repeated keys.
+- `Rotary` gains optional fields (v6): yarn's `beta_fast`, `beta_slow`, `attention_factor`, `mscale`,
+  `mscale_all_dim`, `truncate`; longrope's `long_factor`/`short_factor` as a SHA-256 digest and their count; and
+  `local_theta` for a model that alternates two RoPEs (Gemma 3's `rope_local_base_freq`, or `rope_parameters`
+  split into full_attention/sliding_attention). Phi-3.5, Phi-4-mini, gpt-oss and Gemma 3 are now compared at the
+  RoPE boundary instead of reported as "keys not in the vocabulary".
+- `sglang_fp8_tile` also wraps the fused-MoE config lookup (`try_get_optimal_moe_config`), which has no sanitiser:
+  SGLang 0.5.20 ships an H100 config for E=512, N=256, fp8 block [128, 128] whose BLOCK_SIZE_K is 256; at the
+  kernel level that returns 256 where 512 is right, and the clamp restores 512. The dense hot path now costs a
+  dict lookup per call and writes no record line once a map is decided.
+- Vocab: only a base vocabulary larger than the embedding is broken; an added token past the rows (gemma-3-1b-it's
+  image token on the text-only model) is noted on a passing decision. The embedding is the tensor with at least the
+  config's vocabulary of rows; a stale second tokenizer source that is not the model's vocabulary is unknown, not
+  judged. Tokenizers built outside `PreTrainedTokenizerBase.from_pretrained` (Mistral, tiktoken, GGUF) are not
+  checked at run time; `entail check` says so when Mistral files are present.
 
 Older facts and files still read (`READABLE_VERSIONS`). Not yet measured for this release: normal-run false alarms
 across the 38-model set (S3) and the steady-state cost (S4); the hook fires only on streaming-session updates, which

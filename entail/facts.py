@@ -31,7 +31,11 @@ from typing import Optional, Tuple
 VOCAB_VERSION = 6
 READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6})   # a later version only adds optional fields or classes; fields in ADDED_IN
 ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("Template", "tool_call_format"): 3,
-            ("Rotary", "low_freq_factor"): 4, ("Rotary", "high_freq_factor"): 4}
+            ("Rotary", "low_freq_factor"): 4, ("Rotary", "high_freq_factor"): 4,
+            ("Rotary", "beta_fast"): 6, ("Rotary", "beta_slow"): 6, ("Rotary", "attention_factor"): 6,
+            ("Rotary", "mscale"): 6, ("Rotary", "mscale_all_dim"): 6, ("Rotary", "truncate"): 6,
+            ("Rotary", "long_factor_sha256"): 6, ("Rotary", "short_factor_sha256"): 6, ("Rotary", "factor_terms"): 6,
+            ("Rotary", "local_theta"): 6}
 
 
 def _closed(cls_name, field, value, allowed, optional=True):
@@ -130,6 +134,19 @@ class Rotary:
     original_max_position: Optional[int] = None
     low_freq_factor: Optional[float] = None
     high_freq_factor: Optional[float] = None
+    # v6 (M15.4): yarn's tuning (gpt-oss), longrope's per-dimension factors (Phi-3.5/Phi-4, kept as a digest and
+    # their count, since a list of 48-64 floats is compared, not read), and a second base for the local layers of a
+    # model that alternates two RoPEs (Gemma 3's rope_local_base_freq)
+    beta_fast: Optional[float] = None
+    beta_slow: Optional[float] = None
+    attention_factor: Optional[float] = None
+    mscale: Optional[float] = None
+    mscale_all_dim: Optional[float] = None
+    truncate: Optional[bool] = None
+    long_factor_sha256: Optional[str] = None
+    short_factor_sha256: Optional[str] = None
+    factor_terms: Optional[int] = None
+    local_theta: Optional[float] = None
 
     def __post_init__(self):
         _closed("Rotary", "rope_type", self.rope_type, ROPE_TYPES, optional=False)
@@ -138,6 +155,19 @@ class Rotary:
         _number("Rotary", "original_max_position", self.original_max_position, 0, integer=True, strict=True)
         _number("Rotary", "low_freq_factor", self.low_freq_factor, 0, strict=True)
         _number("Rotary", "high_freq_factor", self.high_freq_factor, 0, strict=True)
+        _number("Rotary", "beta_fast", self.beta_fast, 0)
+        _number("Rotary", "beta_slow", self.beta_slow, 0)
+        _number("Rotary", "attention_factor", self.attention_factor, 0)
+        _number("Rotary", "mscale", self.mscale, 0)
+        _number("Rotary", "mscale_all_dim", self.mscale_all_dim, 0)
+        if self.truncate is not None and not isinstance(self.truncate, bool):
+            raise ValueError(f"Rotary.truncate: expected a bool, got {self.truncate!r}")
+        for name in ("long_factor_sha256", "short_factor_sha256"):
+            v = getattr(self, name)
+            if v is not None and (not isinstance(v, str) or len(v) != 64):
+                raise ValueError(f"Rotary.{name}: expected a sha256 hex digest, got {v!r}")
+        _number("Rotary", "factor_terms", self.factor_terms, 0, integer=True, strict=True)
+        _number("Rotary", "local_theta", self.local_theta, 0, strict=True)
 
 
 # --- RANGE (KvExtent lives in kv_contract.py) -------------------------------------------------------------------
