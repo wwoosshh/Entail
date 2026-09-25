@@ -28,7 +28,9 @@ from typing import List, Optional, Tuple
 from . import tally as _tally
 
 EMBEDDING_SUFFIXES = ("embed_tokens.weight", "word_embeddings.weight", "wte.weight", "tok_embeddings.weight",
-                      "embed.weight", "embedding.weight")
+                      "embed_in.weight", "token_embeddings.weight", "embed.weight", "embedding.weight",
+                      "embeddings.weight")   # GPT-NeoX embed_in, OpenELM token_embeddings, Nemotron-3 embeddings
+# (a position or patch embedding under one of these names has fewer rows than the vocabulary: sources() skips it)
 
 
 @dataclass
