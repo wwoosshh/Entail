@@ -35,7 +35,7 @@ ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("
             ("Rotary", "beta_fast"): 6, ("Rotary", "beta_slow"): 6, ("Rotary", "attention_factor"): 6,
             ("Rotary", "mscale"): 6, ("Rotary", "mscale_all_dim"): 6, ("Rotary", "truncate"): 6,
             ("Rotary", "long_factor_sha256"): 6, ("Rotary", "short_factor_sha256"): 6, ("Rotary", "factor_terms"): 6,
-            ("Rotary", "local_theta"): 6}
+            ("Rotary", "local_theta"): 6, ("Rotary", "partial_rotary_factor"): 6, ("Rotary", "local_factor"): 6}
 
 
 def _closed(cls_name, field, value, allowed, optional=True):
@@ -147,6 +147,11 @@ class Rotary:
     short_factor_sha256: Optional[str] = None
     factor_terms: Optional[int] = None
     local_theta: Optional[float] = None
+    # v6 (M15.4 review): the share of each head's dimensions that rotate (Phi-4-mini 0.75; a config top-level key),
+    # and the scaling factor of the local layers when a model alternates two RoPEs (None: the local layers scale
+    # nothing, which is what Gemma 3 declares; an engine that applies the global factor to them is caught)
+    partial_rotary_factor: Optional[float] = None
+    local_factor: Optional[float] = None
 
     def __post_init__(self):
         _closed("Rotary", "rope_type", self.rope_type, ROPE_TYPES, optional=False)
@@ -168,6 +173,10 @@ class Rotary:
                 raise ValueError(f"Rotary.{name}: expected a sha256 hex digest, got {v!r}")
         _number("Rotary", "factor_terms", self.factor_terms, 0, integer=True, strict=True)
         _number("Rotary", "local_theta", self.local_theta, 0, strict=True)
+        _number("Rotary", "partial_rotary_factor", self.partial_rotary_factor, 0, strict=True)
+        if self.partial_rotary_factor is not None and self.partial_rotary_factor > 1:
+            raise ValueError(f"Rotary.partial_rotary_factor: expected <= 1, got {self.partial_rotary_factor!r}")
+        _number("Rotary", "local_factor", self.local_factor, 0, strict=True)
 
 
 # --- RANGE (KvExtent lives in kv_contract.py) -------------------------------------------------------------------

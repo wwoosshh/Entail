@@ -67,7 +67,8 @@ def test_a_moe_config_with_a_tile_over_the_block_is_clamped_and_the_down_config_
     sglang_fp8_tile.reset()
     up, down = cfg(256, 128), cfg(256, 128)
     d = in_load(lambda: sglang_fp8_tile._decide_moe(up, down, [128, 128], "E=512,N=256,M=64"))
-    assert [x.verdict for x in d] == [Verdict.RESOLVED, Verdict.RESOLVED] and {x.target for x in d} == {128}, d
+    # the same content is decided (recorded) once; both copies are clamped, since each reaches the kernel
+    assert [x.verdict for x in d] == [Verdict.RESOLVED] and d[0].target == 128, d
     assert up["BLOCK_SIZE_K"] == 128 and down["BLOCK_SIZE_K"] == 128
     d2 = in_load(lambda: sglang_fp8_tile._decide_moe(up, down, [128, 128], "E=512,N=256,M=64"))
     assert d2 == [], "a config already decided is not decided again"
@@ -78,6 +79,19 @@ def test_a_moe_config_that_divides_is_quiet():
     sglang_fp8_tile.reset()
     d = in_load(lambda: sglang_fp8_tile._decide_moe(cfg(64, 128), None, [128, 128], "E=8,N=1024,M=1"))
     assert d == [] and sglang_fp8_tile.stats()["moe"]["checks"] == 1
+    sglang_fp8_tile.reset()
+
+
+
+def test_a_down_config_copied_on_every_call_is_decided_once_by_content_and_the_memo_stays_bounded():
+    """The engine returns a fresh copy of the down config per call (dict(**down_config)); deciding by identity would
+    run every call and hold every copy (M15.4 review)."""
+    sglang_fp8_tile.reset()
+    up = cfg(128, 128)
+    d = in_load(lambda: [sglang_fp8_tile._decide_moe(up, dict(cfg(256, 128)), [128, 128], "E=8,N=256,M=64")
+                         for _ in range(5)])
+    assert len(d) == 1 and d[0].verdict is Verdict.RESOLVED, d       # five copies, one decision
+    assert len(sglang_fp8_tile._CHECKED) <= 4, sglang_fp8_tile._CHECKED   # content keys, not copies
     sglang_fp8_tile.reset()
 
 

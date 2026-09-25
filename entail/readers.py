@@ -104,8 +104,11 @@ def _factor_digest(value):
     return hashlib.sha256(text.encode()).hexdigest(), len(value)
 
 
-def _rotary(result, spec, theta, theta_key, where, source_kind="config", local_theta=None):
-    """One Rotary fact from a scaling/parameters dict (may be None), a base, and (v6) the local layers' base."""
+def _rotary(result, spec, theta, theta_key, where, source_kind="config", local_theta=None, omp_top=None,
+            partial=None, local_factor=None):
+    """One Rotary fact from a scaling/parameters dict (may be None), a base, and (v6) the local layers' base and
+    scaling. `omp_top` and `partial` are the config's top-level original_max_position_embeddings and
+    partial_rotary_factor (Phi writes the former beside rope_scaling, not inside it; M15.4 review)."""
     keys = ALIASES["Rotary"]["hf_config"]
     spec = spec or {}
     type_key, raw_type = _first(spec, keys["type"])
@@ -115,6 +118,8 @@ def _rotary(result, spec, theta, theta_key, where, source_kind="config", local_t
         return
     _, factor = _first(spec, keys["factor"])
     _, omp = _first(spec, keys["original_max_position"])
+    if omp is None:
+        omp = omp_top
     _, low = _first(spec, keys["low_freq_factor"])
     _, high = _first(spec, keys["high_freq_factor"])
     _, beta_fast = _first(spec, keys["beta_fast"])
@@ -146,7 +151,9 @@ def _rotary(result, spec, theta, theta_key, where, source_kind="config", local_t
         mscale_all_dim=None if mscale_all_dim is None else float(mscale_all_dim),
         truncate=None if truncate is None else bool(truncate),
         long_factor_sha256=long_sha, short_factor_sha256=short_sha, factor_terms=long_n or short_n,
-        local_theta=None if local_theta is None else float(local_theta)), source_kind, where)
+        local_theta=None if local_theta is None else float(local_theta),
+        partial_rotary_factor=None if partial is None else float(partial),
+        local_factor=None if local_factor is None else float(local_factor)), source_kind, where)
 
 
 def _props(result, props, used, source_kind, file):
@@ -212,29 +219,40 @@ def read_hf_dict(cfg, label, source_kind="config", from_object=False):
     # Rotary: transformers 5 writes rope_parameters; older files write rope_theta and rope_scaling
     rk = ALIASES["Rotary"]["hf_config"]
     _, local_theta = _first(text, rk["local_theta"])   # v6: Gemma 3's base for its local (sliding) layers
+    _, omp_top = _first(text, rk["original_max_position"])   # Phi writes it beside rope_scaling (M15.4 review)
+    _, partial = _first(text, rk["partial_rotary_factor"])
+    top = dict(omp_top=omp_top, partial=partial)
     pkey, params = _first(text, rk["parameters"])
     if pkey:
         if isinstance(params, dict) and params and all(isinstance(x, dict) for x in params.values()):
             # RoPE per layer type. The one shape the vocabulary carries (v6) is two RoPEs, global and local
-            # (Gemma 3: full_attention with its scaling, sliding_attention with its own base): one Rotary fact whose
-            # local_theta is the local layers' base. Any other split stays outside the vocabulary.
+            # (Gemma 3: full_attention with its scaling, sliding_attention with its own base and no scaling): one
+            # Rotary fact whose local_theta is the local layers' base and local_factor their scaling (None: none).
+            # Any other split stays outside the vocabulary.
             names = set(params)
             if names <= {"full_attention", "sliding_attention"} and "full_attention" in params:
                 full, local = params["full_attention"], params.get("sliding_attention") or {}
                 _, theta = _first(full, rk["theta"])
                 _, ltheta = _first(local, rk["theta"])
-                extra = sorted(k for k in local if k not in rk["theta"] + rk["type"] and local[k] is not None)
+                _, ltype = _first(local, rk["type"])
+                _, lfactor = _first(local, rk["factor"])
+                local_scaled = ltype is not None and str(ltype).lower() != "default"
+                if lfactor is not None and not local_scaled:
+                    local_scaled = True   # a factor with no type: the file means scaling
+                extra = sorted(k for k in local if k not in rk["theta"] + rk["type"] + rk["factor"]
+                               and local[k] is not None)
                 if extra:
                     r.problems.append(f"{file}#{prefix}{pkey}.sliding_attention: keys {extra} beyond the local "
-                                      f"base are not in vocabulary v{VOCAB_VERSION}")
+                                      f"base and scaling are not in vocabulary v{VOCAB_VERSION}")
                 _rotary(r, full, theta, None, f"{file}#{prefix}{pkey}", source_kind,
-                        local_theta=ltheta if ltheta is not None else local_theta)
+                        local_theta=ltheta if ltheta is not None else local_theta,
+                        local_factor=(lfactor if lfactor is not None else 1.0) if local_scaled else None, **top)
             else:
                 r.problems.append(f"{file}#{prefix}{pkey}: RoPE set per layer type ({sorted(params)}) "
                                   f"is not in vocabulary v{VOCAB_VERSION}")
         elif isinstance(params, dict):
             _, theta = _first(params, rk["theta"])
-            _rotary(r, params, theta, None, f"{file}#{prefix}{pkey}", source_kind, local_theta=local_theta)
+            _rotary(r, params, theta, None, f"{file}#{prefix}{pkey}", source_kind, local_theta=local_theta, **top)
     tkey, theta = _first(text, rk["theta"])
     skey, scaling = _first(text, rk["scaling"])
     # config.json may state both spellings: two facts, and sources.merge finds a disagreement. In the config object an
@@ -242,7 +260,7 @@ def read_hf_dict(cfg, label, source_kind="config", from_object=False):
     if (tkey or skey) and not (pkey and from_object):
         where = f"{file}#" + ",".join(prefix + x for x in (tkey, skey) if x)
         _rotary(r, scaling if isinstance(scaling, dict) else None, theta, tkey, where, source_kind,
-                local_theta=local_theta)
+                local_theta=local_theta, **top)
 
     # Layout of quantized weights
     qk = ALIASES["Layout"]["hf_quantization_config"]

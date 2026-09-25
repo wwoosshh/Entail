@@ -151,6 +151,9 @@
    ],
    "local_theta": [
     "rope_local_base_freq"
+   ],
+   "partial_rotary_factor": [
+    "partial_rotary_factor"
    ]
   },
   "gguf": {

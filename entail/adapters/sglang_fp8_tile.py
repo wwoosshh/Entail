@@ -82,16 +82,34 @@ def _decide(configs, block_size, shape):
                             tile_k, handles(configs, key)["clamp_tile_k"], tile_n=tile_n)
 
 
+def _content_key(cfg, block_k):
+    """A config by its content (the engine copies the down config on every call: `down_config = dict(**...)`, so
+    identity would decide it every time and hold every copy; M15.4 review). The block is part of the key."""
+    return ("moe", block_k) + tuple(sorted((k, v) for k, v in cfg.items() if isinstance(v, (int, float, str, bool))))
+
+
 def _decide_moe(config, down_config, block_shape, shape):
-    """Decide the up and down configs the fused-MoE lookup returned for one call (each once, by identity)."""
+    """Decide the up and down configs the fused-MoE lookup returned for one call: a content is decided (and
+    recorded) once; a later copy with the same content is clamped again without a new record, since the engine's
+    copy is what reaches the kernel (recorded once, repaired every time - enforce's once_for, by content)."""
     block_k = int(block_shape[1])
     for label, cfg in (("up", config), ("down", down_config)):
-        if not isinstance(cfg, dict) or "BLOCK_SIZE_K" not in cfg or id(cfg) in _CHECKED:
+        if not isinstance(cfg, dict) or "BLOCK_SIZE_K" not in cfg:
             continue
-        _CHECKED[id(cfg)] = cfg
+        key = _content_key(cfg, block_k)
+        if key in _CHECKED:
+            if _CHECKED[key] is not None:   # a content decided as broken, and how it was repaired: repair this copy
+                cfg["BLOCK_SIZE_K"] = _CHECKED[key]
+            continue
+        if len(_CHECKED) > 4096:   # bounded: the maps are finite; a runaway of copies must not grow it
+            _CHECKED.clear()
+        before = int(cfg["BLOCK_SIZE_K"])
         tile_contract.check(MOE_BOUNDARY, MOE_CONSUMER, f"sglang fused-moe {shape}, {label} config", block_k,
-                            int(cfg["BLOCK_SIZE_K"]), lambda t, c=cfg: c.__setitem__("BLOCK_SIZE_K", int(t)) or t,
+                            before, lambda t, c=cfg: c.__setitem__("BLOCK_SIZE_K", int(t)) or t,
                             tile_n=cfg.get("BLOCK_SIZE_N"))
+        after = int(cfg["BLOCK_SIZE_K"])
+        _CHECKED[key] = after if after != before else None        # what a copy of this content must be given
+        _CHECKED[_content_key(cfg, block_k)] = None                # the content as it is now passes
 
 
 def _active():
@@ -141,8 +159,12 @@ def install_moe():
         if _active() and block_shape and len(block_shape) == 2 and block_shape[1]:
             config = out[0] if isinstance(out, tuple) else out
             down = out[1][0] if isinstance(out, tuple) and isinstance(out[1], tuple) else None
-            if (isinstance(config, dict) and id(config) not in _CHECKED) or (isinstance(down, dict)
-                                                                              and id(down) not in _CHECKED):
+            bk = int(block_shape[1])
+            # a content decided as passing (None) needs nothing; one not seen, or decided as broken, goes in
+            # (the engine's copy of a broken down config must be repaired each time)
+            fresh = [c for c in (config, down) if isinstance(c, dict) and "BLOCK_SIZE_K" in c
+                     and _CHECKED.get(_content_key(c, bk), 0) is not None]
+            if fresh:
                 from .. import load
 
                 shape = f"E={w2_shape[0]},N={w2_shape[2]},M={M}"

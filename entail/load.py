@@ -785,8 +785,10 @@ def rotary_held(engine: str, facts: Declared, config, policy: Optional[Policy] =
     out = decide(contract, {"Rotary": tuple(declared_rot)},
                  {"Rotary": replace(held[0], certainty=Certainty.VERIFIED)}, policy)
     # a declared key the vocabulary cannot carry is not compared: said here, where the RoPE is decided, rather than
-    # left in the readers' problems (M9.1, S1: llama3's frequency factors, before v4)
-    left = [p for p in facts.problems if "RoPE keys" in p]
+    # left in the readers' problems (M9.1, S1: llama3's frequency factors, before v4). The config the engine holds
+    # can carry such a key too (Phi-4-mini's partial_rotary_factor before v6): its problems were dropped, so a value
+    # the engine lost or changed passed in silence (M15.4 review); now both sides are said
+    left = [p for p in facts.problems if "RoPE keys" in p] + [p for p in r.problems if "RoPE keys" in p]
     if left and declared_rot:
         out = list(out) + [cannot_check(boundary, consumer, "Rotary", "; ".join(left) + "; so they are not compared",
                                         policy)]

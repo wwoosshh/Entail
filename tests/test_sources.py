@@ -257,6 +257,30 @@ def test_rope_keys_added_in_v6_are_carried_and_compared_by_digest():
         raise AssertionError("a v5 fact must not state local_theta")
 
 
+
+def test_phis_top_level_rope_keys_and_gemma3s_local_scaling_are_read():
+    # Phi: original_max_position_embeddings beside rope_scaling, partial_rotary_factor at the top (M15.4 review)
+    got, r = facts_of(folder({"config.json": {"rope_theta": 10000.0, "original_max_position_embeddings": 4096,
+                                              "partial_rotary_factor": 0.75, "rope_scaling": {
+                                                  "rope_type": "longrope", "long_factor": [1.0] * 4,
+                                                  "short_factor": [1.0] * 4}}}))
+    [rot] = [v for n, v in got if n == "Rotary"]
+    assert rot.original_max_position == 4096 and rot.partial_rotary_factor == 0.75, rot
+    assert not any("not in vocabulary" in p for p in r.problems), r.problems
+    # Gemma 3: the local layers declare no scaling (local_factor None); a file whose local layers carry the global
+    # factor is another fact, so an engine that applies it there is caught
+    got, r = facts_of(folder({"config.json": {"rope_parameters": {
+        "full_attention": {"rope_theta": 1e6, "rope_type": "linear", "factor": 8.0},
+        "sliding_attention": {"rope_theta": 1e4, "rope_type": "default"}}}}))
+    [clean] = [v for n, v in got if n == "Rotary"]
+    assert clean.local_factor is None and clean.local_theta == 1e4, clean
+    got, _ = facts_of(folder({"config.json": {"rope_parameters": {
+        "full_attention": {"rope_theta": 1e6, "rope_type": "linear", "factor": 8.0},
+        "sliding_attention": {"rope_theta": 1e4, "rope_type": "linear", "factor": 8.0}}}}))
+    [leaked] = [v for n, v in got if n == "Rotary"]
+    assert leaked.local_factor == 8.0 and leaked != clean, leaked
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

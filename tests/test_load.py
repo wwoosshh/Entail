@@ -520,6 +520,31 @@ def test_at_load_puts_them_together():
     shutil.rmtree(d)
 
 
+
+def test_rotary_held_catches_a_lost_top_level_key_and_says_an_engine_side_key_it_cannot_carry():
+    """M15.4 review: Phi's original_max_position_embeddings sits beside rope_scaling and partial_rotary_factor at
+    the top; an engine that loses either is refused. A key the vocabulary has no field for on the ENGINE's side is
+    said at the boundary too (before, the engine's reader problems were dropped)."""
+    scaling = {"rope_type": "longrope", "long_factor": [1.0, 1.0], "short_factor": [1.0, 1.0]}
+    files = {"rope_theta": 10000.0, "original_max_position_embeddings": 4096, "partial_rotary_factor": 0.75,
+             "rope_scaling": scaling}
+    d = model_folder(files)
+    kept = Held(rope_parameters=dict(scaling, rope_theta=10000.0), original_max_position_embeddings=4096,
+                partial_rotary_factor=0.75)
+    assert only(load.rotary_held("vllm", load.declared(d, kept), kept, LOAD)).verdict is Verdict.PASS
+    lost_omp = Held(rope_parameters=dict(scaling, rope_theta=10000.0), partial_rotary_factor=0.75)
+    r = only(load.rotary_held("vllm", load.declared(d, lost_omp), lost_omp, LOAD))
+    assert r.verdict is Verdict.REFUSED and r.chosen.value.original_max_position is None, r
+    lost_partial = Held(rope_parameters=dict(scaling, rope_theta=10000.0), original_max_position_embeddings=4096)
+    r = only(load.rotary_held("vllm", load.declared(d, lost_partial), lost_partial, LOAD))
+    assert r.verdict is Verdict.REFUSED and r.chosen.value.partial_rotary_factor is None, r
+    odd = Held(rope_parameters=dict(scaling, rope_theta=10000.0, made_up_key=2), original_max_position_embeddings=4096,
+               partial_rotary_factor=0.75)
+    ds = load.rotary_held("vllm", load.declared(d, odd), odd, LOAD)
+    assert [x.verdict for x in ds] == [Verdict.PASS, Verdict.UNKNOWN] and "made_up_key" in ds[1].note, ds
+    shutil.rmtree(d)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
