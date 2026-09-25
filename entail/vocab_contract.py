@@ -79,9 +79,12 @@ def _spm_pieces(path) -> Optional[int]:
         return None
 
 
-def sources(path) -> Sources:
-    """What the folder declares about its vocabulary."""
+def sources(path, rows: Optional[Tuple[int, str]] = None) -> Sources:
+    """What the folder declares about its vocabulary. `rows`: (embedding rows, where) read elsewhere - a
+    safetensors header fetched without the weights (the M15.7 static sweep) - taken as verified."""
     s = Sources()
+    if rows is not None:
+        s.rows, s.rows_where, s.rows_verified = int(rows[0]), str(rows[1]), True
     p = os.path.join(path, "tokenizer.json")
     if os.path.isfile(p):
         try:
@@ -127,9 +130,9 @@ def sources(path) -> Sources:
     try:
         from . import observe
 
-        ck = observe.Checkpoint(path)
+        ck = observe.Checkpoint(path) if s.rows is None else None
         chosen = None
-        for suffix in EMBEDDING_SUFFIXES:
+        for suffix in (EMBEDDING_SUFFIXES if ck is not None else ()):
             for name in (ck.find(suffix) if ck.tensors else []):
                 shape = list(ck.tensors[name][2])
                 # the token embedding has at least the config's vocabulary of rows; a position or patch embedding
@@ -149,16 +152,16 @@ def sources(path) -> Sources:
 
 
 def check(boundary: str, consumer: str, path: str, tokenizer_size: Optional[int], tokenizer_len: Optional[int],
-          where: str, policy=None, owner=None, record: bool = True) -> list:
+          where: str, policy=None, owner=None, record: bool = True, rows: Optional[Tuple[int, str]] = None) -> list:
     """Decide the tokenizer the engine holds (`tokenizer_size` base tokens, `tokenizer_len` its highest id + 1)
     against what the folder at `path` declares. Returns the decisions; with `record` they are also recorded through
-    load.enforce (the run goes on, or stops where the policy says)."""
+    load.enforce (the run goes on, or stops where the policy says). `rows`: see sources()."""
     from . import load, policies
     from .contracts import RULES, Contract, Decision, Verdict, unrepaired
     from .facts import Certainty, Fact, Source, Vocab
 
     policy = policy or policies.current()
-    s = sources(path)
+    s = sources(path, rows=rows)
     contract = Contract(boundary, consumer, ("Vocab",))
     decisions = []
     if tokenizer_size is None:

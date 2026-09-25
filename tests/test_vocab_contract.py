@@ -163,6 +163,16 @@ def test_two_sources_neither_equal_to_the_model_are_unknown_not_judged():
     assert d.verdict is Verdict.UNKNOWN and "picks none" in d.note, d
 
 
+
+def test_rows_read_elsewhere_stand_in_for_the_checkpoint():
+    """The M15.7 sweep reads the embedding's rows from a safetensors header fetched without the weights."""
+    s = vocab_contract.sources(folder(tokenizer_json=10, config_vocab=10), rows=(12, "embed_tokens [12, 4] header"))
+    assert (s.rows, s.rows_verified, s.rows_where) == (12, True, "embed_tokens [12, 4] header")
+    d = one(vocab_contract.check(B, C, folder(tokenizer_json=10, config_vocab=10), 10, 10, "t", record=False,
+                                 rows=(12, "header")))
+    assert d.verdict is Verdict.PASS, d
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
