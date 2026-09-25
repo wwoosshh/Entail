@@ -14,6 +14,14 @@ Unreleased. A new fact, from the low-level study (codebook v2): a class of wrong
   live in vLLM 0.30.0). Measured end to end on SmolLM2-135M: the stale hash is caught and repaired, and the wrong
   output (a false 16-token cache hit) becomes the correct recomputed output. entail 1.0.0-1.0.2 passed it (E3 miss).
 
+- Fact vocabulary v6: `TokenType` (MAPPING) — the token type id a position is given by its role (padding).
+  `request_contract.pad_type` compares the id a server gave the padding with the tokenizer's `pad_token_type_id`.
+  vLLM adapter `vllm_scoring`: wraps the scoring processor's padding of token type ids (vllm#58138: a cross-encoder's
+  padding was given the document's segment, and /rerank scores moved). The repair (give the padding the declared
+  id) is offered only where the consumer can carry it; vLLM 0.30 keeps token types as the index of the first 1, so
+  it cannot (capability row, measured): the decision is broken under the default policy and the padded request is
+  refused before scoring under `ENTAIL_ON_BROKEN=stop`.
+
 Older facts and files still read (`READABLE_VERSIONS`). Not yet measured for this release: normal-run false alarms
 across the 38-model set (S3) and the steady-state cost (S4); the hook fires only on streaming-session updates, which
 ordinary generation never triggers.

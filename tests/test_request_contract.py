@@ -267,6 +267,66 @@ def test_an_error_inside_entail_never_breaks_the_server():
     tally.reset("request:test.broken")
 
 
+
+def test_padding_given_the_declared_type_passes():
+    d = request_contract.pad_type("request:test.pad", "test.scoring", 0, 0, "test", LOAD)
+    assert d == [] or all(x.verdict is Verdict.PASS for x in d), d
+    request_contract.reset("request:test.pad")
+
+
+def test_padding_given_another_type_is_resolved_where_the_consumer_can_carry_the_declared_one():
+    d = one(request_contract.pad_type("request:test.pad", "test.scoring", 0, 1, "test", LOAD, repairable=True))
+    assert d.verdict is Verdict.RESOLVED and d.handle == "set_pad_type" and d.target == 0, d
+    request_contract.reset("request:test.pad")
+
+
+def test_padding_given_another_type_is_refused_where_the_consumer_cannot_carry_it():
+    from entail.core import RoleError
+    n = len(load.LEDGER.decisions)
+    try:
+        with redirect_stdout(io.StringIO()):
+            request_contract.pad_type("request:test.pad", "test.scoring", 0, 1, "test", LOAD, repairable=False)
+    except RoleError:
+        pass
+    else:
+        raise AssertionError("no repair on offer: the strict policy refuses")
+    finally:
+        request_contract.reset("request:test.pad")
+    d = load.LEDGER.decisions[n:]
+    assert len(d) == 1 and d[0].verdict is Verdict.REFUSED and d[0].resolution is None, d
+
+
+def test_a_consumer_the_table_says_cannot_carry_the_pad_type_gets_no_repair_and_the_note():
+    from entail.core import RoleError
+    n = len(load.LEDGER.decisions)
+    try:
+        with redirect_stdout(io.StringIO()):
+            request_contract.pad_type("request:test.pad", "vllm.scoring.io_processor", 0, 1, "test", LOAD)
+    except RoleError:
+        pass
+    finally:
+        request_contract.reset("request:test.pad")
+    d = load.LEDGER.decisions[n:]
+    assert len(d) == 1 and d[0].resolution is None and "compressed form" in d[0].note, d
+
+
+def test_nothing_padded_decides_nothing():
+    assert request_contract.pad_type("request:test.pad", "test.scoring", 0, None, "test", LOAD) == []
+
+
+def test_a_tokenizer_that_declares_no_pad_type_is_unknown_and_required_under_the_strict_policy():
+    from entail.core import RoleError
+    try:
+        with redirect_stdout(io.StringIO()):
+            request_contract.pad_type("request:test.pad", "test.scoring", None, 1, "test", LOAD)
+    except RoleError:
+        pass
+    else:
+        raise AssertionError("an undeclared pad type is unknown; the strict policy requires it")
+    finally:
+        request_contract.reset("request:test.pad")
+
+
 if __name__ == "__main__":
     core.set_mode("load")
     for name, fn in sorted(globals().items()):

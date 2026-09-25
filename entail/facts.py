@@ -14,7 +14,9 @@ the format a model writes its tool calls in, under names that do not belong to a
 mapped to them in data/caps.json). v4 (M9.3) adds Rotary.low_freq_factor and high_freq_factor, llama3's scaling: the
 readers named them as not carried, and nothing said so while the model ran (M9.1, S1). v5 (M14) adds one class,
 Identity: what a stored or cached item stands for, so a store keyed by identity (vLLM's prefix-cache block hashes)
-does not serve one sequence's KV under another's key (codebook v2 I; vllm#49377, #49449). Each version only adds
+does not serve one sequence's KV under another's key (codebook v2 I; vllm#49377, #49449). v6 (M15) adds TokenType:
+the token type id a position is given by its role (padding), so a server that pads a cross-encoder's input does not
+give the padding the last real token's segment (vllm#58138; codebook v2 G). Each version only adds
 optional fields or whole classes, so an older fact is a newer fact with
 them open, and a fact written with an older version is still read (READABLE_VERSIONS); it may not state a field its
 version did not have (ADDED_IN).
@@ -26,8 +28,8 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Optional, Tuple
 
-VOCAB_VERSION = 5
-READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5})   # a later version only adds optional fields or classes; fields in ADDED_IN
+VOCAB_VERSION = 6
+READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6})   # a later version only adds optional fields or classes; fields in ADDED_IN
 ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("Template", "tool_call_format"): 3,
             ("Rotary", "low_freq_factor"): 4, ("Rotary", "high_freq_factor"): 4}
 
@@ -316,6 +318,28 @@ class Origin:
         _closed("Origin", "came_from", self.came_from, ORIGINS, optional=False)
 
 
+TOKEN_ROLES = frozenset({"pad"})
+
+
+@dataclass(frozen=True)
+class TokenType:
+    """The token type (segment) id a position is given by its role (v6, M15; codebook v2 G).
+
+    A cross-encoder reads a segment id per position: 0 for the query, 1 for the document. The tokenizer declares
+    which id its padding carries (`pad_token_type_id`, 0 for BERT tokenizers). A server that pads the input itself
+    and gives the padding the last real token's id moves the query/document boundary and changes the scores
+    (vllm#58138). role is a closed set; type_id is the id positions of that role are given.
+    """
+    role: str
+    type_id: int
+
+    def __post_init__(self):
+        _closed("TokenType", "role", self.role, TOKEN_ROLES, optional=False)
+        _number("TokenType", "type_id", self.type_id, 0, integer=True)
+        if self.type_id is None:
+            raise ValueError("TokenType.type_id: required")
+
+
 # --- not in the vocabulary ------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -356,12 +380,13 @@ FACT_KINDS = frozenset({"LAYOUT", "DTYPE", "FRAME", "RANGE", "PROPERTY", "MAPPIN
 VOCABULARY = {
     "Layout": "LAYOUT", "Quantized": "DTYPE", "Rotary": "FRAME", "Positions": "FRAME", "Valid": "RANGE",
     "KvExtent": "RANGE", "ModelProps": "PROPERTY", "Prediction": "PROPERTY", "LatentScale": "PROPERTY",
-    "Template": "PROPERTY", "Coverage": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME", "Identity": "TIME",
-    "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE",
+    "Template": "PROPERTY", "Coverage": "MAPPING", "TokenType": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME",
+    "Identity": "TIME", "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE",
 }
 _HERE = {"Layout": Layout, "Quantized": Quantized, "Rotary": Rotary, "Positions": Positions, "Valid": Valid,
          "ModelProps": ModelProps, "Prediction": Prediction, "LatentScale": LatentScale, "Template": Template,
-         "Reduction": Reduction, "Epoch": Epoch, "Identity": Identity, "Assumed": Assumed, "Origin": Origin}
+         "TokenType": TokenType, "Reduction": Reduction, "Epoch": Epoch, "Identity": Identity, "Assumed": Assumed,
+         "Origin": Origin}
 
 
 def vocabulary_class(name):

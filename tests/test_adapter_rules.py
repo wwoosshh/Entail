@@ -24,7 +24,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ADAPTERS = os.path.join(os.path.dirname(HERE), "entail", "adapters")
 V2 = ("transformers_adapter", "transformers_config", "sglang_adapter", "vllm_attention", "vllm_loader",
       "vllm_source", "rope_alias", "vllm_layout", "cache_contract", "vllm_cache_contract", "sglang_cache_contract",
-      "vllm_serve", "comfyui", "diffusers_adapter", "transformers_template", "sglang_serve", "vllm_identity")
+      "vllm_serve", "comfyui", "diffusers_adapter", "transformers_template", "sglang_serve", "vllm_identity",
+      "vllm_scoring")
 # Not yet on the v2 interface: where they move, and why they have not yet. Empty since M9.3, when the research tools
 # (fault injection, the layout ledger, a probe) left the package.
 LEGACY = {}

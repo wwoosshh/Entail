@@ -30,6 +30,7 @@ lines for an adapter that also puts them in the response. Where the policy stops
 the adapter turns into the server's own error response before anything is generated.
 """
 import threading
+from dataclasses import replace
 from functools import lru_cache
 from typing import Dict, Iterable, Optional, Sequence
 
@@ -143,6 +144,42 @@ def window(boundary: str, consumer: str, prompt_tokens: int, context: int, origi
     contract = Contract(boundary, consumer, ("Valid",), ("Valid",))
     return _settle(boundary, "window", decide(contract, {"Valid": declared_fact}, {"Valid": chosen},
                                               policy or policies.current(), resolutions={"Valid": [extend]}))
+
+
+def pad_type(boundary: str, consumer: str, declared: Optional[int], used: Optional[int], where: str,
+             policy=None, repairable: Optional[bool] = None) -> list:
+    """The token type id a server gave the padding of a request against the one the tokenizer declares for
+    padding (TokenType, M15.1; vllm#58138: a cross-encoder's padding was given the document's segment). `declared`
+    is the tokenizer's pad_token_type_id (None when the tokenizer does not say); `used` the id the padding got (None
+    when nothing was padded: nothing to decide). The resolution gives the padding the declared id - offered only
+    where the consumer can carry it: `repairable`, or, when None, the capability table's row for the consumer
+    (vLLM 0.30's scoring keeps the ids as the index of the first 1, so a pad type after the document cannot be
+    carried: honours false, measured; the decision is broken there, with the row's note)."""
+    from . import caps as _caps
+    from .contracts import Resolution
+    from .facts import TokenType
+
+    if used is None:
+        return []
+    note = ""
+    if repairable is None:
+        row = _caps.lookup(_caps.default_table(), consumer, "TokenType.type_id")
+        repairable = row is not None and bool(row.honours)
+        if row is not None and not row.honours:
+            note = row.note
+    d = Fact("TokenType", None if declared is None else TokenType("pad", int(declared)),
+             Source("config", f"{where}: the tokenizer's pad_token_type_id"),
+             Certainty.UNKNOWN if declared is None else Certainty.DECLARED)
+    c = Fact("TokenType", TokenType("pad", int(used)), Source("engine", f"{where}: the id the padding was given"),
+             Certainty.VERIFIED)
+    give = Resolution("give the padding the type the tokenizer declares", "set_pad_type",
+                      target=lambda dd, cc: dd.value.type_id)
+    contract = Contract(boundary, consumer, ("TokenType",), ("TokenType",))
+    decisions = decide(contract, {"TokenType": d}, {"TokenType": c}, policy or policies.current(),
+                       resolutions={"TokenType": [give] if repairable else []})
+    if note:
+        decisions = [replace(x, note=note) if x.verdict is not Verdict.PASS and not x.note else x for x in decisions]
+    return _settle(boundary, "pad_type", decisions)
 
 
 def reported(decisions) -> list:

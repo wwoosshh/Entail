@@ -10,7 +10,7 @@ from entail.contracts import RULES, Contract, Resolution, Verdict, agrees, decid
 from entail.coverage import Coverage  # noqa: E402
 from entail.facts import (VOCABULARY, Assumed, Certainty, Epoch, Fact, Identity, LatentScale, Layout,  # noqa: E402
                           ModelProps, Origin, Positions, Prediction, Quantized, Reduction, Rotary, Source, Template,
-                          Valid)
+                          TokenType, Valid)
 from entail.kv_contract import KvExtent  # noqa: E402
 
 # (declared, a different value the consumer might use) for every vocabulary name
@@ -29,6 +29,7 @@ SAMPLES = {
     "Reduction": (Reduction("R"), Reduction("P")),
     "Epoch": (Epoch(3), Epoch(2)),
     "Identity": (Identity("kv_block", 0, "aa"), Identity("kv_block", 0, "bb")),
+    "TokenType": (TokenType("pad", 0), TokenType("pad", 1)),
     "Assumed": (Assumed((("batch", 4),)), Assumed((("batch", 0),))),
     "Origin": (Origin("temperature", "user"), Origin("temperature", "default")),
 }
