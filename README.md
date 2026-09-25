@@ -36,7 +36,7 @@ run goes on (it stops only if you ask it to); said to be "unknown" when nobody d
 default stand in silently. The name is the logical sense of *entail*: what a checkpoint declares must entail what
 the engine executes. (ent·**AI**·**L**: an AI library.)
 
-> **Status: 1.0.1, measured on one machine.** Everything below was measured on the engines and versions under
+> **Status: 1.0.2, measured on one machine.** Everything below was measured on the engines and versions under
 > [Tested with](#tested-with), on one RTX 4070 Ti. The 1.0 evaluation is summarised under
 > [How it was measured](#how-it-was-measured), and what it found missing under [Known gaps](#known-gaps).
 > entail does not look for defects inside a model, a compiler, a kernel or the hardware: when every boundary it

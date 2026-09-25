@@ -2,7 +2,7 @@
 
 ## 1.0.2
 
-Unreleased. What an external review of 1.0.1 found, and what its readers will ask first.
+Released 2026-09-25. What an external review of 1.0.1 found, and what its readers will ask first.
 
 **Fixed**
 - Config keys (`load.keys_taken`): a key the class does not take counted as renamed when its value appeared in any
