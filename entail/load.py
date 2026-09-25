@@ -471,13 +471,35 @@ def _distance(a: str, b: str) -> int:
     return prev[-1]
 
 
-def misspelt(key: str) -> Optional[str]:
+_NO_VALUE = object()
+
+
+def _accepts(mapped: str, value) -> bool:
+    """Whether the fact field `mapped` ("Rotary.partial_rotary_factor") takes `value`: the fact class is built with
+    it and its own checks decide. A name that is not a field of the class (Rotary.scaling: a reader's key group)
+    or a None value cannot be judged and is accepted."""
+    from . import facts as _facts
+
+    fact_name, _, field_name = mapped.partition(".")
+    cls = getattr(_facts, fact_name, None)
+    if value is None or cls is None or field_name not in {f.name for f in fields(cls)}:
+        return True
+    try:
+        cls(**{field_name: value})
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def misspelt(key: str, value=_NO_VALUE) -> Optional[str]:
     """The vocabulary key that `key` (with or without a scope prefix) looks like a misspelling of, or None: within
-    three edits and less than half the name away (rope_scale -> rope_scaling, rolebench 15). A name shorter than
-    five characters (type) is no target: too much is one edit from it. The bound was chosen on data: of 215 keys
-    left unread on 92 popular models, none is within three edits of a vocabulary name
-    (testbed/results/m10/e1_llm/coverage_rule_whatif_vocab.json); checked again with vocabulary v6 over the 558
-    distinct keys of 230 popular configs (testbed/results/m15/coverage_whatif_v6.json)."""
+    three edits and less than half the name away (rope_scale -> rope_scaling, rolebench 15), and, when the key's
+    `value` is given, carrying a value the field would take (GPT-J's rotary_dim of 64 is three edits from
+    rotary_pct, but no fraction of a head; M15.7). A name shorter than five characters (type) is no target: too
+    much is one edit from it. The bound was chosen on data: of 215 keys left unread on 92 popular models, none is
+    within three edits of a vocabulary name (testbed/results/m10/e1_llm/coverage_rule_whatif_vocab.json); checked
+    again with vocabulary v6 over the 558 distinct keys of 230 popular configs
+    (testbed/results/m15/coverage_whatif_v6.json)."""
     base = key.rsplit(".", 1)[-1]
     best = None
     for name in VOCABULARY_KEYS:
@@ -485,6 +507,8 @@ def misspelt(key: str) -> Optional[str]:
             continue
         d = _distance(base, name)
         if d <= 3 and d * 2 < len(name) and (best is None or d < best[0]):
+            if value is not _NO_VALUE and not _accepts(VOCABULARY_KEYS[name], value):
+                continue
             best = (d, name)
     return best[1] if best else None
 
@@ -515,7 +539,8 @@ def config_keys(engine: str, scopes: Sequence[tuple], where: str, policy: Option
         notes += [prefix + x for x in n]
     if given == 0:
         return []
-    wrong = {k: v for k, v in ((k, misspelt(k)) for k in left) if v}
+    values = {prefix + k: v for prefix, raw, _, _ in scopes for k, v in raw.items()}
+    wrong = {k: v for k, v in ((k, misspelt(k, values.get(k))) for k in left) if v}
     mapped = [k for k in left if k not in wrong and k.rsplit(".", 1)[-1] in VOCABULARY_KEYS]
     unread = [k for k in left if k not in wrong and k not in mapped]
     declared_fact = Fact("Coverage", Coverage(given, given, ()), Source("config", f"{where} (every key it gives)"),

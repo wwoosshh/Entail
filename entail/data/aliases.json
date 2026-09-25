@@ -103,7 +103,8 @@
  "Rotary": {
   "hf_config": {
    "theta": [
-    "rope_theta"
+    "rope_theta",
+    "rotary_emb_base"
    ],
    "scaling": [
     "rope_scaling"
@@ -156,7 +157,8 @@
     "rope_local_base_freq"
    ],
    "partial_rotary_factor": [
-    "partial_rotary_factor"
+    "partial_rotary_factor",
+    "rotary_pct"
    ],
    "mrope_section": [
     "mrope_section"

@@ -259,7 +259,7 @@ def read_hf_dict(cfg, label, source_kind="config", from_object=False):
                 _, fpartial = _first(full, rk["partial_rotary_factor"])
                 _, lpartial = _first(local, rk["partial_rotary_factor"])
                 same_partial = lpartial is None or lpartial == (fpartial if fpartial is not None else partial)
-                skip = rk["theta"] + rk["type"] + rk["factor"] + (rk["partial_rotary_factor"] if same_partial else ())
+                skip = rk["theta"] + rk["type"] + rk["factor"] + (rk["partial_rotary_factor"] if same_partial else [])
                 extra = sorted(k for k in local if k not in skip and local[k] is not None)
                 if extra:
                     r.problems.append(f"{file}#{prefix}{pkey}.sliding_attention: keys {extra} beyond the local "

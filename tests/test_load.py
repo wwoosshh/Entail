@@ -266,6 +266,12 @@ def test_config_keys():
     # rope_interleaved is unread, not a misspelt mrope_interleaved (M15.7; a broken on all three engines before)
     assert load.misspelt("rope_interleaved") is None and load.misspelt("rope_interleave") is None
     assert load.misspelt("rope_scale") == "rope_scaling" and "mrope_interleaved" not in load.VOCABULARY_KEYS
+    # a near name whose value the field would not take is no misspelling either: GPT-J's rotary_dim (64 dims) is
+    # three edits from rotary_pct (GPT-NeoX's fraction of the head, v6), but no fraction; a fraction would be
+    assert load.misspelt("rotary_dim", 64) is None and load.misspelt("rotary_dim", 0.25) == "rotary_pct"
+    assert load.misspelt("rope_scale", 4.0) == "rope_scaling"          # rope_scaling is a key group, not a field
+    r = only(load.config_keys("transformers", [("", dict(raw, rotary_dim=64), known, resolved)], "c", LOAD))
+    assert r.verdict is Verdict.UNKNOWN and "rotary_dim" in r.note, r
     r = only(load.config_keys("transformers", [("", dict(raw, rope_interleaved=False), known, resolved)], "c", LOAD))
     assert r.verdict is Verdict.UNKNOWN and "rope_interleaved" in r.note and not r.blocking, r
     # a key outside the vocabulary that the class did not take: one unknown line naming it, blocking only in debug

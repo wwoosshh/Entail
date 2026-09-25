@@ -95,6 +95,28 @@ def test_hf_config_rope_parameters_and_the_old_names():
         "sliding_attention": {"rope_theta": 1e4}}}}))
     assert got == {("Rotary", Rotary("linear", theta=1e6, factor=8.0, local_theta=1e4, local_factor=1.0))}, got
     assert not any("per layer type" in p for p in r.problems), r.problems
+    # Laguna-S-2.1: the local layers rotate all of the head (partial 1.0) where the global ones rotate half (0.5): one
+    # fact for the global RoPE, and the local partial reported as beyond v6, not dropped (M15.7 review; the first
+    # fix of this crashed the reader on the shape - list + tuple - and lost the fact with no word about RoPE)
+    got, r = facts_of(folder({"config.json": {"rope_parameters": {
+        "full_attention": {"rope_theta": 5e5, "rope_type": "yarn", "factor": 128.0, "beta_fast": 32.0, "beta_slow": 1.0,
+                           "attention_factor": 1.485, "original_max_position_embeddings": 8192,
+                           "partial_rotary_factor": 0.5},
+        "sliding_attention": {"rope_theta": 1e4, "rope_type": "default", "partial_rotary_factor": 1.0}}}}))
+    rot = [v for n, v in got if n == "Rotary"]
+    assert len(rot) == 1 and rot[0].rope_type == "yarn" and rot[0].partial_rotary_factor == 0.5         and rot[0].local_theta == 1e4 and rot[0].local_factor == 1.0, got
+    assert any("sliding_attention" in p and "partial_rotary_factor" in p for p in r.problems), r.problems
+    assert not any("TypeError" in p for p in r.problems), r.problems
+    # a local scaling type of its own is reported too
+    _, r = facts_of(folder({"config.json": {"rope_parameters": {
+        "full_attention": {"rope_theta": 1e6, "rope_type": "linear", "factor": 8.0},
+        "sliding_attention": {"rope_theta": 1e4, "rope_type": "yarn", "factor": 2.0}}}}))
+    assert any("scaling type 'yarn'" in p for p in r.problems), r.problems
+    # GPT-NeoX's own names (the Pythia family, 7 of 230 popular configs): rotary_emb_base is the base and rotary_pct
+    # the fraction of the head rotated; transformers 5.17 holds them as rope_theta and partial_rotary_factor
+    got, r = facts_of(folder({"config.json": {"model_type": "gpt_neox", "rotary_emb_base": 10000, "rotary_pct": 0.25,
+                                              "rope_scaling": None}}))
+    assert ("Rotary", Rotary(theta=10000.0, partial_rotary_factor=0.25)) in got, got
     # any other split per layer type is still outside the vocabulary
     _, r = facts_of(folder({"config.json": {"rope_parameters": {"layer_a": {"rope_theta": 1e6},
                                                                  "layer_b": {"rope_theta": 1e4}}}}))
