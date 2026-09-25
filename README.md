@@ -291,8 +291,10 @@ Python 3.12, one RTX 4070 Ti (12 GB). Other versions may work; `entail doctor` p
 has nothing to do and stays out of the way.
 
 The capability table (which backend honours what) records its evidence per entry, and only entries marked
-*measured* are used as resolution targets. The measurement scripts and raw results are kept in the author's
-research workspace and are not in this repository yet.
+*measured* are used as resolution targets. The measurement scripts, the raw results and the documents this
+repository's code refers to (`THEORY.md`, `LIBRARY_DESIGN.md`, `ROADMAP.md`) are published as the research
+workspace at https://github.com/wwoosshh/entail-research (mostly in Korean; the numbers in this README are traced
+to result files there, see its `testbed/results/m10/PUBLIC_CLAIMS.md`).
 
 ## Development
 

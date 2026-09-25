@@ -26,6 +26,8 @@ Unreleased. What an external review of 1.0.1 found, and what its readers will as
 - README: what the package does to an environment (the start-up hook and how to remove it, the log folder and how to
   turn it off, the engine versions each adapter was measured against, the import name); the Korean README carries
   the 1.0.1 and 1.0.2 changes.
+- The research workspace behind the numbers - the measurement scripts, the result files, the theory, design and
+  roadmap documents the code cites - is public at https://github.com/wwoosshh/entail-research.
 
 ## 1.0.1
 
