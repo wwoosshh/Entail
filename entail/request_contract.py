@@ -147,7 +147,7 @@ def window(boundary: str, consumer: str, prompt_tokens: int, context: int, origi
 
 
 def pad_type(boundary: str, consumer: str, declared: Optional[int], used: Optional[int], where: str,
-             policy=None, repairable: Optional[bool] = None) -> list:
+             policy=None, repairable: Optional[bool] = None, declared_by: str = "") -> list:
     """The token type id a server gave the padding of a request against the one the tokenizer declares for
     padding (TokenType, M15.1; vllm#58138: a cross-encoder's padding was given the document's segment). `declared`
     is the tokenizer's pad_token_type_id (None when the tokenizer does not say); `used` the id the padding got (None
@@ -167,9 +167,10 @@ def pad_type(boundary: str, consumer: str, declared: Optional[int], used: Option
         repairable = row is not None and bool(row.honours)
         if row is not None and not row.honours:
             note = row.note
+    by = f"the tokenizer class tokenizer_config.json names ({declared_by}) fixes pad_token_type_id" if declared_by \
+        else "the tokenizer's pad_token_type_id"
     d = Fact("TokenType", None if declared is None else TokenType("pad", int(declared)),
-             Source("config", f"{where}: the tokenizer's pad_token_type_id"),
-             Certainty.UNKNOWN if declared is None else Certainty.DECLARED)
+             Source("config", f"{where}: {by}"), Certainty.UNKNOWN if declared is None else Certainty.DECLARED)
     c = Fact("TokenType", TokenType("pad", int(used)), Source("engine", f"{where}: the id the padding was given"),
              Certainty.VERIFIED)
     give = Resolution("give the padding the type the tokenizer declares", "set_pad_type",

@@ -85,6 +85,8 @@ RULES = {
     "assumed_changed": "the artifact is reused under conditions it was not made for",
     # identity of a stored item against the identity its contents give now (identity_contract.py, M14)
     "identity_stale": "the identity a store holds no longer stands for what the item holds now",
+    # a kernel's tile against the block the values are quantized in (tile_contract.py, M15.2)
+    "tile_over_block": "the kernel steps a dimension in a tile that is not a divisor of the quantization block",
 }
 
 

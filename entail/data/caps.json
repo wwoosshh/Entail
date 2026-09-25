@@ -361,7 +361,7 @@
    "evidence": "measured",
    "version": "vllm 0.30.0",
    "ref": "testbed/results/m15/e3_58138_on.json (giving the padding the declared type 0 after the document's 1s makes compress_token_type_ids raise: the /rerank request fails with 400); code: vllm/entrypoints/pooling/scoring/io_processor.py compress_token_type_ids (zeros then ones, kept as the index of the first 1) and _apply_post_tokenization_to_token_type_ids (pads with the last real position's id)",
-   "note": "the padding is given the last real position's segment id (the document's, 1), not the tokenizer's pad_token_type_id; the compressed form cannot carry a pad type after the document, so no repair applies at this consumer (vllm#58138)"
+   "note": "the padding is given the last real position's segment id (the document's, 1), not the tokenizer's pad_token_type_id; at this site the compressed form (index of the first 1) cannot carry a pad type after the document, so no repair applies here. It could be carried by also wrapping the worker's decompression (gpu_model_runner.py, encoder_only.py; the form of the open PR vllm#58143), in the engine-core process; and even then the encoder attention has no padding mask (flash_attn._forward_encoder_attention reads cu_seqlens only), so whether corrected types give the unpadded scores is unmeasured. The one way known to give the right scores is not to pad (vllm#58138)"
   }
  ]
 }

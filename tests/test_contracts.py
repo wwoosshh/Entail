@@ -8,9 +8,9 @@ sys.path.insert(0, os.path.dirname(HERE))
 from entail import contracts, policies, record, sources  # noqa: E402
 from entail.contracts import RULES, Contract, Resolution, Verdict, agrees, decide  # noqa: E402
 from entail.coverage import Coverage  # noqa: E402
-from entail.facts import (VOCABULARY, Assumed, Certainty, Epoch, Fact, Identity, LatentScale, Layout,  # noqa: E402
-                          ModelProps, Origin, Positions, Prediction, Quantized, Reduction, Rotary, Source, Template,
-                          TokenType, Valid)
+from entail.facts import (VOCABULARY, Assumed, Certainty, Epoch, Fact, Identity, KernelConfig,  # noqa: E402
+                          LatentScale, Layout, ModelProps, Origin, Positions, Prediction, Quantized, Reduction,
+                          Rotary, Source, Template, TokenType, Valid)
 from entail.kv_contract import KvExtent  # noqa: E402
 
 # (declared, a different value the consumer might use) for every vocabulary name
@@ -30,6 +30,7 @@ SAMPLES = {
     "Epoch": (Epoch(3), Epoch(2)),
     "Identity": (Identity("kv_block", 0, "aa"), Identity("kv_block", 0, "bb")),
     "TokenType": (TokenType("pad", 0), TokenType("pad", 1)),
+    "KernelConfig": (KernelConfig(tile_k=32), KernelConfig(tile_k=64)),
     "Assumed": (Assumed((("batch", 4),)), Assumed((("batch", 0),))),
     "Origin": (Origin("temperature", "user"), Origin("temperature", "default")),
 }

@@ -43,8 +43,7 @@ def read_choice(tokenizer, tok_params, given, out):
     if len(out) <= real:
         return None, None, real
     declared = getattr(tokenizer, "pad_token_type_id", None)
-    pads = out[real:]
-    used = pads[0] if all(p == pads[0] for p in pads) else pads[0]
+    used = out[real]   # the id the padding was given (the engine pads with one value)
     return (None if declared is None else int(declared)), int(used), real
 
 
@@ -63,7 +62,8 @@ def _decide(tokenizer, tok_params, given, out):
     if used is None:
         return
     decisions = request_contract.pad_type(BOUNDARY, CONSUMER, declared, used,
-                                          f"vllm scoring input, {len(out) - real} padding position(s)")
+                                          f"vllm scoring input, {len(out) - real} padding position(s)",
+                                          declared_by=type(tokenizer).__name__)
     load.resolve(decisions, handles(out, real))
 
 

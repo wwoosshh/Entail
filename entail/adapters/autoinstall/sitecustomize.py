@@ -30,6 +30,7 @@ TARGETS = {
     "vllm.v1.core.kv_cache_manager": ["entail.adapters.vllm_cache_contract"],
     "vllm.v1.core.sched.scheduler": ["entail.adapters.vllm_identity"],
     "vllm.entrypoints.pooling.scoring.io_processor": ["entail.adapters.vllm_scoring"],
+    "sglang.kernels.ops.quantization.fp8_kernel": ["entail.adapters.sglang_fp8_tile"],
     # The request boundary: the parser manager, the renderer and the chat server, each as soon as it has run.
     "vllm.parser.parser_manager": ["entail.adapters.vllm_serve:install_parsers"],
     "vllm.renderers.hf": ["entail.adapters.vllm_serve:install_render"],

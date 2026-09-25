@@ -75,7 +75,10 @@ def install():
         config = out[0] if isinstance(out, tuple) else out
 
         def decide():
-            where = f"{config_dict.get('_name_or_path') or type(config).__name__} config.json"
+            # the file's own _name_or_path can be stale (a checkpoint copied from another: ms-marco-MiniLM-L-6-v2's
+            # config names L-12-v2), so it is quoted as the file's claim, not used as the model's name (M15 review)
+            own = config_dict.get("_name_or_path")
+            where = f"{type(config).__name__} config.json" + (f" (the file names itself {own})" if own else "")
             scopes = read_choice(config, config_dict)
             policy = policies.current()
             if scopes is None:

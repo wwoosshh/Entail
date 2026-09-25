@@ -318,6 +318,25 @@ class Origin:
         _closed("Origin", "came_from", self.came_from, ORIGINS, optional=False)
 
 
+@dataclass(frozen=True)
+class KernelConfig:
+    """The tile a kernel steps a dimension in, against the block the values are quantized in (v6, M15.2; codebook
+    v2 G). A block-quantized matmul applies one scale per quantization block along K. A kernel whose K tile is not
+    a divisor of that block steps its scale pointer off the block boundaries and multiplies by the wrong scale,
+    silently (sglang#39626: a tile of 64 over a block of 32 gave 64 where 288 was right). The declared value is the
+    block (the coarsest tile allowed); the chosen value is the kernel's tile. Along N the kernel indexes scales per
+    column, so only K is constrained.
+    """
+    tile_k: int
+    tile_n: Optional[int] = None
+
+    def __post_init__(self):
+        _number("KernelConfig", "tile_k", self.tile_k, 0, integer=True, strict=True)
+        _number("KernelConfig", "tile_n", self.tile_n, 0, integer=True, strict=True)
+        if self.tile_k is None:
+            raise ValueError("KernelConfig.tile_k: required")
+
+
 TOKEN_ROLES = frozenset({"pad"})
 
 
@@ -381,12 +400,12 @@ VOCABULARY = {
     "Layout": "LAYOUT", "Quantized": "DTYPE", "Rotary": "FRAME", "Positions": "FRAME", "Valid": "RANGE",
     "KvExtent": "RANGE", "ModelProps": "PROPERTY", "Prediction": "PROPERTY", "LatentScale": "PROPERTY",
     "Template": "PROPERTY", "Coverage": "MAPPING", "TokenType": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME",
-    "Identity": "TIME", "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE",
+    "Identity": "TIME", "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE", "KernelConfig": "LAYOUT",
 }
 _HERE = {"Layout": Layout, "Quantized": Quantized, "Rotary": Rotary, "Positions": Positions, "Valid": Valid,
          "ModelProps": ModelProps, "Prediction": Prediction, "LatentScale": LatentScale, "Template": Template,
          "TokenType": TokenType, "Reduction": Reduction, "Epoch": Epoch, "Identity": Identity, "Assumed": Assumed,
-         "Origin": Origin}
+         "Origin": Origin, "KernelConfig": KernelConfig}
 
 
 def vocabulary_class(name):

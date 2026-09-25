@@ -22,6 +22,15 @@ Unreleased. A new fact, from the low-level study (codebook v2): a class of wrong
   it cannot (capability row, measured): the decision is broken under the default policy and the padded request is
   refused before scoring under `ENTAIL_ON_BROKEN=stop`.
 
+- Fact vocabulary v6: `KernelConfig` (LAYOUT) — the tile a kernel steps K in, against the block the weights are
+  quantized in; the tile must be a divisor of the block (`tile_contract.py`, rule `tile_over_block`). SGLang adapter
+  `sglang_fp8_tile`: wraps the block-FP8 Triton matmul and checks the config map it picks from, once per map; the
+  repair clamps the tile to the block (the engine's own default). sglang#39626 (a hand-supplied K tile of 64 over a
+  block of 32 gave 64 where 288 was right): measured on 0.5.20, the tile is clamped and the kernel returns 288.
+  SGLang's shipped tuned configs (1,887 entries) all divide, so ordinary runs decide nothing.
+- Records name a transformers config by its class and quote the file's own `_name_or_path` as the file's claim,
+  since that field can be stale (a checkpoint copied from another model).
+
 Older facts and files still read (`READABLE_VERSIONS`). Not yet measured for this release: normal-run false alarms
 across the 38-model set (S3) and the steady-state cost (S4); the hook fires only on streaming-session updates, which
 ordinary generation never triggers.
