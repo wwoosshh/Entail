@@ -81,9 +81,10 @@ def test_the_tokenizer_config_declares_the_end_by_its_own_added_tokens():
     facts = load.declared(d)
     ids, _ = stops_contract.declared_stops(facts)
     assert set(ids) == {2, 11}
-    # transformers and SGLang build their sets from the two JSON files: 11 is dropped there, not on vLLM
-    assert stops_contract.held_by("transformers", facts) == {2} and stops_contract.held_by("sglang", facts) == {2}
-    assert stops_contract.held_by("vllm", facts) == {2, 11}
+    # transformers builds its set from generation_config.json alone: 11 is dropped there; vLLM takes the tokenizer's
+    # eos and SGLang's scheduler matches it (M15.8 review), so both hold 11
+    assert stops_contract.held_by("transformers", facts) == {2}
+    assert stops_contract.held_by("vllm", facts) == {2, 11} and stops_contract.held_by("sglang", facts) == {2, 11}
     r = one(stops_contract.check(B, C, facts, {2}, "held", add_stops=lambda ids: True, record=False))
     assert r.verdict is Verdict.RESOLVED and r.target == (11,) and "tokenizer_config.json#eos_token" in r.note, r
     # an eos_token the file does not list as an added token gives no fact (left to a built tokenizer)
@@ -160,6 +161,47 @@ def test_no_declaration_decides_nothing_and_an_unread_set_only_checks_the_ids():
     assert r.verdict is Verdict.PASS and r.chosen.value == Stops(eos=(2,)), r
 
 
+def test_the_fallback_stands_in_only_when_the_file_is_absent_and_a_bos_is_not_an_end():
+    """M15.8 review: transformers and vLLM fall back to config.json only when generation_config.json is ABSENT; a
+    file without eos_token_id gives an empty set. And hmellor/tiny-random-Llama declares eos 1 in config.json where
+    1 is the tokenizer's <s>: a beginning is not an end to add."""
+    d = folder({"eos_token_id": 2}, {"do_sample": False})            # generation_config.json present, no eos
+    facts = load.declared(d)
+    assert stops_contract.held_by("transformers", facts, path=d) == set()
+    assert stops_contract.held_by("vllm", facts, tokenizer_eos=2, path=d) == {2}
+    assert stops_contract.held_by("sglang", facts, path=d) == {2}
+    d2 = folder({"eos_token_id": 2})                                   # no generation_config.json: config stands in
+    assert stops_contract.held_by("transformers", load.declared(d2), path=d2) == {2}
+    d3 = folder({"eos_token_id": 1, "bos_token_id": 0}, {"eos_token_id": [1, 2]})
+    json.dump({"eos_token": "</s>", "bos_token": "<s>",
+               "added_tokens_decoder": {"1": {"content": "<s>"}, "2": {"content": "</s>"}}},
+              open(os.path.join(d3, "tokenizer_config.json"), "w", encoding="utf-8"))
+    r = one(stops_contract.check(B, C, load.declared(d3), {2}, "held", add_stops=lambda ids: True, record=False))
+    assert r.verdict is Verdict.PASS and "1 is declared as eos" in r.note and "declared bos: not an end" in r.note, r
+    # the SGLang table row: the scheduler matches the tokenizer's eos too, so its set holds all three sources
+    assert stops_contract.held_by("sglang", load.declared(d3), path=d3) == {1, 2}
+
+
+def test_the_tokenizers_end_is_found_in_tokenizer_json_when_the_config_lists_no_id():
+    """55 of 230 popular folders list eos_token in tokenizer_config.json without an added_tokens_decoder entry for
+    it (DeepSeek, GLM, Pythia ...); tokenizer.json names it."""
+    d = folder({"eos_token_id": 2}, {"eos_token_id": 2})
+    json.dump({"eos_token": "<|end|>"}, open(os.path.join(d, "tokenizer_config.json"), "w", encoding="utf-8"))
+    json.dump({"added_tokens": [{"id": 7, "content": "<|end|>", "special": True}],
+               "model": {"type": "BPE", "vocab": {"a": 0, "b": 1}}},
+              open(os.path.join(d, "tokenizer.json"), "w", encoding="utf-8"))
+    tok = [f for f in sources.read_all(d).facts if f.name == "Stops" and "tokenizer_config" in f.source.where]
+    assert len(tok) == 1 and tok[0].value.eos == (7,) and "tokenizer.json" in tok[0].source.where, tok
+    # a folder is read once per process: the same object's facts come back while the files stand
+    a = sources.read_all(d)
+    b = sources.read_all(d)
+    assert [str(f.value) for f in a.facts] == [str(f.value) for f in b.facts] and a is not b
+    json.dump({"eos_token": "<|end|>", "added_tokens_decoder": {"9": {"content": "<|end|>"}}},
+              open(os.path.join(d, "tokenizer_config.json"), "w", encoding="utf-8"))
+    c = [f for f in sources.read_all(d).facts if f.name == "Stops" and "tokenizer_config" in f.source.where]
+    assert c[0].value.eos == (9,), c            # the file changed: read again
+
+
 def test_the_static_table_builds_each_engines_set_as_its_code_does():
     """transformers: generation_config only (config when absent); vLLM: the tokenizer's eos plus generation_config;
     SGLang: config plus generation_config (data/stops_sources.json)."""
@@ -233,17 +275,27 @@ def test_the_vllm_adapter_counts_the_tokenizers_eos_and_writes_the_fields():
     vllm_stops.reset()
 
 
-def test_the_sglang_adapter_holds_both_files_and_passes():
+def test_the_sglang_adapter_counts_the_tokenizers_end_the_scheduler_matches():
+    """SGLang's scheduler stops on the two files' ids and on the tokenizer's eos (unless skip_tokenizer_init), so
+    the tokenizer's declared end is held, not repaired (M15.8 review: the first adapter 'repaired' it)."""
     from types import SimpleNamespace
     from entail.adapters import sglang_stops
-    d = folder({"eos_token_id": 128001}, {"eos_token_id": 128009})
-    mc = SimpleNamespace(model_path=d, revision=None, hf_eos_token_id={128001, 128009})
+    d = folder({"eos_token_id": 2}, {"eos_token_id": 2})
+    json.dump({"eos_token": "<|im_end|>", "added_tokens_decoder": {"2": {"content": "</s>"}, "11": {"content": "<|im_end|>"}}},
+              open(os.path.join(d, "tokenizer_config.json"), "w", encoding="utf-8"))
+    mc = SimpleNamespace(model_path=d, revision=None, hf_eos_token_id={2})
     r = decided(lambda: sglang_stops._decide(mc))
-    assert r == [] or all(x.verdict is Verdict.PASS for x in r), r
-    mc2 = SimpleNamespace(model_path=d, revision=None, hf_eos_token_id={128009})
+    assert all(x.verdict is Verdict.PASS for x in r) and mc.hf_eos_token_id == {2}, r
     sglang_stops.reset()
-    r = decided(lambda: sglang_stops._decide(mc2))
-    assert [x.verdict for x in r] == [Verdict.RESOLVED] and mc2.hf_eos_token_id == {128001, 128009}, r
+    mc2 = SimpleNamespace(model_path=d, revision=None, hf_eos_token_id={2})
+    r = decided(lambda: sglang_stops._decide(mc2, skip_tokenizer_init=True))
+    assert [x.verdict for x in r] == [Verdict.RESOLVED] and mc2.hf_eos_token_id == {2, 11}, r
+    sglang_stops.reset()
+    # config.json's end left out of generation_config.json is still added (the files' ids)
+    d2 = folder({"eos_token_id": 128001}, {"eos_token_id": 128009})
+    mc3 = SimpleNamespace(model_path=d2, revision=None, hf_eos_token_id={128009})
+    r = decided(lambda: sglang_stops._decide(mc3))
+    assert [x.verdict for x in r] == [Verdict.RESOLVED] and mc3.hf_eos_token_id == {128001, 128009}, r
     sglang_stops.reset()
 
 

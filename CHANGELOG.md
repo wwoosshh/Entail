@@ -67,8 +67,8 @@ Unreleased. A new fact, from the low-level study (codebook v2): a class of wrong
 - Fact vocabulary v7: `Stops` (MAPPING) - the token ids a generation ends with (and begins with, and is padded
   with), as each file states them: generation_config.json, config.json and the tokenizer's eos_token. Every engine
   builds its stop set from a different subset (`data/stops_sources.json`: transformers from generation_config.json
-  alone, vLLM from the tokenizer's eos plus generation_config.json, SGLang from config.json plus
-  generation_config.json), so an end one file declares can be one the engine never sees and the model runs past
+  alone, vLLM from the tokenizer's eos plus generation_config.json, SGLang from config.json, generation_config.json
+  and the tokenizer's eos its scheduler matches), so an end one file declares can be one the engine never sees and the model runs past
   the end of its answer (Llama 3, April 2024). `stops_contract.py` takes the union: a consumer whose set lacks a
   declared end is resolved by adding it (adapters `transformers_stops`, `vllm_stops`, `sglang_stops`), a declared
   id past the tokenizer is broken; `entail check` decides the set each engine would build. The tokenizer's own

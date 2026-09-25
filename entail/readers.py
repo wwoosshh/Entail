@@ -631,8 +631,7 @@ class HfTokenizerConfig:
         if not isinstance(d, dict):
             return r
         added = d.get("added_tokens_decoder")
-        if not isinstance(added, dict):
-            return r
+        added = added if isinstance(added, dict) else {}
         by_content = {}
         for k, v in added.items():
             if isinstance(v, dict) and isinstance(v.get("content"), str):
@@ -640,15 +639,33 @@ class HfTokenizerConfig:
                     by_content.setdefault(v["content"], int(k))
                 except (TypeError, ValueError):
                     pass
-        ids = {}
+        tokens = {}
         for field_name in ("eos", "bos", "pad"):
             tok = d.get(f"{field_name}_token")
             tok = tok.get("content") if isinstance(tok, dict) else tok
-            if isinstance(tok, str) and tok in by_content:
-                ids[field_name] = by_content[tok]
+            if isinstance(tok, str):
+                tokens[field_name] = tok
+        how = "added_tokens_decoder"
+        if any(t not in by_content for t in tokens.values()) and os.path.isfile(os.path.join(path, "tokenizer.json")):
+            # the token is not in this file's table (55 of 230 popular folders, M15.8 review): tokenizer.json names
+            # its added tokens and its vocabulary; read once per process (sources.read_all is memoised by folder)
+            try:
+                tj = _load_json(os.path.join(path, "tokenizer.json"))
+                for a in (tj.get("added_tokens") or []) if isinstance(tj, dict) else []:
+                    if isinstance(a, dict) and isinstance(a.get("content"), str) and isinstance(a.get("id"), int):
+                        by_content.setdefault(a["content"], int(a["id"]))
+                vocab = (tj.get("model") or {}).get("vocab") if isinstance(tj, dict) else None
+                if isinstance(vocab, dict):
+                    for t in tokens.values():
+                        if t in vocab and isinstance(vocab[t], int):
+                            by_content.setdefault(t, int(vocab[t]))
+                how = "added_tokens_decoder, then tokenizer.json"
+            except (ValueError, OSError):
+                pass
+        ids = {f: by_content[t] for f, t in tokens.items() if t in by_content}
         if ids:
             from .facts import Stops
-            where = f"{p}#eos_token (id by added_tokens_decoder)" if "eos" in ids else f"{p}#bos_token/pad_token"
+            where = f"{p}#eos_token (id by {how})" if "eos" in ids else f"{p}#bos_token/pad_token (id by {how})"
             _emit(r, "Stops", lambda: Stops(eos=(ids["eos"],) if "eos" in ids else (), bos=ids.get("bos"),
                                             pad=ids.get("pad")), "file", where)
         return r

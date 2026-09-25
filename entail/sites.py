@@ -155,7 +155,7 @@ def check_static(model_path: str, engine: str, settings: dict):
                 Fact("Stops", Stops(eos=(int(built["eos"]),)),
                      Source("file", f"the tokenizer's eos_token (id {built['eos']}, {built['name']} built from the "
                                     f"folder)"), Certainty.DECLARED))
-        held = stops_contract.held_by(engine, facts, tokenizer_eos=built.get("eos"))
+        held = stops_contract.held_by(engine, facts, tokenizer_eos=built.get("eos"), path=path)
         # a dropped end is what entail adds at load (the adapters' add_stops): said so, as the attention checks say
         # the backend they would switch to; the ids are recorded on the decision
         return stops_contract.check(f"load:{engine}.stop_set", f"{engine}.stop_set", facts, held,

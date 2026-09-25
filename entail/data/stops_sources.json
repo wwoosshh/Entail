@@ -1,20 +1,20 @@
 {
- "_about": "Which declarations each engine builds its stop set from (M15.8): the static check (entail check) derives the set an engine would hold from the files by this table; at run time the adapters read the set the engine holds. Evidence is the engine's code, read 2026-09-26; 'fallback' is what stands in when generation_config.json is absent. A row is data, not a rule: the rule (every declared end is an end) is in stops_contract.py.",
+ "_about": "Which declarations each engine builds its stop set from (M15.8): the static check (entail check) derives the set an engine would hold from the files by this table; at run time the adapters read the set the engine holds. Evidence is the engine's code, read 2026-09-26 and checked by the M15.8 review; 'fallback' is what stands in when generation_config.json is ABSENT (a file present without eos_token_id gives an empty set on transformers and vLLM). A row is data, not a rule: the rule (every declared end is an end) is in stops_contract.py.",
  "transformers": {
   "reads": ["generation_config"],
   "fallback": "config",
   "version": "5.17.0",
-  "ref": "modeling_utils.py from_pretrained (L1277): model.generation_config = GenerationConfig.from_pretrained(...) when generation_config.json exists, else GenerationConfig.from_model_config(config); generate() stops on generation_config.eos_token_id (an id or a list). The tokenizer's eos_token is not consulted."
+  "ref": "modeling_utils.py: PreTrainedModel.__init__ L1274-1279 builds generation_config from the config's own ids (GenerationConfig.from_model_config) as the default; from_pretrained L4320-4322 calls adjust_generation_fn (generation/utils.py L514), which loads generation_config.json with GenerationConfig.from_pretrained and keeps the default only when that file is absent (OSError). generate() stops on generation_config.eos_token_id (EosTokenCriteria, generation/utils.py L1513). The tokenizer's eos_token is not consulted. A repaired set is what save_pretrained writes back."
  },
  "vllm": {
   "reads": ["tokenizer", "generation_config"],
   "fallback": "config",
   "version": "0.30.0",
-  "ref": "v1/engine/input_processor.py L55: generation_config_fields = model_config.try_get_generation_config() (config/model.py L1693: generation_config.json; transformers' try_get_generation_config falls back to GenerationConfig.from_model_config); L373: sampling_params.update_from_generation_config(fields, renderer.get_eos_token_id()) - the stop set is the tokenizer's eos plus the generation config's eos ids (sampling_params.py L690)."
+  "ref": "v1/engine/input_processor.py L55: generation_config_fields = model_config.try_get_generation_config() (config/model.py L1693: generation_config.json; transformers' try_get_generation_config falls back to GenerationConfig.from_model_config when the file is absent); L373-375: sampling_params.update_from_generation_config(fields, renderer.get_eos_token_id()) - the tokenizer's eos is the primary eos and the generation config's ids join the stop set (sampling_params.py L690-716). A renderer without a tokenizer gives None (renderers/base.py L401)."
  },
  "sglang": {
-  "reads": ["config", "generation_config"],
+  "reads": ["config", "generation_config", "tokenizer"],
   "version": "0.5.20",
-  "ref": "srt/configs/model_config.py L1903 _get_hf_eos_token_id: hf_config.eos_token_id | hf_generation_config.eos_token_id, cached as hf_eos_token_id (L698) and read by the scheduler (managers/scheduler.py L2771, L2837)."
+  "ref": "srt/configs/model_config.py L1903 _get_hf_eos_token_id: hf_config.eos_token_id | hf_generation_config.eos_token_id, cached as hf_eos_token_id (L698) and given to every request (managers/scheduler.py L2771, L2837); the scheduler ALSO matches the tokenizer's eos_token_id for every request (managers/schedule_batch.py check_finished L1719-1722, req.tokenizer = self.tokenizer at scheduler.py L2793) unless the server was started with skip_tokenizer_init (scheduler.py init_tokenizer L883-887: no tokenizer, no match). The M15.8 review corrected this row: the first version left the tokenizer out."
  }
 }

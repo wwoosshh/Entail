@@ -42,9 +42,14 @@ def declared_stops(facts) -> Tuple[Dict[int, List[str]], List[object]]:
     return ids, stops
 
 
-def held_by(engine: str, facts, tokenizer_eos: Optional[int] = None, table=None) -> Optional[Set[int]]:
+def held_by(engine: str, facts, tokenizer_eos: Optional[int] = None, table=None, path: Optional[str] = None
+            ) -> Optional[Set[int]]:
     """The stop set an engine would build from these declarations, by data/stops_sources.json (the static check;
-    at run time the adapters read the set the engine holds). None when the table does not name the engine."""
+    at run time the adapters read the set the engine holds). None when the table does not name the engine. With
+    `path`, the fallback source stands in only when generation_config.json is ABSENT from the folder - a file
+    present without eos_token_id gives an empty set, as transformers and vLLM build it (M15.8 review)."""
+    import os
+
     table = table or sources_table()
     entry = table.get(engine)
     if not isinstance(entry, dict):
@@ -59,8 +64,11 @@ def held_by(engine: str, facts, tokenizer_eos: Optional[int] = None, table=None)
         by_kind.setdefault("tokenizer", set()).add(int(tokenizer_eos))
     held: Set[int] = set()
     reads = list(entry.get("reads", ()))
-    if entry.get("fallback") and "generation_config" in reads and "generation_config" not in by_kind:
-        reads.append(entry["fallback"])
+    if entry.get("fallback") and "generation_config" in reads:
+        absent = (not os.path.isfile(os.path.join(path, "generation_config.json"))) if path \
+            else "generation_config" not in by_kind
+        if absent:
+            reads.append(entry["fallback"])
     for kind in reads:
         held |= by_kind.get(kind, set())
     return held
@@ -98,8 +106,19 @@ def check(boundary: str, consumer: str, facts, held: Optional[Set[int]], held_wh
         return []          # no file says where a generation ends: nothing to hold the consumer to
     contract = Contract(boundary, consumer, ("Stops",))
     decisions: List[Decision] = []
+    # an id declared as an end that a file also declares as the beginning (tiny-random-Llama: config.json's eos 1 is
+    # the tokenizer's <s>) is a wrong declaration, not an end to add: left out, and said on the decision
+    bos_ids = {int(f.value.bos) for f in stops if f.value.bos is not None}
+    as_bos = sorted(i for i in ids if i in bos_ids)
+    bos_note = ""
+    if as_bos:
+        bos_note = "; ".join(f"{i} is declared as eos by {'; '.join(ids[i])} but it is a declared bos: not an end"
+                             for i in as_bos)
+        ids = {i: w for i, w in ids.items() if i not in bos_ids}
     union = tuple(sorted(ids))
     wheres = sorted({w for ws in ids.values() for w in ws})
+    if not union:
+        return []          # every declared end was a beginning: nothing to hold the consumer to
     declared = Fact("Stops", Stops(eos=union), Source("config", "the union of " + "; ".join(wheres)),
                     Certainty.DECLARED)
     if held is not None:
@@ -135,13 +154,17 @@ def check(boundary: str, consumer: str, facts, held: Optional[Set[int]], held_wh
             # the ladder gives the verdict (resolved with the repair, else broken or refused); the rule is this one
             decisions += [replace(d, rule=RULES["stop_dropped"], note=(note + ("; " + d.note if d.note else "")))
                           for d in out]
+    if bos_note:
+        from dataclasses import replace as _replace
+        decisions = [_replace(d, note=(d.note + "; " if d.note else "") + bos_note) for d in decisions]
     if not any(d.verdict is not Verdict.PASS for d in decisions):
-        note = ""
+        note = bos_note
         if special_ids is not None:
             plain = [i for i in union if i not in set(int(s) for s in special_ids)]
             if plain:
-                note = (f"eos id(s) {', '.join(str(i) for i in plain)} are not special tokens of the tokenizer "
-                        f"(a stop still matches by id; encoding text may split them)")
+                note = (note + "; " if note else "") + (
+                    f"eos id(s) {', '.join(str(i) for i in plain)} are not special tokens of the tokenizer "
+                    f"(a stop still matches by id; encoding text may split them)")
         if not decisions:
             decisions.append(Decision(contract, "Stops", Verdict.PASS, RULES["match"], declared=declared,
                                       chosen=chosen if held is not None else declared, note=note))

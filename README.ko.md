@@ -199,7 +199,7 @@ logits = step()["logits"]                                                       
 - 멀티모달 프로세서의 `apply_chat_template`은 검사하지 않는다. `ENTAIL_ON_BROKEN=stop`에서 SGLang 서버가 거부한 요청은 SGLang 자신의 오류(500)를 받는다. vLLM 서버는 400으로 답한다.
 - 어휘가 담지 못하는 RoPE 선언은 대조하지 않았다고 알린다. 인기 폴더 230개에서는 full/sliding attention 밖 이름의 층 종류별 분할(DeepSeek-V4), 국소 층만의 `partial_rotary_factor`(Laguna), 어느 엔진도 읽지 않는 이름 `attn_factor`다.
 - vLLM 점수 경로의 패딩 토큰 종류는 고치지 않고 알린다. vLLM 0.30은 토큰 종류를 첫 1의 위치로만 들어서 문서 뒤의 패딩 종류를 담을 수 없다. transformers의 `PreTrainedTokenizerBase.from_pretrained` 밖에서 만든 토크나이저(Mistral의 파일, tiktoken, GGUF)는 실행 시 검사하지 않는다.
-- transformers `from_pretrained`의 정지 집합 검사는 JSON 파일 둘을 보고, 스크립트가 따로 읽는 토크나이저는 못 본다. vLLM의 검사는 셋을 다 본다.
+- 정지 집합 검사는 토크나이저의 끝을 tokenizer_config.json(과 tokenizer.json)에서 토크나이저를 만들지 않고 읽는다. 파일 어디에도 `eos_token`의 id가 없는 토크나이저는 거기서 못 본다. 해소 뒤 저장한 모델(`save_pretrained`)은 고쳐진 목록을 generation_config.json에 쓴다.
 - 능력표가 엔진 코드를 읽어서만 아는 어긋남(SGLang flashinfer의 sliding window)은 추론했다고 알리고 고치지 않는다. 실측 행만 백엔드를 바꾼다. 어휘 밖의 설정 키를 모델의 설정 클래스가 받지 않으면 잃었다가 아니라 읽히지 않았다고 알린다.
 - SGLang의 KV 계약은 추측 복호 배치를 건너뛰고(스케줄러가 초안 토큰 칸을 미리 잡는다) 프로세스마다 한 번 알린다.
 - GPU 한 장이다. 합산 계약(여러 랭크에서 두 번 합산한 값)은 한 프로세스가 두 랭크를 대신해서 쟀다.

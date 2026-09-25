@@ -303,8 +303,9 @@ For 1.0 every measurement of the development milestones was run again on the fin
 - The padding token type on vLLM's scoring path is reported, not repaired: vLLM 0.30 keeps token types as the
   index of the first 1, which cannot hold a pad type after the document. Tokenizers built outside transformers'
   `PreTrainedTokenizerBase.from_pretrained` (Mistral's own files, tiktoken, GGUF) are not checked at run time.
-- The stop-set check at transformers' `from_pretrained` sees the two JSON files but not the tokenizer, which a
-  script loads separately; vLLM's check sees all three.
+- The stop-set check reads the tokenizer's end from tokenizer_config.json (and tokenizer.json) without building a
+  tokenizer; a tokenizer whose files name its `eos_token` nowhere as an id is not seen there. A model saved after
+  the repair (`save_pretrained`) writes the repaired list into its generation_config.json.
 - A mismatch the capability table knows only from reading an engine's code (SGLang flashinfer's sliding window) is
   reported as inferred, not repaired; only measured rows switch a backend. Config keys outside the vocabulary that
   a model's config class does not take are reported as unread, not as lost.

@@ -5,6 +5,7 @@ ROADMAP M15.8; stops_contract.py).
                generation_config transformers gave it (generation_config.json, else the config's own ids).
   read_choice  the eos ids that generation_config holds (an id or a list); None when the model has none.
   handles      add_stops: write the union into generation_config.eos_token_id - the list generate() stops on.
+               A model saved afterwards (save_pretrained) writes that repaired list into its generation_config.json.
 The rule is in the core (stops_contract.check): every id the files declare as an end is an end. transformers reads
 generation_config.json alone, so an end config.json declares and that file leaves out is dropped here
 (data/stops_sources.json).

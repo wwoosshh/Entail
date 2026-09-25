@@ -16,6 +16,7 @@ Must not:
 `pick` and `merge` were built in M1 (the verdict table needs them); `read_all` and the readers in M2.1
 (readers.py, with key names and value spellings in data/aliases.json).
 """
+import os
 from dataclasses import dataclass, fields
 from typing import Dict, List, Protocol, Sequence, Tuple
 
@@ -107,10 +108,48 @@ def pick(candidates, precedence=DEFAULT_PRECEDENCE):
     return ordered[0], tuple(known)
 
 
+_MEMO: Dict[tuple, tuple] = {}   # (folder, manifest dirs) -> (stamp of the folder's files, ReadResult)
+
+
+def _folder_stamp(path):
+    """(name, size, mtime_ns) of every file at the top of the folder; None for anything but a folder."""
+    if not os.path.isdir(path):
+        return None
+    try:
+        with os.scandir(path) as it:
+            return tuple(sorted((e.name, e.stat().st_size, e.stat().st_mtime_ns) for e in it if e.is_file()))
+    except OSError:
+        return None
+
+
+def reset_cache() -> None:
+    _MEMO.clear()
+
+
 def read_all(path: str, manifest_dirs: Sequence[str] = ()) -> "ReadResult":
     """Every fact any reader finds in the artifact at `path` (a file or a model folder), plus the facts of a manifest
     for it when one is found in `manifest_dirs`. A reader that fails becomes a problem: reading never breaks the
-    caller (principle 12)."""
+    caller (principle 12). A folder is read once per process while its files do not change (M15.8 review: the
+    config, loader, attention and stop-set adapters each read it again, safetensors header included, which was the
+    load-time cost at the 90th percentile); the caller gets its own copy of the result."""
+    key = (path, tuple(manifest_dirs))
+    stamp = _folder_stamp(path)
+    if stamp is not None:
+        hit = _MEMO.get(key)
+        if hit is not None and hit[0] == stamp:
+            copy = ReadResult()
+            copy.facts, copy.problems = list(hit[1].facts), list(hit[1].problems)
+            return copy
+    result = _read_all(path, manifest_dirs)
+    if stamp is not None:
+        _MEMO[key] = (stamp, result)
+        copy = ReadResult()
+        copy.facts, copy.problems = list(result.facts), list(result.problems)
+        return copy
+    return result
+
+
+def _read_all(path: str, manifest_dirs: Sequence[str] = ()) -> "ReadResult":
     result = ReadResult()
     for reader in READERS:
         try:
