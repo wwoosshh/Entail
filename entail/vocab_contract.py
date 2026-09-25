@@ -223,6 +223,16 @@ def check(boundary: str, consumer: str, path: str, tokenizer_size: Optional[int]
                                                f"the folder's tokenizer source says {sizes[0]} tokens "
                                                f"({s.candidates[0][1]}); the engine's tokenizer holds {tokenizer_size}: "
                                                f"which source it was built from cannot be told", policy))
+        elif not sizes and model is not None and int(tokenizer_size) != int(model):
+            # no tokenizer source in the folder to say which vocabulary this tokenizer holds, and its base size is
+            # not the model's: transformers 5.17 builds a Qwen2Tokenizer of ONE base token from a folder that has
+            # only tokenizer_config.json (the E1 static run), which is no tokenizer of the model - said as unknown,
+            # since without a source nothing here can name what it is
+            decisions.append(load.cannot_check(boundary, consumer, "Vocab",
+                                               f"the folder has no tokenizer file; the engine's tokenizer holds "
+                                               f"{tokenizer_size} base tokens and the model's vocabulary is {model} "
+                                               f"({s.rows_where}): not the model's tokenizer, and nothing here says "
+                                               f"whose it is", policy))
         else:
             src = Fact("Vocab", Vocab(size=sizes[0]), Source("file", s.candidates[0][1]), Certainty.DECLARED) \
                 if sizes else rows_fact

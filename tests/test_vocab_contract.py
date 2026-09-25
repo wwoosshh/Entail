@@ -173,6 +173,17 @@ def test_rows_read_elsewhere_stand_in_for_the_checkpoint():
     assert d.verdict is Verdict.PASS, d
 
 
+
+def test_a_tokenizer_built_from_a_folder_without_tokenizer_files_is_unknown_not_pass():
+    """transformers 5.17 builds a Qwen2Tokenizer of one base token from a folder holding only tokenizer_config.json
+    (seen in the E1 static run); with no source to name it and a size that is not the model's, it is unknown."""
+    d = one(vocab_contract.check(B, C, folder(config_vocab=151936), 1, 26, "Qwen2Tokenizer", record=False))
+    assert d.verdict is Verdict.UNKNOWN and "no tokenizer file" in d.note and "not the model's tokenizer" in d.note, d
+    # a size that IS the model's passes even without a source (nothing contradicts it)
+    d = one(vocab_contract.check(B, C, folder(config_vocab=50257), 50257, 50257, "GPT2Tokenizer", record=False))
+    assert d.verdict is Verdict.PASS, d
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
