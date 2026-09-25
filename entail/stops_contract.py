@@ -106,9 +106,11 @@ def check(boundary: str, consumer: str, facts, held: Optional[Set[int]], held_wh
         return []          # no file says where a generation ends: nothing to hold the consumer to
     contract = Contract(boundary, consumer, ("Stops",))
     decisions: List[Decision] = []
-    # an id declared as an end that a file also declares as the beginning (tiny-random-Llama: config.json's eos 1 is
-    # the tokenizer's <s>) is a wrong declaration, not an end to add: left out, and said on the decision
-    bos_ids = {int(f.value.bos) for f in stops if f.value.bos is not None}
+    # an id one source declares as the beginning and NOT as an end (tiny-random-Llama's tokenizer: bos <s> = 1, eos
+    # </s> = 2) that another source calls an end (its config.json: eos 1) is a wrong declaration, not an end to
+    # add: left out, and said on the decision. A source that calls the same id both (GPT-2, OPT, Pythia and the
+    # Qwen base models: <|endoftext|> is bos and eos alike) declares an end (the first fix dropped these 42 of 230)
+    bos_ids = {int(f.value.bos) for f in stops if f.value.bos is not None and int(f.value.bos) not in f.value.eos}
     as_bos = sorted(i for i in ids if i in bos_ids)
     bos_note = ""
     if as_bos:

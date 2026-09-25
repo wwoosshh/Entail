@@ -178,6 +178,13 @@ def test_the_fallback_stands_in_only_when_the_file_is_absent_and_a_bos_is_not_an
               open(os.path.join(d3, "tokenizer_config.json"), "w", encoding="utf-8"))
     r = one(stops_contract.check(B, C, load.declared(d3), {2}, "held", add_stops=lambda ids: True, record=False))
     assert r.verdict is Verdict.PASS and "1 is declared as eos" in r.note and "declared bos: not an end" in r.note, r
+    # GPT-2's shape: one id is the beginning AND the end (<|endoftext|> 50256 in config.json and generation_config):
+    # a source that calls it both declares an end, so it is held to (the first fix dropped 42 of 230 folders)
+    d4 = folder({"eos_token_id": 50256, "bos_token_id": 50256}, {"eos_token_id": 50256, "bos_token_id": 50256})
+    r = one(stops_contract.check(B, C, load.declared(d4), {50256}, "held", record=False))
+    assert r.verdict is Verdict.PASS and r.declared.value.eos == (50256,) and "not an end" not in r.note, r
+    r = one(stops_contract.check(B, C, load.declared(d4), set(), "held", add_stops=lambda ids: True, record=False))
+    assert r.verdict is Verdict.RESOLVED and r.target == (50256,), r
     # the SGLang table row: the scheduler matches the tokenizer's eos too, so its set holds all three sources
     assert stops_contract.held_by("sglang", load.declared(d3), path=d3) == {1, 2}
 
