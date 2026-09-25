@@ -28,6 +28,9 @@ Unreleased. What an external review of 1.0.1 found, and what its readers will as
   the 1.0.1 and 1.0.2 changes.
 - The research workspace behind the numbers - the measurement scripts, the result files, the theory, design and
   roadmap documents the code cites - is public at https://github.com/wwoosshh/entail-research.
+- README (English and Korean) opens with the measured case (64 of 180 models, 379 → 273, 198 of 500 answers, 0 false
+  alarms in 102 runs) and a three-line check of your own model; `CONTRIBUTING.md` says how to report a wrong report
+  or a miss, add a measured capability row, and support a new engine version.
 
 ## 1.0.1
 

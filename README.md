@@ -2,22 +2,39 @@
 
 [![PyPI](https://img.shields.io/pypi/v/entail-ai)](https://pypi.org/project/entail-ai/) [![tests](https://github.com/wwoosshh/entail/actions/workflows/tests.yml/badge.svg)](https://github.com/wwoosshh/entail/actions/workflows/tests.yml)
 
-**Keep what a value means intact across LLM inference-stack boundaries.**
+**Your model files say how they must be run. Your engine doesn't always listen.**
 
-An inference stack is a chain of parts — checkpoint and config, loader, engine, kernels, quantization, cache.
-Each part can be correct on its own terms while the *meaning* of a value is lost between two of them: a declared
-property the chosen kernel ignores, a setting that arrives under a name nobody reads any more, a cache that
-silently loses a token. The output is then wrong, fluently and without a warning.
+RoPE base and scaling, soft-capping, sliding windows, chat templates, prediction types: when one of these
+declarations does not reach the engine, the output is wrong without a warning. entail reads what the files already
+declare, checks it where it is used, repairs it before the first token when it can, and logs exactly what broke
+when it cannot. Zero configuration; about 1% of load time.
 
-The goal of entail is to make that meaning explicit, like a type:
-- declared where it is produced and carried to where it is used
-- checked against the consumer's choice and against the data
-- resolved first when they disagree — routed to a consumer that honours it, or converted to the form the consumer
-  reads — and, when no fix exists, reported as an error while the run goes on (it stops only if you ask it to)
-- said to be "unknown" when nobody declares it, instead of letting a default stand in silently
+- **64 of 180.** Of the 300 most-downloaded LLMs on Hugging Face, 180 take vLLM's launch-time `rope_scaling`
+  override (the usual way to turn on long context). It silently changes the RoPE base of 64 of them. With entail
+  on, all 180 keep their base. (vLLM 0.30, checked on the model files with vLLM's own config code;
+  [E1](https://github.com/wwoosshh/entail-research/blob/main/testbed/results/m10/E1_SUMMARY.md).)
+- **379 → 273.** Measured end to end, that is Llama-3.2-3B-Instruct's GSM8K score under that route (376 with entail
+  on); Qwen3-4B-Instruct-2507 goes 183 → 175 under YaRN. No warning in either case.
+- **Evals miss some of it.** A backend that drops Gemma 2's soft-capping changed 198 of 500 answers while GSM8K
+  moved by 3 (p = 0.66). entail routes to a backend that honours it, at load.
+- **No false alarm in 102 runs.** 38 popular models on transformers, vLLM and SGLang: every output identical to the
+  run without entail, load cost median 0.7-0.9%. (1.0.0 got 17 of its first 81 runs wrong; the five causes are
+  fixed and in the [changelog](CHANGELOG.md).)
 
-The name is the logical sense of *entail*: what a checkpoint declares must entail what the engine executes.
-(ent·**AI**·**L** — an AI library.)
+Check your own model in three lines:
+
+```bash
+pip install entail-ai
+entail preflight --model /path/to/model --engine vllm --list   # what each backend would drop; no GPU needed
+ENTAIL=load vllm serve /path/to/model ...                       # then read entail_logs/
+```
+
+entail makes the meaning of a value explicit, like a type: declared where it is produced and carried to where it is
+used; checked against the consumer's choice and against the data; resolved first when they disagree (routed to a
+consumer that honours it, or converted to the form the consumer reads) and, when no fix exists, reported while the
+run goes on (it stops only if you ask it to); said to be "unknown" when nobody declares it, instead of letting a
+default stand in silently. The name is the logical sense of *entail*: what a checkpoint declares must entail what
+the engine executes. (ent·**AI**·**L**: an AI library.)
 
 > **Status: 1.0.1, measured on one machine.** Everything below was measured on the engines and versions under
 > [Tested with](#tested-with), on one RTX 4070 Ti. The 1.0 evaluation is summarised under
