@@ -269,9 +269,10 @@ For 1.0 every measurement of the development milestones was run again on the fin
   tile) and reports the other 2 at their boundary (the padding token type, the second vocabulary). The 3 out of
   the class (a CUDA-graph weak reference, a parser's streaming logic, a scheduler's arithmetic) are, as designed,
   not flagged. A fifth, the stop-id class, was replayed on transformers (table above). The 38 popular models on
-  three engines again (102 valid runs): no `broken`, no `refused`, the same two repairs, outputs identical in 99 of
-  100 comparisons (the one difference is an engine's own nondeterminism), 76 `unknown` lines in all, the library's
-  share of load time 1.2% at the median and 7.8% at the 90th percentile. Statically over 230 popular model
+  three engines again (102 valid runs): no `broken`, no `refused`, the same two repairs plus seven where a
+  declared end was added to an engine's stop set, outputs identical in 94 of 95 comparisons without a repair (the
+  one difference is an engine's own nondeterminism), 69 `unknown` lines in all, the library's share of load time
+  1.4% at the median and 9.4% at the 90th percentile. Statically over 230 popular model
   folders: no false `broken` from the new facts.
 - **31 test problems** (16 reproduction cases, 8 field cases, 7 simulated market incidents): each defect was
   repaired; where no repair exists, it was reported at the boundary and fact where it happened while the run

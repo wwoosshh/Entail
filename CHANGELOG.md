@@ -71,7 +71,14 @@ Unreleased. A new fact, from the low-level study (codebook v2): a class of wrong
   generation_config.json), so an end one file declares can be one the engine never sees and the model runs past
   the end of its answer (Llama 3, April 2024). `stops_contract.py` takes the union: a consumer whose set lacks a
   declared end is resolved by adding it (adapters `transformers_stops`, `vllm_stops`, `sglang_stops`), a declared
-  id past the tokenizer is broken; `entail check` decides the set each engine would build.
+  id past the tokenizer is broken; `entail check` decides the set each engine would build. The tokenizer's own
+  declaration (`eos_token` in tokenizer_config.json) is read as an id by that file's added-token table, without
+  building a tokenizer. Measured: a Llama-3.2-3B-Instruct copy whose generation_config.json names only
+  `<|end_of_text|>` ran every answer to the token limit on transformers 5.17 and stops at the end with entail; and
+  nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16 as shipped does the same (its config.json and auto-written
+  generation_config.json name `</s>`, its tokenizer and chat template `<|im_end|>`): three answers ran to 160
+  tokens without entail, and stopped at 46, 63 and 56 with it. Over 230 popular folders, `entail check` finds no
+  id past a tokenizer and would add a dropped end on transformers for 8 folders, on SGLang for 4 and on vLLM for 2.
 
 **Changed**
 - Config coverage: a key the class does not take but the vocabulary maps and compares elsewhere (Qwen2.5 and Qwen3
@@ -100,9 +107,11 @@ research workspace): the four in-class defects of the M10 E3 sample are blocked 
 sglang#39626) or reported at their boundary (2: vllm#58138, transformers#48967), where 1.0.0 passed all four; the
 three out-of-class ones are, as designed, not flagged. On 38 popular models x 3 engines (102 valid runs, each
 engine's defaults): no run broken by entail, 0 broken or refused decisions, 2 resolved decisions backed by a
-measured row (Gemma 2's softcap), outputs identical to the run without entail in 99 of 100 comparisons (the one
-difference is an engine's own nondeterminism, seen off-vs-off too), 76 unknown lines in all (from 364 before the
-Coverage change and the once-per-process record), the library's share of load time 1.2% median. Statically over
+measured row (Gemma 2's softcap) and, once `Stops` was in, 7 more where a file's declared end was added to an
+engine's stop set (Nemotron-3-Nano-4B on transformers and SGLang; a tiny test model on all three), outputs
+identical to the run without entail in 94 of 95 comparisons without a repair (the one difference is an engine's
+own nondeterminism, seen off-vs-off too), 69 unknown lines in all (from 364 before the Coverage change and the
+once-per-process record), the library's share of load time 1.4% at the median and 9.4% at the 90th percentile. Statically over
 230 popular configs: Coverage, Vocab and Rotary broken 0 (Rotary pass 196, unknown 6: DeepSeek-V4's per-layer split
 and `attn_factor`, both said as not compared). The Identity hook fires only on streaming-session updates, which
 ordinary generation never triggers.
