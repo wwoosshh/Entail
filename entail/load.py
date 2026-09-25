@@ -157,6 +157,23 @@ def declare_on(config, fact: Fact, path: Optional[str] = None) -> None:
     os.environ[ENV_DECLARED] = json.dumps(data)
 
 
+def local_folder(name, revision=None, cache_dir=None) -> Optional[str]:
+    """The local folder a model name stands for: the path itself, or the huggingface_hub cache folder a hub id was
+    downloaded to. Only the local cache is asked: nothing is downloaded here (M15.3; the diffusers adapter did the
+    same for pipelines in M11.6). None when neither is there."""
+    if not isinstance(name, str) or not name:
+        return None
+    if os.path.isdir(os.path.expanduser(name)):
+        return os.path.expanduser(name)
+    try:
+        from huggingface_hub import snapshot_download
+
+        folder = snapshot_download(repo_id=name, revision=revision, cache_dir=cache_dir, local_files_only=True)
+    except Exception:  # noqa: BLE001 - not cached, or no huggingface_hub: the caller reports "not checked"
+        return None
+    return folder if isinstance(folder, str) and os.path.isdir(folder) else None
+
+
 def _declared_in_env(path) -> List[Fact]:
     from .manifest import value_from_json
 

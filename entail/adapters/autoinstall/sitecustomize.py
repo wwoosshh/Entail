@@ -37,7 +37,10 @@ TARGETS = {
     "vllm.entrypoints.openai.chat_completion.serving": ["entail.adapters.vllm_serve:install_serving"],
     # The chat template where transformers' tokenizers apply it (a script's, SGLang's server; M9.3), and SGLang's
     # server when it renders with a conversation template of its own instead.
-    "transformers.tokenization_utils_base": ["entail.adapters.transformers_template"],
+    # ... and the tokenizer itself against the model's vocabulary (M15.3): one key, both adapters (a dict literal
+    # keeps only the last value of a repeated key, which silently dropped the second adapter once).
+    "transformers.tokenization_utils_base": ["entail.adapters.transformers_template",
+                                             "entail.adapters.transformers_tokenizer"],
     "sglang.srt.entrypoints.openai.serving_chat": ["entail.adapters.sglang_serve"],
     # ComfyUI (M6.2): the loaders keep what a checkpoint declares with its model, the LoRA contract sits where LoRAs
     # are applied, the prediction and latent scale are decided at sampling; the node hook only names the LoRA file.

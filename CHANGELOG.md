@@ -30,6 +30,16 @@ Unreleased. A new fact, from the low-level study (codebook v2): a class of wrong
   SGLang's shipped tuned configs (1,887 entries) all divide, so ordinary runs decide nothing.
 - Records name a transformers config by its class and quote the file's own `_name_or_path` as the file's claim,
   since that field can be stale (a checkpoint copied from another model).
+- Fact vocabulary v6: `Vocab` (MAPPING) — the tokenizer's base vocabulary. `vocab_contract.py` reads what a model
+  folder declares (tokenizer.json, vocab.txt, vocab.json, a sentencepiece model, config vocab_size, the embedding's
+  rows) and decides the tokenizer the engine built against it, with two rules and no threshold: the tokenizer's ids
+  must fit the embedding, and when the folder carries two vocabularies the engine must hold the model's. Adapter
+  `transformers_tokenizer` wraps `PreTrainedTokenizerBase.from_pretrained` (vLLM and SGLang build their tokenizers
+  through it too); `entail check` runs the same rule statically. transformers#48967 (a folder with vocab.txt of
+  100,000 and a tokenizer.json of 32,000; transformers 5 built the 32,000 one and the ids changed): reported as
+  broken, refused before the first id under `ENTAIL_ON_BROKEN=stop`, exit 1 from `entail check`.
+- Start-up hook: the target table had the tokenizer module keyed twice, so the second adapter was silently dropped;
+  one entry now, and a test guards the table against repeated keys.
 
 Older facts and files still read (`READABLE_VERSIONS`). Not yet measured for this release: normal-run false alarms
 across the 38-model set (S3) and the steady-state cost (S4); the hook fires only on streaming-session updates, which

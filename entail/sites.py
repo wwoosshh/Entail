@@ -94,6 +94,32 @@ def check_static(model_path: str, engine: str, settings: dict):
     if facts.get("Layout"):
         checks.append(("layout", lambda: load.layout(f"{engine}.linear.unknown", facts, table,
                                                      observe.scale_format(path), policy)))
+
+    def tokenizer():
+        """The tokenizer transformers builds for the folder against the model's vocabulary (M15.3). vLLM and SGLang
+        build theirs through the same AutoTokenizer, so the static verdict stands for the three engines."""
+        from . import vocab_contract
+
+        size = n = None
+        where = "no tokenizer built"
+        was = core.mode()
+        try:
+            core.set_mode("off")
+            from transformers import AutoTokenizer
+
+            tok = AutoTokenizer.from_pretrained(path, trust_remote_code=False, local_files_only=True)
+            size, n = getattr(tok, "vocab_size", None), len(tok)
+            where = f"{type(tok).__name__} built by transformers from the folder"
+        except ImportError:
+            notes.append("transformers is not installed: the tokenizer is not built; its files are read alone")
+        except Exception as e:  # noqa: BLE001 - reported; the files are still compared with each other
+            notes.append(f"transformers could not build the tokenizer ({type(e).__name__}: {e})")
+        finally:
+            core.set_mode(was)
+        return vocab_contract.check(f"load:{engine}.tokenizer", f"{engine}.tokenizer", path, size, n, where,
+                                    policy=policy, record=False)
+
+    checks.append(("tokenizer", tokenizer))
     for label, run in checks:
         try:
             model += run()

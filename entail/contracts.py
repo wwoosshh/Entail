@@ -87,6 +87,10 @@ RULES = {
     "identity_stale": "the identity a store holds no longer stands for what the item holds now",
     # a kernel's tile against the block the values are quantized in (tile_contract.py, M15.2)
     "tile_over_block": "the kernel steps a dimension in a tile that is not a divisor of the quantization block",
+    # the tokenizer the engine holds against the model's vocabulary (vocab_contract.py, M15.3)
+    "vocab_out_of_range": "the tokenizer can produce ids the model's embedding has no row for",
+    "vocab_not_the_models": "the folder declares two vocabularies and the engine loaded the one that is not the "
+                            "model's",
 }
 
 

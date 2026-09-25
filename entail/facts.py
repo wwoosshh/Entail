@@ -337,6 +337,25 @@ class KernelConfig:
             raise ValueError("KernelConfig.tile_k: required")
 
 
+@dataclass(frozen=True)
+class Vocab:
+    """The vocabulary a tokenizer holds: how many base tokens (v6, M15.3; codebook v2 G).
+
+    A model folder can carry two tokenizers (vocab.txt with 100,000 entries and a tokenizer.json with 32,000, from
+    another model) and the engine picks one by its own precedence; the model's vocabulary is what its config and its
+    embedding rows say. A tokenizer that is not the model's produces ids that mean other tokens, silently
+    (transformers#48967). `size` is the base vocabulary (without added tokens); `added` the added tokens, when known.
+    """
+    size: int
+    added: Optional[int] = None
+
+    def __post_init__(self):
+        _number("Vocab", "size", self.size, 0, integer=True, strict=True)
+        _number("Vocab", "added", self.added, 0, integer=True)
+        if self.size is None:
+            raise ValueError("Vocab.size: required")
+
+
 TOKEN_ROLES = frozenset({"pad"})
 
 
@@ -401,11 +420,12 @@ VOCABULARY = {
     "KvExtent": "RANGE", "ModelProps": "PROPERTY", "Prediction": "PROPERTY", "LatentScale": "PROPERTY",
     "Template": "PROPERTY", "Coverage": "MAPPING", "TokenType": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME",
     "Identity": "TIME", "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE", "KernelConfig": "LAYOUT",
+    "Vocab": "MAPPING",
 }
 _HERE = {"Layout": Layout, "Quantized": Quantized, "Rotary": Rotary, "Positions": Positions, "Valid": Valid,
          "ModelProps": ModelProps, "Prediction": Prediction, "LatentScale": LatentScale, "Template": Template,
          "TokenType": TokenType, "Reduction": Reduction, "Epoch": Epoch, "Identity": Identity, "Assumed": Assumed,
-         "Origin": Origin, "KernelConfig": KernelConfig}
+         "Origin": Origin, "KernelConfig": KernelConfig, "Vocab": Vocab}
 
 
 def vocabulary_class(name):

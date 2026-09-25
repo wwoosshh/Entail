@@ -25,7 +25,7 @@ ADAPTERS = os.path.join(os.path.dirname(HERE), "entail", "adapters")
 V2 = ("transformers_adapter", "transformers_config", "sglang_adapter", "vllm_attention", "vllm_loader",
       "vllm_source", "rope_alias", "vllm_layout", "cache_contract", "vllm_cache_contract", "sglang_cache_contract",
       "vllm_serve", "comfyui", "diffusers_adapter", "transformers_template", "sglang_serve", "vllm_identity",
-      "vllm_scoring", "sglang_fp8_tile")
+      "vllm_scoring", "sglang_fp8_tile", "transformers_tokenizer")
 # Not yet on the v2 interface: where they move, and why they have not yet. Empty since M9.3, when the research tools
 # (fault injection, the layout ledger, a probe) left the package.
 LEGACY = {}
@@ -34,7 +34,7 @@ ENGINE_SPECIFIC = {   # repairs of one engine's own defect: not contracts of ent
 }
 NOT_ADAPTERS = ("__init__", "base")
 ALLOWED = {"load": None, "kv_contract": None, "epochs": None, "identity_contract": None, "tile_contract": None,
-           "request_contract": None, "policies": {"current"}, "core": {"mode"},
+           "vocab_contract": None, "request_contract": None, "policies": {"current"}, "core": {"mode"},
            "readers": {"rotary_of", "config_dict", "prediction_kind", "lora_modules", "is_text_module", "lora_base"},
            "facts": None, "base": {"Hook"}}
 REQUIRED = ("hooks", "read_choice", "handles", "install", "engine", "versions")
