@@ -94,8 +94,14 @@ def test_ids_past_the_embedding_are_broken():
 
 
 def test_a_tokenizer_from_nowhere_in_the_folder_is_unknown_not_broken():
-    d = one(vocab_contract.check(B, C, folder(tokenizer_json=10, config_vocab=12, rows=12), 7, 7, "t", record=False))
+    # two tokenizer sources of one size, and the engine's tokenizer holds a third: nothing here names its source
+    d = one(vocab_contract.check(B, C, folder(tokenizer_json=10, vocab_txt=10, config_vocab=12, rows=12), 7, 7, "t",
+                                 record=False))
     assert d.verdict is Verdict.UNKNOWN and "cannot be told" in d.note, d
+    # with tokenizer.json as the only tokenizer source it is not counted (the engine built from it; M15.6 cost), so
+    # the engine's count stands and the folder's rows are the only thing to compare with
+    d = one(vocab_contract.check(B, C, folder(tokenizer_json=10, config_vocab=12, rows=12), 7, 7, "t", record=False))
+    assert d.verdict is Verdict.PASS and "the only tokenizer source" in d.declared.source.where, d
 
 
 def test_nothing_to_compare_with_is_unknown():
@@ -182,6 +188,50 @@ def test_a_tokenizer_built_from_a_folder_without_tokenizer_files_is_unknown_not_
     # a size that IS the model's passes even without a source (nothing contradicts it)
     d = one(vocab_contract.check(B, C, folder(config_vocab=50257), 50257, 50257, "GPT2Tokenizer", record=False))
     assert d.verdict is Verdict.PASS, d
+
+
+
+def test_a_folder_with_only_tokenizer_json_is_not_parsed_and_the_engines_count_stands():
+    """S4 (M15.6): parsing 2-33 MB of tokenizer.json three or four times a run took the load share to 6%; with no
+    second source there is nothing to compare its count with, so it is not counted."""
+    f = folder(tokenizer_json=10, config_vocab=12, rows=12)
+    s = vocab_contract.sources(f)
+    assert s.candidates == [(None, "tokenizer.json (the only tokenizer source; the engine's own count stands)")], s
+    d = one(vocab_contract.check(B, C, f, 10, 10, "t", record=False))
+    assert d.verdict is Verdict.PASS and d.declared.value == Vocab(size=10) and "tokenizer.json" in d.declared.source.where
+    # with a second source it IS counted
+    s = vocab_contract.sources(folder(tokenizer_json=5, vocab_txt=8, config_vocab=8, rows=8))
+    assert sorted(s.candidates) == [(5, "tokenizer.json (model.vocab)"), (8, "vocab.txt")], s.candidates
+
+
+def test_a_folder_is_read_once_per_process_and_again_when_a_file_changes():
+    f = folder(tokenizer_json=5, vocab_txt=8, config_vocab=8, rows=8)
+    a = vocab_contract.sources(f)
+    assert vocab_contract.sources(f) is a                       # the in-process cache
+    import time
+    time.sleep(1.1)                                              # mtime resolution
+    open(os.path.join(f, "vocab.txt"), "a", encoding="utf-8").write("w8\nw9\n")
+    b = vocab_contract.sources(f)
+    assert b is not a and (10, "vocab.txt") in b.candidates, b.candidates
+
+
+def test_the_cross_process_cache_is_written_and_read_back():
+    import tempfile as _tf
+    logs = _tf.mkdtemp()
+    os.environ["ENTAIL_LOG_DIR"] = logs
+    try:
+        vocab_contract._FILE_CACHE = None
+        f = folder(tokenizer_json=5, vocab_txt=8, config_vocab=8, rows=8)
+        a = vocab_contract.sources(f)
+        assert os.path.isfile(os.path.join(logs, vocab_contract.CACHE_NAME))
+        vocab_contract._CACHE.clear()
+        vocab_contract._FILE_CACHE = None                        # another process: the file, not the memory
+        b = vocab_contract.sources(f)
+        assert b.candidates == a.candidates and b.rows == a.rows and b is not a
+    finally:
+        os.environ.pop("ENTAIL_LOG_DIR", None)
+        vocab_contract._FILE_CACHE = None
+        vocab_contract._CACHE.clear()
 
 
 if __name__ == "__main__":

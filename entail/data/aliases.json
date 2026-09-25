@@ -31,7 +31,7 @@
    "yarn": "yarn",
    "longrope": "longrope",
    "llama3": "llama3",
-   "mrope": "mrope",
+   "mrope": "default",
    "proportional": "proportional"
   },
   "fp8_format": {

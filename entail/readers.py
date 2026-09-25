@@ -241,22 +241,35 @@ def read_hf_dict(cfg, label, source_kind="config", from_object=False):
             # Any other split stays outside the vocabulary.
             names = set(params)
             if names <= {"full_attention", "sliding_attention"} and "full_attention" in params:
-                full, local = params["full_attention"], params.get("sliding_attention") or {}
+                full, local = params["full_attention"], params.get("sliding_attention")
+                has_local = isinstance(local, dict)
+                local = local if has_local else {}
                 _, theta = _first(full, rk["theta"])
                 _, ltheta = _first(local, rk["theta"])
                 _, ltype = _first(local, rk["type"])
                 _, lfactor = _first(local, rk["factor"])
-                local_scaled = ltype is not None and str(ltype).lower() != "default"
-                if lfactor is not None and not local_scaled:
-                    local_scaled = True   # a factor with no type: the file means scaling
-                extra = sorted(k for k in local if k not in rk["theta"] + rk["type"] + rk["factor"]
-                               + rk["partial_rotary_factor"] and local[k] is not None)
+                _, ftype = _first(full, rk["type"])
+                # the local layers' scaling type is not a field of v6: the same type as the global RoPE (or none) is
+                # carried by local_factor alone; any other is reported, not dropped (M15.7 review)
+                if ltype is not None and str(ltype).lower() not in ("default", str(ftype or "default").lower()):
+                    r.problems.append(f"{file}#{prefix}{pkey}.sliding_attention: the local layers' scaling type "
+                                      f"{ltype!r} (global: {ftype!r}) is not in vocabulary v{VOCAB_VERSION}")
+                # a local partial_rotary_factor equal to the global one is the same fact; a different one is beyond
+                # v6 and reported (M15.7 review: a local partial was dropped without a word)
+                _, fpartial = _first(full, rk["partial_rotary_factor"])
+                _, lpartial = _first(local, rk["partial_rotary_factor"])
+                same_partial = lpartial is None or lpartial == (fpartial if fpartial is not None else partial)
+                skip = rk["theta"] + rk["type"] + rk["factor"] + (rk["partial_rotary_factor"] if same_partial else ())
+                extra = sorted(k for k in local if k not in skip and local[k] is not None)
                 if extra:
                     r.problems.append(f"{file}#{prefix}{pkey}.sliding_attention: keys {extra} beyond the local "
                                       f"base and scaling are not in vocabulary v{VOCAB_VERSION}")
+                # local_factor: the local layers' scaling; a stated local RoPE without a factor is unscaled, 1.0 - a
+                # definite value an engine can lose by scaling both (M15.7 review: None was not compared); None only
+                # when the file states no local RoPE
                 _rotary(r, full, theta, None, f"{file}#{prefix}{pkey}", source_kind,
                         local_theta=ltheta if ltheta is not None else local_theta,
-                        local_factor=(lfactor if lfactor is not None else 1.0) if local_scaled else None, **top)
+                        local_factor=(float(lfactor) if lfactor is not None else 1.0) if has_local else None, **top)
             else:
                 r.problems.append(f"{file}#{prefix}{pkey}: RoPE set per layer type ({sorted(params)}) "
                                   f"is not in vocabulary v{VOCAB_VERSION}")

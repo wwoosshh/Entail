@@ -112,10 +112,13 @@ class Quantized:
 # --- FRAME ----------------------------------------------------------------------------------------------------
 
 POSITION_FRAMES = frozenset({"absolute", "chunk_relative"})
-ROPE_TYPES = frozenset({"default", "linear", "dynamic", "yarn", "longrope", "llama3", "mrope", "proportional"})
-# proportional (v6, M15.7 sweep: the Gemma 4 family, 5 of 230): scaling in proportion to the position, with `factor`
-# mrope (v6, M15.7 sweep: 25 of the 230 most-downloaded models, the Qwen-VL family): the rotary dimensions split
-# among time, height and width, and whether the split interleaves
+ROPE_TYPES = frozenset({"default", "linear", "dynamic", "yarn", "longrope", "llama3", "proportional"})
+# proportional (v6, M15.7 sweep: the Gemma 4 family, 5 of 230): transformers derives the frequencies from the head
+# dimension and partial_rotary_factor, so those (and the base) are what an engine can lose
+# mrope (v6, M15.7 sweep: 27 of 230, the Qwen-VL and Qwen3.5 families) is NOT a type name here: transformers 5
+# normalises the old spelling {"type": "mrope"} to rope_type "default" in the object it holds and vLLM knows no
+# scaling type "mrope" (M15.7 review), so the fact of mrope is its section - the rotary dimensions split among
+# time, height and width - and whether the split interleaves (Rotary.mrope_section, mrope_interleaved)
 
 
 @dataclass(frozen=True)

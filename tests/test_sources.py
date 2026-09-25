@@ -93,7 +93,7 @@ def test_hf_config_rope_parameters_and_the_old_names():
     got, r = facts_of(folder({"config.json": {"rope_parameters": {
         "full_attention": {"rope_theta": 1e6, "rope_type": "linear", "factor": 8.0},
         "sliding_attention": {"rope_theta": 1e4}}}}))
-    assert got == {("Rotary", Rotary("linear", theta=1e6, factor=8.0, local_theta=1e4))}, got
+    assert got == {("Rotary", Rotary("linear", theta=1e6, factor=8.0, local_theta=1e4, local_factor=1.0))}, got
     assert not any("per layer type" in p for p in r.problems), r.problems
     # any other split per layer type is still outside the vocabulary
     _, r = facts_of(folder({"config.json": {"rope_parameters": {"layer_a": {"rope_theta": 1e6},
@@ -273,7 +273,9 @@ def test_phis_top_level_rope_keys_and_gemma3s_local_scaling_are_read():
         "full_attention": {"rope_theta": 1e6, "rope_type": "linear", "factor": 8.0},
         "sliding_attention": {"rope_theta": 1e4, "rope_type": "default"}}}}))
     [clean] = [v for n, v in got if n == "Rotary"]
-    assert clean.local_factor is None and clean.local_theta == 1e4, clean
+    # "no scaling on the local layers" is declared as the value 1.0, not left open: an open field is not compared,
+    # so an engine that scaled the local layers would have passed (M15.7 review)
+    assert clean.local_factor == 1.0 and clean.local_theta == 1e4, clean
     got, _ = facts_of(folder({"config.json": {"rope_parameters": {
         "full_attention": {"rope_theta": 1e6, "rope_type": "linear", "factor": 8.0},
         "sliding_attention": {"rope_theta": 1e4, "rope_type": "linear", "factor": 8.0}}}}))
@@ -288,7 +290,13 @@ def test_mrope_of_the_qwen_vl_family_is_in_the_vocabulary():
     got, r = facts_of(folder({"config.json": {"text_config": {"rope_theta": 1e6, "rope_scaling": {
         "rope_type": "mrope", "mrope_section": [16, 24, 24], "mrope_interleaved": True}}}}))
     [rot] = [v for n, v in got if n == "Rotary"]
-    assert rot.rope_type == "mrope" and rot.mrope_section == (16, 24, 24) and rot.mrope_interleaved is True, rot
+    # the type name is normalised to "default" (transformers 5 does that in the object it holds; vLLM knows no
+    # scaling type "mrope"): the fact of mrope is its section, not the spelling (M15.7 review)
+    assert rot.rope_type == "default" and rot.mrope_section == (16, 24, 24) and rot.mrope_interleaved is True, rot
+    got, _ = facts_of(folder({"config.json": {"rope_theta": 1e6, "rope_scaling": {"type": "mrope",
+                                                                               "mrope_section": [16, 24, 24]}}}))
+    [old_spelling] = [v for n, v in got if n == "Rotary"]
+    assert old_spelling.rope_type == "default" and old_spelling.mrope_section == (16, 24, 24), old_spelling
     assert not any("not in vocabulary" in p for p in r.problems), r.problems
 
 

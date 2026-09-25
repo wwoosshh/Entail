@@ -35,11 +35,79 @@ EMBEDDING_SUFFIXES = ("embed_tokens.weight", "word_embeddings.weight", "wte.weig
 
 @dataclass
 class Sources:
-    candidates: List[Tuple[int, str]] = field(default_factory=list)   # (base size, where) per tokenizer source
+    # (base size, where) per tokenizer source; a size of None is a source that is present but not counted
+    # (tokenizer.json alone: the engine's own source, whose count the engine's tokenizer already carries)
+    candidates: List[Tuple[Optional[int], str]] = field(default_factory=list)
     rows: Optional[int] = None            # the embedding's rows (verified) or config.json's vocab_size (declared)
     rows_where: str = ""
     rows_verified: bool = False
     problems: List[str] = field(default_factory=list)
+
+
+WATCHED = ("tokenizer.json", "vocab.txt", "vocab.json", "tokenizer.model", "spiece.model", "sentencepiece.bpe.model",
+           "config.json", "model.safetensors", "model.safetensors.index.json")
+_CACHE: dict = {}          # folder -> (stamp, Sources): a folder is read once per process (S4: vLLM and SGLang build
+#                            the tokenizer three or four times per run, in several processes)
+_FILE_CACHE = None         # the cross-process cache (entail_logs/vocab_sources.json), read once per process
+CACHE_NAME = "vocab_sources.json"
+
+
+def _stamp(path) -> tuple:
+    out = []
+    for name in WATCHED:
+        try:
+            st = os.stat(os.path.join(path, name))
+            out.append((name, st.st_size, int(st.st_mtime)))
+        except OSError:
+            continue
+    return tuple(out)
+
+
+def _cache_path() -> Optional[str]:
+    try:
+        from . import record
+
+        folder = record.log_dir()
+    except Exception:  # noqa: BLE001 - no log folder: the in-process cache alone
+        return None
+    return os.path.join(folder, CACHE_NAME) if folder else None
+
+
+def _from_file_cache(path, stamp) -> Optional["Sources"]:
+    global _FILE_CACHE
+    p = _cache_path()
+    if p is None:
+        return None
+    if _FILE_CACHE is None:
+        try:
+            _FILE_CACHE = json.load(open(p, encoding="utf-8")) if os.path.isfile(p) else {}
+        except (ValueError, OSError):
+            _FILE_CACHE = {}
+    e = _FILE_CACHE.get(os.path.abspath(path))
+    if not e or [tuple(x) for x in e.get("stamp", [])] != list(stamp):
+        return None
+    return Sources(candidates=[(c[0], c[1]) for c in e["candidates"]], rows=e.get("rows"), rows_where=e.get("rows_where", ""),
+                   rows_verified=bool(e.get("rows_verified")), problems=list(e.get("problems", [])))
+
+
+def _to_file_cache(path, stamp, s: "Sources") -> None:
+    global _FILE_CACHE
+    p = _cache_path()
+    if p is None:
+        return
+    try:
+        if _FILE_CACHE is None:
+            _FILE_CACHE = json.load(open(p, encoding="utf-8")) if os.path.isfile(p) else {}
+        _FILE_CACHE[os.path.abspath(path)] = {"stamp": [list(x) for x in stamp], "candidates": [list(c) for c in s.candidates],
+                                              "rows": s.rows, "rows_where": s.rows_where,
+                                              "rows_verified": s.rows_verified, "problems": s.problems}
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = f"{p}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_FILE_CACHE, f)
+        os.replace(tmp, p)
+    except (ValueError, OSError):   # a cache that cannot be written is only a cost, never an error
+        pass
 
 
 def _spm_pieces(path) -> Optional[int]:
@@ -83,21 +151,49 @@ def _spm_pieces(path) -> Optional[int]:
 
 def sources(path, rows: Optional[Tuple[int, str]] = None) -> Sources:
     """What the folder declares about its vocabulary. `rows`: (embedding rows, where) read elsewhere - a
-    safetensors header fetched without the weights (the M15.7 static sweep) - taken as verified."""
+    safetensors header fetched without the weights (the M15.7 static sweep) - taken as verified.
+    A folder is read once per process and once per machine (a stamp of the watched files' sizes and mtimes keys the
+    in-process cache and entail_logs/vocab_sources.json): the read costs the JSON parse of tokenizer.json, which is
+    counted only when the folder holds a second tokenizer source to compare it with (M15.6: 173 ms a time, three or
+    four times a run, took the load share from under 1% to 6%)."""
+    stamp = _stamp(path)
+    hit = _CACHE.get(path)
+    if hit is not None and hit[0] == stamp and rows is None:
+        return hit[1]
+    if rows is None:
+        cached = _from_file_cache(path, stamp)
+        if cached is not None:
+            _CACHE[path] = (stamp, cached)
+            return cached
+    s = _read_sources(path, rows)
+    if rows is None:
+        _CACHE[path] = (stamp, s)
+        _to_file_cache(path, stamp, s)
+    return s
+
+
+def _read_sources(path, rows) -> Sources:
     s = Sources()
     if rows is not None:
         s.rows, s.rows_where, s.rows_verified = int(rows[0]), str(rows[1]), True
+    others = [n for n in ("vocab.txt", "vocab.json", "tokenizer.model", "spiece.model", "sentencepiece.bpe.model")
+              if os.path.isfile(os.path.join(path, n))]
     p = os.path.join(path, "tokenizer.json")
     if os.path.isfile(p):
-        try:
-            d = json.load(open(p, encoding="utf-8"))
-            vocab = (d.get("model") or {}).get("vocab")
-            if isinstance(vocab, (dict, list)):
-                s.candidates.append((len(vocab), "tokenizer.json (model.vocab)"))
-            else:
-                s.problems.append("tokenizer.json: no model.vocab to count")
-        except (ValueError, OSError) as e:
-            s.problems.append(f"tokenizer.json: {type(e).__name__}")
+        if not others:
+            # the only tokenizer source: the engine's tokenizer was built from it and carries its count; parsing
+            # 2-33 MB of JSON to count it again buys nothing
+            s.candidates.append((None, "tokenizer.json (the only tokenizer source; the engine's own count stands)"))
+        else:
+            try:
+                d = json.load(open(p, encoding="utf-8"))
+                vocab = (d.get("model") or {}).get("vocab")
+                if isinstance(vocab, (dict, list)):
+                    s.candidates.append((len(vocab), "tokenizer.json (model.vocab)"))
+                else:
+                    s.problems.append("tokenizer.json: no model.vocab to count")
+            except (ValueError, OSError) as e:
+                s.problems.append(f"tokenizer.json: {type(e).__name__}")
     p = os.path.join(path, "vocab.txt")
     if os.path.isfile(p):
         text = open(p, encoding="utf-8", errors="replace").read()
@@ -177,7 +273,9 @@ def check(boundary: str, consumer: str, path: str, tokenizer_size: Optional[int]
         held = Fact("Vocab", Vocab(size=int(tokenizer_size),
                                    added=None if tokenizer_len is None else max(0, int(tokenizer_len) - int(tokenizer_size))),
                     Source("engine", f"{where}: the tokenizer the engine holds"), Certainty.VERIFIED)
-        sizes = sorted({c[0] for c in s.candidates})
+        counted = [c for c in s.candidates if c[0] is not None]
+        uncounted = [c for c in s.candidates if c[0] is None]
+        sizes = sorted({c[0] for c in counted})
         model = s.rows
         rows_fact = None if model is None else Fact(
             "Vocab", Vocab(size=int(model)), Source("data" if s.rows_verified else "config", s.rows_where),
@@ -198,10 +296,10 @@ def check(boundary: str, consumer: str, path: str, tokenizer_size: Optional[int]
                                     f"the tokenizer's base vocabulary has {tokenizer_size} tokens; the model has "
                                     f"{model} rows ({s.rows_where})"))
         elif len(sizes) > 1:
-            named = ", ".join(f"{w} = {n}" for n, w in sorted(s.candidates))
+            named = ", ".join(f"{w} = {n}" for n, w in sorted(counted))
             # the model's tokenizer is the source whose size IS the model's vocabulary (its rows or vocab_size);
             # anything short of that equality is a judgment, and a judgment is said as unknown (M15.3 review)
-            mine = [c for c in s.candidates if model is not None and c[0] == model]
+            mine = [c for c in counted if model is not None and c[0] == model]
             if mine and int(tokenizer_size) == mine[0][0]:
                 decisions.append(Decision(contract, "Vocab", Verdict.PASS, RULES["match"],
                                           declared=Fact("Vocab", Vocab(size=mine[0][0]), Source("file", mine[0][1]),
@@ -223,9 +321,9 @@ def check(boundary: str, consumer: str, path: str, tokenizer_size: Optional[int]
         elif sizes and int(tokenizer_size) not in sizes:
             decisions.append(load.cannot_check(boundary, consumer, "Vocab",
                                                f"the folder's tokenizer source says {sizes[0]} tokens "
-                                               f"({s.candidates[0][1]}); the engine's tokenizer holds {tokenizer_size}: "
+                                               f"({counted[0][1]}); the engine's tokenizer holds {tokenizer_size}: "
                                                f"which source it was built from cannot be told", policy))
-        elif not sizes and model is not None and int(tokenizer_size) != int(model):
+        elif not s.candidates and model is not None and int(tokenizer_size) != int(model):
             # no tokenizer source in the folder to say which vocabulary this tokenizer holds, and its base size is
             # not the model's: transformers 5.17 builds a Qwen2Tokenizer of ONE base token from a folder that has
             # only tokenizer_config.json (the E1 static run), which is no tokenizer of the model - said as unknown,
@@ -236,8 +334,9 @@ def check(boundary: str, consumer: str, path: str, tokenizer_size: Optional[int]
                                                f"({s.rows_where}): not the model's tokenizer, and nothing here says "
                                                f"whose it is", policy))
         else:
-            src = Fact("Vocab", Vocab(size=sizes[0]), Source("file", s.candidates[0][1]), Certainty.DECLARED) \
-                if sizes else rows_fact
+            src = Fact("Vocab", Vocab(size=sizes[0]), Source("file", counted[0][1]), Certainty.DECLARED) if sizes \
+                else (Fact("Vocab", Vocab(size=int(tokenizer_size)), Source("file", uncounted[0][1]), Certainty.DECLARED)
+                      if uncounted else rows_fact)
             decisions.append(Decision(contract, "Vocab", Verdict.PASS, RULES["match"], declared=src, chosen=held))
         if past:
             decisions = [replace(d, note=(d.note + "; " if d.note else "") + past) if d.verdict is Verdict.PASS else d
