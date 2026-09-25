@@ -114,31 +114,37 @@ def sources(path) -> Sources:
                 s.candidates.append((n, f"{name} (sentencepiece pieces)"))
             else:
                 s.problems.append(f"{name}: not read as a sentencepiece model")
+    config_vocab = None
+    p = os.path.join(path, "config.json")
+    if os.path.isfile(p):
+        try:
+            d = json.load(open(p, encoding="utf-8"))
+            v = d.get("vocab_size") or (d.get("text_config") or {}).get("vocab_size")
+            if isinstance(v, int) and v > 0:
+                config_vocab = v
+        except (ValueError, OSError) as e:
+            s.problems.append(f"config.json: {type(e).__name__}")
     try:
         from . import observe
 
         ck = observe.Checkpoint(path)
-        names = []
+        chosen = None
         for suffix in EMBEDDING_SUFFIXES:
-            names = ck.find(suffix) if ck.tensors else []
-            if names:
+            for name in (ck.find(suffix) if ck.tensors else []):
+                shape = list(ck.tensors[name][2])
+                # the token embedding has at least the config's vocabulary of rows; a position or patch embedding
+                # under a similar name has far fewer (M15.3 review)
+                if shape and (config_vocab is None or int(shape[0]) >= config_vocab):
+                    chosen = (name, shape)
+                    break
+            if chosen:
                 break
-        if names:
-            shape = list(ck.tensors[names[0]][2])
-            if shape:
-                s.rows, s.rows_where, s.rows_verified = int(shape[0]), f"{names[0]} {shape} in the checkpoint", True
+        if chosen:
+            s.rows, s.rows_where, s.rows_verified = int(chosen[1][0]), f"{chosen[0]} {chosen[1]} in the checkpoint", True
     except Exception as e:  # noqa: BLE001 - no safetensors, or unreadable: the config stands in below
         s.problems.append(f"embedding rows not read: {type(e).__name__}")
-    if s.rows is None:
-        p = os.path.join(path, "config.json")
-        if os.path.isfile(p):
-            try:
-                d = json.load(open(p, encoding="utf-8"))
-                v = d.get("vocab_size") or (d.get("text_config") or {}).get("vocab_size")
-                if isinstance(v, int) and v > 0:
-                    s.rows, s.rows_where = v, "config.json vocab_size"
-            except (ValueError, OSError) as e:
-                s.problems.append(f"config.json: {type(e).__name__}")
+    if s.rows is None and config_vocab is not None:
+        s.rows, s.rows_where = config_vocab, "config.json vocab_size"
     return s
 
 
@@ -183,9 +189,9 @@ def check(boundary: str, consumer: str, path: str, tokenizer_size: Optional[int]
                                     f"({s.rows_where})"))
         elif len(sizes) > 1:
             named = ", ".join(f"{w} = {n}" for n, w in sorted(s.candidates))
-            mine = [c for c in s.candidates if model is not None and c[0] == model] or \
-                   ([max((c for c in s.candidates if model is None or c[0] <= model), key=lambda c: c[0])]
-                    if any(model is None or c[0] <= model for c in s.candidates) else [])
+            # the model's tokenizer is the source whose size IS the model's vocabulary (its rows or vocab_size);
+            # anything short of that equality is a judgment, and a judgment is said as unknown (M15.3 review)
+            mine = [c for c in s.candidates if model is not None and c[0] == model]
             if mine and int(tokenizer_size) == mine[0][0]:
                 decisions.append(Decision(contract, "Vocab", Verdict.PASS, RULES["match"],
                                           declared=Fact("Vocab", Vocab(size=mine[0][0]), Source("file", mine[0][1]),

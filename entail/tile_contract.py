@@ -23,6 +23,8 @@ from typing import List, Optional
 
 from . import tally as _tally
 
+inside_capture = _tally.inside_capture
+
 
 def divides(block_k: int, tile_k: int) -> bool:
     """Whether a K tile keeps the scale steps on the block boundaries."""

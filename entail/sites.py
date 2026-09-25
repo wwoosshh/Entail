@@ -107,8 +107,10 @@ def check_static(model_path: str, engine: str, settings: dict):
             core.set_mode("off")
             from transformers import AutoTokenizer
 
+            from .adapters import transformers_tokenizer
+
             tok = AutoTokenizer.from_pretrained(path, trust_remote_code=False, local_files_only=True)
-            size, n = getattr(tok, "vocab_size", None), len(tok)
+            size, n = transformers_tokenizer.read_choice(tok)
             where = f"{type(tok).__name__} built by transformers from the folder"
         except ImportError:
             notes.append("transformers is not installed: the tokenizer is not built; its files are read alone")

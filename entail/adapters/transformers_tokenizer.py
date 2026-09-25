@@ -23,12 +23,21 @@ def hooks():
 
 
 def read_choice(tokenizer):
-    """(base vocabulary size or None, length or None) of a built tokenizer."""
+    """(base vocabulary size or None, highest id + 1 or None) of a built tokenizer. The highest id is read from the
+    vocabulary itself when the tokenizer gives it (added tokens can sit past len()); else len() stands in."""
     size = getattr(tokenizer, "vocab_size", None)
+    n = None
     try:
-        n = len(tokenizer)
-    except Exception:  # noqa: BLE001 - a tokenizer without __len__
+        vocab = tokenizer.get_vocab() if hasattr(tokenizer, "get_vocab") else None
+        if isinstance(vocab, dict) and vocab:
+            n = max(int(v) for v in vocab.values()) + 1
+    except Exception:  # noqa: BLE001 - a vocabulary that cannot be listed
         n = None
+    if n is None:
+        try:
+            n = len(tokenizer)
+        except Exception:  # noqa: BLE001 - a tokenizer without __len__
+            n = None
     return (int(size) if isinstance(size, int) else None), (int(n) if isinstance(n, int) else None)
 
 
