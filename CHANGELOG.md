@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.0
+
+Unreleased. A new fact, from the low-level study (codebook v2): a class of wrong output that 1.0 did not read.
+
+**Added**
+- Fact vocabulary v5: `Identity` (TIME) — what a stored or cached item stands for, so a store keyed by identity does
+  not serve one sequence's KV under another's key. Rule `identity_stale` in `identity_contract.py`; the repair is to
+  forget the stale identities and let the store remake them.
+- vLLM adapter `vllm_identity`: wraps `Scheduler._update_request_as_session` and checks a request's prefix-cache
+  block hashes against the hashes its current tokens give, from the truncation point on. This is the class behind
+  vllm#49377 and #49449 (a streaming-session rebuild leaves stale block hashes; the fix PRs are unmerged, so it is
+  live in vLLM 0.30.0). Measured end to end on SmolLM2-135M: the stale hash is caught and repaired, and the wrong
+  output (a false 16-token cache hit) becomes the correct recomputed output. entail 1.0.0-1.0.2 passed it (E3 miss).
+
+Older facts and files still read (`READABLE_VERSIONS`). Not yet measured for this release: normal-run false alarms
+across the 38-model set (S3) and the steady-state cost (S4); the hook fires only on streaming-session updates, which
+ordinary generation never triggers.
+
 ## 1.0.2
 
 Released 2026-09-25. What an external review of 1.0.1 found, and what its readers will ask first.

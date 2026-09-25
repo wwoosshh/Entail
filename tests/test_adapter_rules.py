@@ -4,7 +4,8 @@ logic, and their size. Reads the source only; imports nothing. Run: python tests
 An adapter gives three things - hooks, read_choice, handles - and install/uninstall. What would make it a place for
 rules, and is therefore refused here:
   - importing from entail anything but the entry points: load (the load-time contracts, resolve, enforce),
-    kv_contract and epochs (the container contracts, M5.1 and M5.2), request_contract (the request contract, M5.3),
+    kv_contract, epochs and identity_contract (the container contracts, M5.1, M5.2 and M14), request_contract
+    (the request contract, M5.3),
     policies.current,
     core.mode, readers.rotary_of / config_dict / prediction_kind / lora_modules / is_text_module / lora_base (to turn
     what it read into a fact value, M6.2), facts (fact classes), base (Hook). Not caps, contracts, sources or
@@ -23,7 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ADAPTERS = os.path.join(os.path.dirname(HERE), "entail", "adapters")
 V2 = ("transformers_adapter", "transformers_config", "sglang_adapter", "vllm_attention", "vllm_loader",
       "vllm_source", "rope_alias", "vllm_layout", "cache_contract", "vllm_cache_contract", "sglang_cache_contract",
-      "vllm_serve", "comfyui", "diffusers_adapter", "transformers_template", "sglang_serve")
+      "vllm_serve", "comfyui", "diffusers_adapter", "transformers_template", "sglang_serve", "vllm_identity")
 # Not yet on the v2 interface: where they move, and why they have not yet. Empty since M9.3, when the research tools
 # (fault injection, the layout ledger, a probe) left the package.
 LEGACY = {}
@@ -31,8 +32,8 @@ ENGINE_SPECIFIC = {   # repairs of one engine's own defect: not contracts of ent
     "comfyui_repair": "ComfyUI's dynamic VRAM loader writes one object's schedule into another (Comfy-Org/ComfyUI#16490)",
 }
 NOT_ADAPTERS = ("__init__", "base")
-ALLOWED = {"load": None, "kv_contract": None, "epochs": None, "request_contract": None, "policies": {"current"},
-           "core": {"mode"},
+ALLOWED = {"load": None, "kv_contract": None, "epochs": None, "identity_contract": None, "request_contract": None,
+           "policies": {"current"}, "core": {"mode"},
            "readers": {"rotary_of", "config_dict", "prediction_kind", "lora_modules", "is_text_module", "lora_base"},
            "facts": None, "base": {"Hook"}}
 REQUIRED = ("hooks", "read_choice", "handles", "install", "engine", "versions")

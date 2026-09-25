@@ -12,8 +12,10 @@ v2 (M4.2) adds two optional fields to Layout, for the weights a loader repacks: 
 output features) and `scale_granularity` (how many values one scale covers). v3 (M5.3) adds Template.tool_call_format,
 the format a model writes its tool calls in, under names that do not belong to any engine (each engine's parsers are
 mapped to them in data/caps.json). v4 (M9.3) adds Rotary.low_freq_factor and high_freq_factor, llama3's scaling: the
-readers named them as not carried, and nothing said so while the model ran (M9.1, S1). Each version only adds
-optional fields, so an older fact is a newer fact with
+readers named them as not carried, and nothing said so while the model ran (M9.1, S1). v5 (M14) adds one class,
+Identity: what a stored or cached item stands for, so a store keyed by identity (vLLM's prefix-cache block hashes)
+does not serve one sequence's KV under another's key (codebook v2 I; vllm#49377, #49449). Each version only adds
+optional fields or whole classes, so an older fact is a newer fact with
 them open, and a fact written with an older version is still read (READABLE_VERSIONS); it may not state a field its
 version did not have (ADDED_IN).
 
@@ -24,8 +26,8 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Optional, Tuple
 
-VOCAB_VERSION = 4
-READABLE_VERSIONS = frozenset({1, 2, 3, 4})   # a later version only adds optional fields; what it adds is in ADDED_IN
+VOCAB_VERSION = 5
+READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5})   # a later version only adds optional fields or classes; fields in ADDED_IN
 ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("Template", "tool_call_format"): 3,
             ("Rotary", "low_freq_factor"): 4, ("Rotary", "high_freq_factor"): 4}
 
@@ -255,6 +257,36 @@ class Epoch:
             raise ValueError("Epoch.version: required")
 
 
+IDENTITY_OF = frozenset({"kv_block"})
+
+
+@dataclass(frozen=True)
+class Identity:
+    """What a stored or cached item stands for, so a later reader knows it is still the same thing (v5, M14).
+
+    A store keyed by identity - vLLM's prefix-cache block hashes - serves KV under this key. If the tokens the key
+    stands for change and the key does not, a later request whose prefix matches the OLD tokens is served the NEW
+    tokens' KV, silently (vllm#49377, #49449). The fact makes the key comparable with the identity the item's
+    current contents give.
+
+    of      the kind of item whose identity this is (closed set: kv_block)
+    index   which one (the block's position in the sequence)
+    key     the identity the engine holds for it, as a hex string
+    covers  how many tokens that identity stands for (informative; None when not known)
+    """
+    of: str
+    index: int
+    key: str
+    covers: Optional[int] = None
+
+    def __post_init__(self):
+        _closed("Identity", "of", self.of, IDENTITY_OF, optional=False)
+        _number("Identity", "index", self.index, 0, integer=True)
+        _number("Identity", "covers", self.covers, 0, integer=True)
+        if not isinstance(self.key, str) or not self.key:
+            raise ValueError(f"Identity.key: expected a non-empty string, got {self.key!r}")
+
+
 @dataclass(frozen=True)
 class Assumed:
     """The conditions a compiled artifact was specialised for, as sorted (name, value) pairs."""
@@ -324,12 +356,12 @@ FACT_KINDS = frozenset({"LAYOUT", "DTYPE", "FRAME", "RANGE", "PROPERTY", "MAPPIN
 VOCABULARY = {
     "Layout": "LAYOUT", "Quantized": "DTYPE", "Rotary": "FRAME", "Positions": "FRAME", "Valid": "RANGE",
     "KvExtent": "RANGE", "ModelProps": "PROPERTY", "Prediction": "PROPERTY", "LatentScale": "PROPERTY",
-    "Template": "PROPERTY", "Coverage": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME",
+    "Template": "PROPERTY", "Coverage": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME", "Identity": "TIME",
     "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE",
 }
 _HERE = {"Layout": Layout, "Quantized": Quantized, "Rotary": Rotary, "Positions": Positions, "Valid": Valid,
          "ModelProps": ModelProps, "Prediction": Prediction, "LatentScale": LatentScale, "Template": Template,
-         "Reduction": Reduction, "Epoch": Epoch, "Assumed": Assumed, "Origin": Origin}
+         "Reduction": Reduction, "Epoch": Epoch, "Identity": Identity, "Assumed": Assumed, "Origin": Origin}
 
 
 def vocabulary_class(name):

@@ -83,6 +83,8 @@ RULES = {
     "epoch_stale": "the value reads a buffer that was written after the value was made",
     "epoch_live": "a reader that reads later was handed a buffer that is written in place",
     "assumed_changed": "the artifact is reused under conditions it was not made for",
+    # identity of a stored item against the identity its contents give now (identity_contract.py, M14)
+    "identity_stale": "the identity a store holds no longer stands for what the item holds now",
 }
 
 

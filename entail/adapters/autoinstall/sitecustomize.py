@@ -28,6 +28,7 @@ TARGETS = {
     # Patched as soon as the selector has run, so attention.py imports the wrapped name.
     "vllm.v1.attention.selector": ["entail.adapters.vllm_attention"],
     "vllm.v1.core.kv_cache_manager": ["entail.adapters.vllm_cache_contract"],
+    "vllm.v1.core.sched.scheduler": ["entail.adapters.vllm_identity"],
     # The request boundary: the parser manager, the renderer and the chat server, each as soon as it has run.
     "vllm.parser.parser_manager": ["entail.adapters.vllm_serve:install_parsers"],
     "vllm.renderers.hf": ["entail.adapters.vllm_serve:install_render"],
