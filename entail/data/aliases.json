@@ -1,5 +1,5 @@
 {
- "_about": "Other names for the same fact, as data (LIBRARY_DESIGN.md 4.2; ROADMAP M2.1). Readers look their keys up here and normalise values with the value maps. '{arch}' is the GGUF architecture name.",
+ "_about": "Other names for the same fact, as data (LIBRARY_DESIGN.md 4.2; ROADMAP M2.1). Readers look their keys up here and normalise values with the value maps. '{arch}' is the GGUF architecture name. An alias is a name a CONSUMER reads for the same field (transformers, vLLM or SGLang code), never a name that merely looks like one: a name no engine reads (attn_factor, M15.6 review) stays outside the vocabulary, so the RoPE boundary says it is not compared instead of passing it.",
  "values": {
   "prediction_kind": {
    "v": "v",
@@ -135,8 +135,7 @@
     "beta_slow"
    ],
    "attention_factor": [
-    "attention_factor",
-    "attn_factor"
+    "attention_factor"
    ],
    "mscale": [
     "mscale"

@@ -167,6 +167,8 @@ def test_two_sources_neither_equal_to_the_model_are_unknown_not_judged():
     d = one(vocab_contract.check(B, C, folder(tokenizer_json=9, vocab_json=11, config_vocab=10, rows=10), 9, 9, "t",
                                  record=False))
     assert d.verdict is Verdict.UNKNOWN and "picks none" in d.note, d
+    # the size the engine holds IS one of the sources: the note names it, not "none of them" (M15.6 review)
+    assert "holds 9 (tokenizer.json (model.vocab))" in d.note and "cannot be told" in d.note, d.note
 
 
 

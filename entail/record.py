@@ -22,6 +22,7 @@ ENTAIL_LOG_DIR moves the folder, or turns the files off ("off"). A folder that c
 run goes on (principle 12).
 """
 import json
+import hashlib
 import os
 import sys
 import time
@@ -89,14 +90,49 @@ def say(text: str, console: bool = True) -> None:
                 f"{time.strftime('%Y-%m-%d %H:%M:%S')} pid {os.getpid()} {text}\n")
 
 
+def said_in_this_launch(key) -> bool:
+    """Whether a process of this launch already said the line with this key, and if not, remember it. A launch is
+    the first process that turned entail on (ENTAIL_RUN_ID, set at activation, inherited by the engine's child
+    processes) and its file is `said.txt` in the log folder: the first line is the launch id, the rest the keys said;
+    a new launch starts the file over. False - say it - when there is no launch id or no log folder (M15.6 review:
+    vLLM's two and SGLang's three processes each said the same unread keys)."""
+    run, folder = os.environ.get("ENTAIL_RUN_ID"), log_dir()
+    if not run or folder is None:
+        return False
+    path = os.path.join(folder, "said.txt")
+    digest = hashlib.sha256(repr(key).encode("utf-8")).hexdigest()[:20]
+    try:
+        lines = open(path, encoding="utf-8").read().split("\n") if os.path.isfile(path) else []
+        if lines and lines[0] == run:
+            if digest in lines[1:]:
+                return True
+            _append(path, digest + "\n")
+        else:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(run + "\n" + digest + "\n")
+    except OSError:
+        return False
+    return False
+
+
 def _shown(fact):
     value = "unknown" if fact.value is None else str(fact.value)
     return f"{value} ({fact.source}, {fact.certainty.value})"
 
 
 def line(decision) -> str:
-    """One line for one Decision."""
+    """One line for one Decision. The decision that names a config's unread keys is one short line - the boundary,
+    the file and the keys - since its full form (two Coverage values and every key read elsewhere, 700-900
+    characters) buried the names a user would act on (M15.6 review); the record holds the whole decision."""
+    from .contracts import RULES
+
     d, consumer = decision, decision.contract.consumer
+    if d.verdict.value == "unknown" and d.rule == RULES["declared_unread"] and not d.blocking:
+        clauses = [c for c in getattr(d, "note", "").split("; ") if c.startswith("not taken by the class and read by")]
+        keys = clauses[0].split(": ", 1)[1] if clauses and ": " in clauses[0] else "?"
+        where = d.declared.source.where if d.declared is not None else d.contract.consumer
+        return (f"[entail] unknown at {d.contract.boundary}: {where}: keys taken by neither the config class nor a "
+                f"reader entail knows: {keys} (the record holds the whole decision)")
     declared = f"declared {_shown(d.declared)}" if d.declared is not None else "nothing declared"
     used = f"{consumer} uses {_shown(d.chosen)}" if d.chosen is not None else f"what {consumer} uses is unknown"
     text = f"[entail] {d.verdict.value} at {d.contract.boundary}: {d.name} {declared}; {used}; rule: {d.rule}"

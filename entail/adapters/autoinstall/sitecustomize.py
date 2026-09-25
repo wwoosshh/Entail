@@ -15,6 +15,7 @@ it. So this waits for the exact module that defines the class to finish executin
 import importlib.util
 import os
 import sys
+import time
 
 # module that must finish importing -> ["adapter module[:function]", ...] to run once it has
 TARGETS = {
@@ -148,6 +149,9 @@ def activate():
     try:
         from entail import record
         record.log_dir()
+        # the launch id: the first process that turned entail on names it, the engine's child processes inherit it,
+        # and a line one of them said is not said again by another (record.said_in_this_launch; M15.6 review)
+        os.environ.setdefault("ENTAIL_RUN_ID", f"{os.getpid()}-{int(time.time())}")
     except Exception:  # noqa: BLE001 - a log folder that cannot be named does not stop the checks
         pass
     if not any(isinstance(f, _PatchAfterImport) for f in sys.meta_path):

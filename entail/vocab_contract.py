@@ -314,10 +314,14 @@ def check(boundary: str, consumer: str, path: str, tokenizer_size: Optional[int]
                                         f"({s.rows_where}), so {mine[0][1]} is the model's tokenizer and the engine "
                                         f"built the other one"))
             else:
+                which = [w for n, w in counted if n == int(tokenizer_size)]
+                holds = (f"the engine's tokenizer holds {tokenizer_size} ({which[0]})" if which
+                         else f"the engine's tokenizer holds {tokenizer_size}, which is none of them")
                 decisions.append(load.cannot_check(boundary, consumer, "Vocab",
-                                                   f"the folder declares {named}; the engine's tokenizer holds "
-                                                   f"{tokenizer_size}, which is none of them, and the model's "
-                                                   f"vocabulary ({model}) picks none", policy))
+                                                   f"the folder declares {named}; {holds}, and the model's vocabulary "
+                                                   f"({model}, {s.rows_where}) equals neither source, so it picks "
+                                                   f"none: which source is the model's tokenizer cannot be told",
+                                                   policy))
         elif sizes and int(tokenizer_size) not in sizes:
             decisions.append(load.cannot_check(boundary, consumer, "Vocab",
                                                f"the folder's tokenizer source says {sizes[0]} tokens "

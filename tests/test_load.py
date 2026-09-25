@@ -545,6 +545,83 @@ def test_enforce_once_for_an_owner_that_is_a_value():
     assert [x.note for x in load.LEDGER.decisions[n:]] == ["first", "first", "second", "first", "first"]
 
 
+def test_rotary_held_says_a_file_rope_the_vocabulary_cannot_read_instead_of_silence():
+    """M15.6 review: a split per layer type under names other than full/sliding attention, with no top-level base
+    (DeepSeek-V4's compress/main), gave no fact and no word; the boundary now says it cannot compare."""
+    d = model_folder({"architectures": ["X"], "rope_parameters": {"compress": {"rope_theta": 1e4, "rope_type": "default"},
+                                                                  "main": {"rope_theta": 1e6, "rope_type": "default"}}})
+    held = Held(rope_parameters={"compress": {"rope_theta": 1e4}, "main": {"rope_theta": 1e6}})
+    r = only(load.rotary_held("t", load.declared(d, held), held, LOAD))
+    assert r.verdict is Verdict.UNKNOWN and not r.blocking and "per layer type" in r.note and "not compared" in r.note, r
+    # a file with no RoPE at all still decides nothing
+    d2 = model_folder({"architectures": ["X"], "hidden_size": 8})
+    assert load.rotary_held("t", load.declared(d2, Held(rope_parameters={"rope_theta": 1e4})), Held(), LOAD) == []
+    shutil.rmtree(d)
+    shutil.rmtree(d2)
+
+
+def test_a_line_is_said_once_per_launch_across_processes():
+    """M15.6 review: vLLM's two and SGLang's three processes each said the same unread keys. A launch id in the
+    environment and said.txt in the log folder make the second process silent; the record keeps every decision."""
+    from entail import record
+    logs = tempfile.mkdtemp()
+    d = load.cannot_check("load:x.launch", "x.launch", "Layout", "nothing to read", Policy(mode="load"))
+    os.environ["ENTAIL_LOG_DIR"], os.environ["ENTAIL_RUN_ID"] = logs, "launch-1"
+    try:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            load.enforce([d])
+            load.enforce([d])           # as another process would: nothing in memory says it was said, the file does
+        assert out.getvalue().count("unknown at load:x.launch") == 1, out.getvalue()
+        assert len(load.LEDGER.decisions) >= 2 and load.LEDGER.decisions[-1] is d
+        os.environ["ENTAIL_RUN_ID"] = "launch-2"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            load.enforce([d])
+        assert out.getvalue().count("unknown at load:x.launch") == 1
+        assert open(os.path.join(logs, "said.txt"), encoding="utf-8").read().startswith("launch-2\n")
+        assert record.said_in_this_launch(("k",)) is False and record.said_in_this_launch(("k",)) is True
+    finally:
+        os.environ.pop("ENTAIL_LOG_DIR", None)
+        os.environ.pop("ENTAIL_RUN_ID", None)
+    assert record.said_in_this_launch(("k",)) is False      # no launch id: always said
+
+
+def test_provenance_keys_are_notes_not_losses_and_the_unread_line_is_short():
+    """M15.6 review: tool markers (unsloth_fixed, is_llama_config, transformers.js_config) are data, not unknowns;
+    the line for keys really unread names them in under 300 characters (it was 700-900), the record keeps all."""
+    from entail import record
+    known, resolved = {"vocab_size", "hidden_size"}, {"vocab_size": 10, "hidden_size": 8}
+    raw = {"vocab_size": 10, "hidden_size": 8, "unsloth_fixed": True, "is_llama_config": True,
+           "transformers.js_config": {"kv_cache_dtype": "float16"}}
+    r = only(load.config_keys("transformers", [("", raw, known, resolved)], "c", LOAD))
+    assert r.verdict is Verdict.PASS and "unsloth_fixed" in r.note and "read by no engine" in r.note, r
+    raw = {"vocab_size": 10, "hidden_size": 8, "attention_bias": False, "mlp_bias": False, "_commit_hash": "abc"}
+    r = only(load.config_keys("transformers", [("", raw, known, resolved)], "Phi3Config config.json", LOAD))
+    text = record.line(r)
+    assert r.verdict is Verdict.UNKNOWN and "attention_bias, mlp_bias" in text and len(text) < 300, text
+    assert "_commit_hash" not in text and "_commit_hash" in r.note and "Phi3Config config.json" in text, r.note
+    assert record.decision_json(r)["note"] == r.note
+
+
+def test_entail_check_compares_the_rope_the_class_builds():
+    """M15.6 review: the static check decided nothing about Rotary, so the 230-model static run said nothing about
+    the v6 fields. Needs transformers; skipped without it."""
+    try:
+        import transformers  # noqa: F401
+    except ImportError:
+        print("skip: transformers not installed")
+        return
+    d = model_folder({"model_type": "llama", "architectures": ["LlamaForCausalLM"], "hidden_size": 16,
+                      "num_attention_heads": 2, "num_hidden_layers": 1, "vocab_size": 32, "rope_theta": 500000.0,
+                      "rope_scaling": {"rope_type": "llama3", "factor": 32.0, "original_max_position_embeddings": 8192,
+                                       "low_freq_factor": 1.0, "high_freq_factor": 4.0}})
+    _, model, notes = sites.check_static(d, "transformers", {"attention": "sdpa"})
+    rot = [x for x in model if x.name == "Rotary"]
+    assert rot and rot[0].verdict is Verdict.PASS and rot[0].chosen.value.rope_type == "llama3", (rot, notes)
+    shutil.rmtree(d)
+
+
 def test_at_load_puts_them_together():
     d = model_folder(GEMMA, {"model.embed_tokens.weight": EMBED})
     decisions = sites.at_load(d, "sglang", {"attention": "flashinfer", "tie": True}, LOAD)

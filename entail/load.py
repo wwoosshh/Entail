@@ -413,6 +413,7 @@ def keys_taken(raw: dict, known: set, resolved: dict):
     Returns (taken, left, notes)."""
     survived = _scalars({k: v for k, v in resolved.items() if k in known})
     elsewhere = CONFIG_KEYS["read_elsewhere"]
+    provenance = CONFIG_KEYS.get("provenance_keys", {})
     suffixes = tuple(CONFIG_KEYS["provenance_suffixes"])
     taken, left, notes = [], [], []
     for k, v in raw.items():
@@ -427,6 +428,9 @@ def keys_taken(raw: dict, known: set, resolved: dict):
             taken.append(k)          # a dict moved into another field (rope_scaling into rope_parameters)
         elif k in elsewhere:
             notes.append(f"{k} ({elsewhere[k]})")
+            taken.append(k)
+        elif k in provenance:
+            notes.append(f"{k} ({provenance[k]})")
             taken.append(k)
         elif k.endswith(suffixes):
             notes.append(f"{k} (provenance of the tool that wrote the checkpoint)")
@@ -815,9 +819,14 @@ def rotary_held(engine: str, facts: Declared, config, policy: Optional[Policy] =
                               source_kind="engine", from_object=True)
     held = [f for f in r.facts if f.name == "Rotary"]
     boundary, consumer = f"load:{engine}.config.rope_parameters", f"{engine}.rotary_embedding"
+    if not declared_rot:
+        # the files declare a RoPE the vocabulary cannot read (a split per layer type under names other than
+        # full/sliding attention: DeepSeek-V4's compress/main): nothing to compare, and that is said rather than
+        # passed over (M15.6 review: such a folder was silent when it also lacked a top-level base)
+        unread = [p for p in facts.problems if "RoPE" in p or "rope_parameters" in p]
+        return [cannot_check(boundary, consumer, "Rotary", "; ".join(unread) + "; the RoPE the engine holds is not "
+                             "compared", policy)] if unread else []
     if not held:
-        if not declared_rot:
-            return []
         why = "; ".join(p for p in r.problems if "RoPE" in p or "rope" in p.lower()) or \
             "the config the engine holds has no RoPE parameters vocabulary v1 can read"
         return [cannot_check(boundary, consumer, "Rotary", why, policy)]
@@ -1079,6 +1088,8 @@ def enforce(decisions: Sequence[Decision], quiet_pass: Optional[bool] = None, on
         console = not (quiet and d.verdict is Verdict.UNKNOWN and not d.blocking)
         if not console:
             _quiet_notice()
+        elif not d.blocking and _record.said_in_this_launch(_same(d)):
+            console = False   # another process of this launch (vLLM's engine core, SGLang's workers) said it
         _record.say(_record.line(d), console=console)
     stops = [d for d in decisions if d.blocking]
     if stops:

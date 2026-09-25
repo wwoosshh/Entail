@@ -51,8 +51,9 @@ Unreleased. A new fact, from the low-level study (codebook v2): a class of wrong
   (Gemma 4). `original_max_position_embeddings` is read from the config's top level when the scaling dict has none
   (Phi). A local `partial_rotary_factor` or scaling type different from the global one is reported as beyond the
   vocabulary, not dropped. Over the 230 most-downloaded models, RoPE declarations outside the vocabulary went from
-  34 to 0, and a RoPE key the ENGINE's config holds that the vocabulary cannot carry is now reported at the RoPE
-  boundary instead of dropped.
+  34 to 3 (two `attn_factor`, a name no engine reads, and one local `partial_rotary_factor`; all three are said as
+  not compared), and a RoPE key the ENGINE's config holds that the vocabulary cannot carry is now reported at the
+  RoPE boundary instead of dropped. An alias is added only for a name a consumer reads.
 - `sglang_fp8_tile` also wraps the fused-MoE config lookup (`try_get_optimal_moe_config`), which has no sanitiser:
   SGLang 0.5.20 ships an H100 config for E=512, N=256, fp8 block [128, 128] whose BLOCK_SIZE_K is 256; at the
   kernel level that returns 256 where 512 is right, and the clamp restores 512. The dense hot path now costs a
@@ -79,8 +80,9 @@ Unreleased. A new fact, from the low-level study (codebook v2): a class of wrong
   watched files keys an in-process cache and `entail_logs/vocab_sources.json`), tokenizer.json is counted only
   when a second tokenizer source exists to compare with, and the tokenizer's highest id comes from its added-token
   table instead of a full `get_vocab()`. On Qwen3-4B the library's time at load went from 264/872/999 ms
-  (transformers/vLLM/SGLang) to 32/185/94 ms; the median share of load time over nine runs of three models is 1.3%
-  (`testbed/results/m15/E2_RECOST_SUMMARY.md`).
+  (transformers/vLLM/SGLang) to 32/185/94 ms once the cache is filled, 150/289/60 ms on a machine's first run; over
+  102 healthy runs the share of load time is 1.2% at the median, 7.8% at the 90th percentile and up to 37% on toy
+  models that load in under a second (`testbed/results/m15/E2_SUMMARY.md`, `E2_RECOST_SUMMARY.md`).
 
 Older facts and files still read (`READABLE_VERSIONS`).
 

@@ -23,5 +23,11 @@
  },
  "provenance_suffixes": [
   "_version"
- ]
+ ],
+ "provenance_keys": {
+  "unsloth_fixed": "a marker unsloth writes when it has fixed a checkpoint; a fact about the tool, read by no engine",
+  "unsloth_version": "the unsloth version that wrote the checkpoint; read by no engine",
+  "is_llama_config": "a marker of the nanotron-to-transformers conversion (the SmolLM2 family); read by no engine",
+  "transformers.js_config": "settings for transformers.js, the browser runtime; not read by transformers, vLLM or SGLang"
+ }
 }

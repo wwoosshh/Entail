@@ -91,6 +91,10 @@ def check_static(model_path: str, engine: str, settings: dict):
                                        policy=policy, compares_head=compares_head(engine)))]
     if config is not None and isinstance(raw, dict):
         checks.append(("config keys", keys))
+    if config is not None:
+        # the RoPE the class built from the files against the files' declaration (M15.6 review: the static check
+        # decided nothing about Rotary, so the 230-model static run said nothing about the v6 fields)
+        checks.append(("rotary", lambda: load.rotary_held(engine, facts, config, policy)))
     if facts.get("Layout"):
         checks.append(("layout", lambda: load.layout(f"{engine}.linear.unknown", facts, table,
                                                      observe.scale_format(path), policy)))
