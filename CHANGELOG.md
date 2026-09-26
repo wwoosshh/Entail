@@ -43,6 +43,13 @@
   kernel before 0.27.0: vllm#42016, #49290). A multimodal model's language model only: its vision tower pairs by
   its own reference and is not compared. An architecture the table does not know, without a key, decides nothing.
 
+**Fixed**
+- A model loaded by hub id resolves to its cached snapshot folder again, so the Vocab and Stops checks decide
+  instead of saying "no local folder to read": huggingface_hub 1.32 refuses a cached snapshot that lacks files the
+  engine never fetched (`.gitattributes`, evaluation results), and every hub-id load on vLLM and transformers
+  was "could not be checked". The folder of the cached `config.json` is used when the snapshot lookup refuses;
+  nothing is downloaded.
+
 **Changed**
 - The log and record files are kept open per process, one write and one flush per line, instead of being opened
   and closed per line: on a 9P mount (a project under WSL's `/mnt/c`) the open and close cost 4.6 ms per line, and a

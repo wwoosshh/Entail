@@ -657,6 +657,29 @@ def test_rotary_held_catches_a_lost_top_level_key_and_says_an_engine_side_key_it
     shutil.rmtree(d)
 
 
+def test_a_hub_id_resolves_to_its_cached_snapshot_even_when_the_hub_calls_it_incomplete():
+    """vLLM and transformers fetch the files they need, so a cached snapshot lacks .gitattributes and the like and
+    huggingface_hub 1.32's snapshot_download(local_files_only=True) refuses it (IncompleteSnapshotError): the
+    Vocab and Stops checks then said "no local folder to read" on every hub-id load (M17.5, M16_PROTOCOL 7)."""
+    import tempfile
+
+    try:
+        import huggingface_hub  # noqa: F401
+    except ImportError:
+        return
+    cache = tempfile.mkdtemp()
+    snap = os.path.join(cache, "models--org--name", "snapshots", "0123456789abcdef0123456789abcdef01234567")
+    os.makedirs(snap)
+    os.makedirs(os.path.join(cache, "models--org--name", "refs"))
+    with open(os.path.join(cache, "models--org--name", "refs", "main"), "w") as f:
+        f.write("0123456789abcdef0123456789abcdef01234567")
+    with open(os.path.join(snap, "config.json"), "w") as f:
+        f.write("{}")
+    assert load.local_folder("org/name", cache_dir=cache) == snap
+    assert load.local_folder("org/absent", cache_dir=cache) is None
+    assert load.local_folder(snap) == snap
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

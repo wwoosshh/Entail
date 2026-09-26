@@ -165,12 +165,24 @@ def local_folder(name, revision=None, cache_dir=None) -> Optional[str]:
         return None
     if os.path.isdir(os.path.expanduser(name)):
         return os.path.expanduser(name)
+    folder = None
     try:
         from huggingface_hub import snapshot_download
 
         folder = snapshot_download(repo_id=name, revision=revision, cache_dir=cache_dir, local_files_only=True)
-    except Exception:  # noqa: BLE001 - not cached, or no huggingface_hub: the caller reports "not checked"
-        return None
+    except Exception:  # noqa: BLE001 - not cached, no huggingface_hub, or a snapshot the hub calls incomplete
+        folder = None
+    if not (isinstance(folder, str) and os.path.isdir(folder)):
+        # huggingface_hub 1.32 refuses a cached snapshot that lacks files the engine never fetched (.gitattributes,
+        # eval results): the folder of the cached config.json is the same snapshot (M17.5; every hub-id load on
+        # vLLM was "could not be checked" for Vocab and Stops before)
+        try:
+            from huggingface_hub import try_to_load_from_cache
+
+            cfg = try_to_load_from_cache(name, "config.json", cache_dir=cache_dir, revision=revision)
+            folder = os.path.dirname(cfg) if isinstance(cfg, str) else None
+        except Exception:  # noqa: BLE001
+            folder = None
     return folder if isinstance(folder, str) and os.path.isdir(folder) else None
 
 
