@@ -50,6 +50,9 @@
   set). An architecture the table does not know, without a key, decides nothing.
 
 **Fixed**
+- The vLLM serve adapter's wrapper of `ParserManager.get_parser` binds its arguments by name and passes the rest
+  through: with a fixed signature it raised `TypeError` on vLLM 0.23.0 (whose `get_parser` takes `is_harmony`)
+  and the API server died - the one run entail broke in the second pre-registered replay.
 - A model loaded by hub id resolves to its cached snapshot folder again, so the Vocab and Stops checks decide
   instead of saying "no local folder to read": huggingface_hub 1.32 refuses a cached snapshot that lacks files the
   engine never fetched (`.gitattributes`, evaluation results), and every hub-id load on vLLM and transformers

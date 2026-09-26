@@ -268,19 +268,33 @@ def install_parsers():
         return 0
     orig = _ORIG["get_parser"] = ParserManager.__dict__["get_parser"]
 
-    def get_parser(cls, tool_parser_name=None, reasoning_parser_name=None, enable_auto_tools=False, model_name=None,
-                   is_harmony=False):
+    NAMES = ("tool_parser_name", "reasoning_parser_name", "enable_auto_tools", "model_name")
+
+    def get_parser(cls, *args, **kwargs):
+        # Bound by name and passed through whole: the parameters differ by version (0.23.0 has is_harmony, 0.30.0
+        # does not), and a wrapper with a fixed signature raised TypeError on 0.23.0 and the API server died
+        # (M17.6, DEFERRED 21; principle 12).
+        bound = dict(zip(NAMES, args))
+        bound.update({k: kwargs[k] for k in NAMES if k in kwargs})
+        tool_parser_name, reasoning_parser_name = bound.get("tool_parser_name"), bound.get("reasoning_parser_name")
+        enable_auto_tools, model_name = bound.get("enable_auto_tools", False), bound.get("model_name")
         if model_name is not None:
             _SERVED[str(model_name)] = reasoning_parser_name or ""
         name = tool_parser_name
         if _active() and enable_auto_tools and tool_parser_name and model_name is not None:
-            key = (str(model_name), tool_parser_name, reasoning_parser_name, enable_auto_tools, is_harmony)
+            extra = tuple(sorted((k, repr(v)) for k, v in kwargs.items() if k not in NAMES))
+            key = (str(model_name), tool_parser_name, reasoning_parser_name, enable_auto_tools, extra)
             if key not in _PARSERS:
                 _PARSERS[key] = load.safely(TOOL_PARSER, f"vllm.tool_parser.{tool_parser_name}", "Template",
                                             lambda: _tool_parser(model_name, tool_parser_name), tool_parser_name)
             name = _PARSERS[key]
-        parser_cls = orig.__func__(cls, tool_parser_name=name, reasoning_parser_name=reasoning_parser_name,
-                                   enable_auto_tools=enable_auto_tools, model_name=model_name, is_harmony=is_harmony)
+        if name is not tool_parser_name:
+            args = list(args)
+            if "tool_parser_name" in kwargs or not args:
+                kwargs["tool_parser_name"] = name
+            else:
+                args[0] = name
+        parser_cls = orig.__func__(cls, *args, **kwargs)
         return _wrap_parser_cls(parser_cls, reasoning_parser_name) if _active() else parser_cls
 
     ParserManager.get_parser = classmethod(get_parser)
