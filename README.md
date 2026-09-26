@@ -167,6 +167,8 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
 | a request's `chat_template_kwargs` setting honoured by the chat template under one name and read by the reasoning parser under another: `{"enable_thinking": false}` on Kimi K2 with vLLM 0.2x - the template injects no thinking tokens, the parser reads `thinking`, defaults to on, and returns `content: null` with the answer under `reasoning` (vllm#43728) | the names each reasoning parser reads, per vLLM version (a table with code lines), against the request's names and the template's variables; the request's value is handed to the parser under a name it reads | the rule on the 0.22.0 row of the table: resolved (`thinking` set from `enable_thinking`); vLLM 0.30.0 reads both names for Kimi K2, so there the same request passes. Retrospective, not a detection |
 | a prefix-cache key that omits a field that shaped the cached block: vLLM 0.30's block hash covers the tokens, the prompt-embeddings digest, multimodal hashes, the LoRA name and the cache salt, but not `prompt_is_token_ids` (which positions take the embeddings), so a request that differs from an earlier one only in that mask is served the earlier request's KV (vllm#56655, fix unmerged) | the request's input fields against the fields the hash reads (a table with code lines); the missing field's per-block digest is added to the hash's extra keys and the request's hashes are remade | vLLM 0.30.0, Qwen3-0.6B, the report's own script: without entail B after A hit 32 cached tokens and produced A's output; with entail B hit 0 and produced its own, while A after A still hit 32. Retrospective |
 | a beam search that reorders only the cache it knows by name: transformers 5.12.1 reordered `past_key_values`, so a Mamba model's `cache_params` stayed unmoved and the beams continued from other beams' states (transformers#46612) | the model's cache kwarg names against the names the reorderer touches (per transformers version) | 5.12.1: reported at the beam-search boundary (no repair; the output stays wrong); 5.17.0 reorders every name: pass. Retrospective |
+| a tensor strided in its innermost dimension handed to a Triton kernel that reads it as if it were contiguous: SGLang's `fused_gdn_gating` was given the two halves of a split view (stride 2) and computed its gates from interleaved values (sglang#21843) | every Triton launch in the process, once per kernel and tensor layout, engine-independent: a strided innermost dimension against the kernel's own parameter names. A kernel with no stride parameter at all is reported (`broken`, it cannot know); one that takes strides but was not told this one is `unknown`, said once | SGLang 0.5.20, sglang#21843's tensors: the kernel takes row strides, so entail says `unknown` at the kernel's boundary for each tensor and the run goes on. 19 vLLM 0.30 kernels and 5 SGLang kernels in ordinary runs: pass. Retrospective, a report only |
+| a rotary embedding applied with the wrong pairing of dimensions: GLM models pair `2i` with `2i+1` (interleaved) where Llama pairs `i` with `i + d/2` (split), and vLLM's Triton MRoPE kernel paired split-wise whatever the layer said until 0.27, so GLM-OCR produced garbage (vllm#42016; also #49290, and a draft model that did not inherit its target's pairing, #53063) | the pairing a config key or the architecture's reference implementation declares (a table with modeling-file lines) against the `is_neox_style` of the layers vLLM built for the language model, set to the declared one where they differ; a kernel path that ignores the layer (by vLLM version) is reported | vLLM 0.30.0: GLM-OCR's two text rotary modules pair interleaved as declared and its vision tower's 26 pair split by their own reference: pass, nothing touched, output identical with entail on and off; Qwen3-0.6B and Qwen3-4B (split): pass. On the 0.22.0 row of the kernel table the rule reports GLM-OCR as broken. Retrospective; the first real run compared the vision tower against the text declaration and was corrected before this row was written |
 
 **Checks** (and reports what nothing can resolve)
 
@@ -194,6 +196,10 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
   it at load).
 - statically, per engine, the stop set each engine would build from a model folder against every end its files
   declare (`entail check`)
+- the pairing convention of a model's rotary embedding (split, `i` with `i + d/2`; or interleaved, `2i` with
+  `2i+1`), declared by a config key or by the architecture's reference implementation, against the layers vLLM
+  built for its language model, and against a kernel path that pairs split-wise whatever the layer says (vLLM's
+  Triton MRoPE kernel before 0.27: GLM-OCR produced garbage, vllm#42016)
 - in debug mode, the boundaries you declare in your own code (`@entail.boundary`: what each argument means);
   a strided layout, a quantized value and chunk-relative positions are converted where the reader needs it
 
@@ -295,8 +301,9 @@ For 1.0 every measurement of the development milestones was run again on the fin
   repaired; where no repair exists, it was reported at the boundary and fact where it happened while the run
   went on, or stopped with `ENTAIL_ON_BROKEN=stop`. No fixed version was flagged. (The two ComfyUI cases were
   measured before 1.0 and not run again.)
-- **Cost:** at load, 0.3-2.6% of the load time. Always on, vLLM's CUDA-graph path 0.999-1.000x (two runs without
-  entail: 0.997-0.999x), transformers' dynamic KV cache 1.017-1.022x of an eager decode. About 60 us per request on
+- **Cost:** at load, 0.3-2.6% of the load time. Always on, vLLM's CUDA-graph path 1.005x, 1.009x and 0.999x at
+  batch 1, 8 and 32 with every adapter on (control runs without entail: 0.994-1.003x; measured before the
+  per-request boundaries were added: 0.999-1.000x), transformers' dynamic KV cache 1.017-1.022x of an eager decode. About 60 us per request on
   vLLM's server. The diagnosis mode 1.74x (eager) and 1.85x (sdpa). With `ENTAIL` unset, 0.2-0.3 ms per Python start
   and no module imported.
 - **Next to post-hoc detection:** GSM8K (500 problems, greedy) caught the RoPE loss above and a planted weight
@@ -309,13 +316,13 @@ For 1.0 every measurement of the development milestones was run again on the fin
 
 ## Known gaps
 
-- **Unseen bugs.** On the pre-registered replay above, 0 of 7 in-class reproduced bugs were detected. Facts entail
-  does not read yet include what a prefix-cache key is made of, the input strides a kernel assumes, the pairing
-  style of a rotary embedding, and which row a routing weight belongs to. Five of the seven sat at sites with no
-  adapter (a bare kernel call, a request parser, an adapter config file, the prefix-cache key, beam reordering);
-  the adapter config file and the reasoning parser's setting names are read since (the two rows above), the rest
-  are not. Those rows are retrospective repairs of two of the seven, not detections: the next detection rate comes
-  from a second pre-registered replay with the new vocabulary frozen.
+- **Unseen bugs.** On the pre-registered replay above, 0 of 7 in-class reproduced bugs were detected. Since then
+  the facts and sites it exposed have been added (the last six rows of the repairs table: the adapter config file,
+  the reasoning parser's setting names, the prefix-cache key, beam reordering, a Triton launch's strides, the
+  rotary pairing), and what a routing weight's row is remains unread. Those rows are retrospective repairs or
+  reports of six of the seven, not detections: the next detection rate comes from a second pre-registered replay
+  with the new vocabulary frozen. A multimodal model's vision tower is not compared for its rotary pairing (its
+  reference pairs on its own terms); only the language model is.
 - **Models loaded by hub id.** When a model comes from the hub without a local folder, the Vocab and Stops checks on
   transformers and vLLM say `unknown` ("could not be checked") instead of deciding.
 

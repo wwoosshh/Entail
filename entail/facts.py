@@ -30,15 +30,16 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Optional, Tuple
 
-VOCAB_VERSION = 7
-READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7})   # a later version only adds optional fields or classes; fields in ADDED_IN
+VOCAB_VERSION = 8
+READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8})   # a later version only adds optional fields or classes; fields in ADDED_IN
 ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("Template", "tool_call_format"): 3,
             ("Rotary", "low_freq_factor"): 4, ("Rotary", "high_freq_factor"): 4,
             ("Rotary", "beta_fast"): 6, ("Rotary", "beta_slow"): 6, ("Rotary", "attention_factor"): 6,
             ("Rotary", "mscale"): 6, ("Rotary", "mscale_all_dim"): 6, ("Rotary", "truncate"): 6,
             ("Rotary", "long_factor_sha256"): 6, ("Rotary", "short_factor_sha256"): 6, ("Rotary", "factor_terms"): 6,
             ("Rotary", "local_theta"): 6, ("Rotary", "partial_rotary_factor"): 6, ("Rotary", "local_factor"): 6,
-            ("Rotary", "mrope_section"): 6, ("Rotary", "mrope_interleaved"): 6}
+            ("Rotary", "mrope_section"): 6, ("Rotary", "mrope_interleaved"): 6,
+            ("Rotary", "pairing"): 8}
 
 
 def _closed(cls_name, field, value, allowed, optional=True):
@@ -115,6 +116,7 @@ class Quantized:
 
 POSITION_FRAMES = frozenset({"absolute", "chunk_relative"})
 ROPE_TYPES = frozenset({"default", "linear", "dynamic", "yarn", "longrope", "llama3", "proportional"})
+ROTARY_PAIRINGS = frozenset({"split", "interleaved"})   # v8: rotate_half (i, i + d/2) or GPT-J (2i, 2i + 1)
 # proportional (v6, M15.7 sweep: the Gemma 4 family, 5 of 230): transformers derives the frequencies from the head
 # dimension and partial_rotary_factor, so those (and the base) are what an engine can lose
 # mrope (v6, M15.7 sweep: 27 of 230, the Qwen-VL and Qwen3.5 families) is NOT a type name here: transformers 5
@@ -163,9 +165,14 @@ class Rotary:
     local_factor: Optional[float] = None
     mrope_section: Optional[Tuple[int, ...]] = None
     mrope_interleaved: Optional[bool] = None
+    # v8 (M17.4): how the rotation pairs the dimensions - "split" (i with i + d/2: rotate_half, Llama/NeoX) or
+    # "interleaved" (2i with 2i+1: GPT-J, GLM, Cohere). A config key (rope_interleave, is_neox_style) declares
+    # it when the checkpoint carries one; an architecture's convention is data (rotary_pairing.json), not a fact
+    pairing: Optional[str] = None
 
     def __post_init__(self):
         _closed("Rotary", "rope_type", self.rope_type, ROPE_TYPES, optional=False)
+        _closed("Rotary", "pairing", self.pairing, ROTARY_PAIRINGS)
         if self.mrope_section is not None:
             ok = isinstance(self.mrope_section, tuple) and self.mrope_section and all(
                 isinstance(x, int) and not isinstance(x, bool) and x > 0 for x in self.mrope_section)

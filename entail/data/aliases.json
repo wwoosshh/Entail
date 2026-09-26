@@ -164,6 +164,11 @@
    ],
    "mrope_interleaved": [
     "mrope_interleaved"
+   ],
+   "pairing": [
+    "rope_interleave",
+    "rope_interleaved",
+    "is_neox_style"
    ]
   },
   "nested_only": [

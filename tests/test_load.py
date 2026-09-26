@@ -263,7 +263,8 @@ def test_config_keys():
     r = only(load.config_keys("transformers", [("text_config.", {"rope_scale": 4.0}, known, resolved)], "c", LOAD))
     assert r.chosen.value.left == ("text_config.rope_scale",) and r.verdict is Verdict.REFUSED
     # a top-level key near a field that lives only inside the scaling dict is not its misspelling: SmolLM2's
-    # rope_interleaved is unread, not a misspelt mrope_interleaved (M15.7; a broken on all three engines before)
+    # rope_interleaved is not a misspelt mrope_interleaved (M15.7; a broken on all three engines before). Since
+    # v8 it is an alias of Rotary.pairing, and a vocabulary key is no misspelling of another alias of its field
     assert load.misspelt("rope_interleaved") is None and load.misspelt("rope_interleave") is None
     assert load.misspelt("rope_scale") == "rope_scaling" and "mrope_interleaved" not in load.VOCABULARY_KEYS
     # a near name whose value the field would not take is no misspelling either: GPT-J's rotary_dim (64 dims) is
@@ -272,8 +273,9 @@ def test_config_keys():
     assert load.misspelt("rope_scale", 4.0) == "rope_scaling"          # rope_scaling is a key group, not a field
     r = only(load.config_keys("transformers", [("", dict(raw, rotary_dim=64), known, resolved)], "c", LOAD))
     assert r.verdict is Verdict.UNKNOWN and "rotary_dim" in r.note, r
+    # a pairing key the class did not take is compared where the rotary layers are built (M17.4, v8), not unread
     r = only(load.config_keys("transformers", [("", dict(raw, rope_interleaved=False), known, resolved)], "c", LOAD))
-    assert r.verdict is Verdict.UNKNOWN and "rope_interleaved" in r.note and not r.blocking, r
+    assert r.verdict is Verdict.PASS and "rope_interleaved (Rotary.pairing)" in r.note and not r.blocking, r
     # a key outside the vocabulary that the class did not take: one unknown line naming it, blocking only in debug
     # mode (M11.1; 1.0 called it broken on 17 of 81 runs of 30 popular models)
     other = dict(raw, swiglu_limit=7.0, task_specific_params={"a": 1})

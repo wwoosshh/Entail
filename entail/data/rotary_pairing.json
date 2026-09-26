@@ -1,0 +1,31 @@
+{
+ "_about": "How a rotary embedding pairs the dimensions it rotates (ROADMAP M17.4; testbed/results/m15/PAIRING_CANDIDATE.md): 'split' rotates dimension i with i + d/2 (rotate_half, the Llama/NeoX convention), 'interleaved' rotates 2i with 2i+1 (GPT-J). A checkpoint rarely declares it in config.json; the reference implementation of its architecture does, in code. `keys` are the config keys that declare it when present; `architectures` is the convention per model_type from the transformers 5.17.0 modeling file (the reference consumer; file lines as evidence), used only when no key declares it. `kernels` names engine code paths that ignore the pairing up to a version (the retrospective on vllm#42016: the Triton MRoPE kernel hard-coded the split convention until #49906, 2026-07-28, in 0.27.0). A model_type not listed declares nothing: no decision (a convention entail cannot invent).",
+ "values": ["split", "interleaved"],
+ "keys": {
+  "rope_interleave": {"true": "interleaved", "false": "split", "ref": "transformers 5.17.0 modeling_deepseek_v3.py L464: `if self.config.rope_interleave: apply_rotary_pos_emb_interleave` (L322); vLLM transformers_utils/configs/bailing_moe_v3_vl.py reads the same key"},
+  "rope_interleaved": {"true": "interleaved", "false": "split", "ref": "the spelling some GLM-5 configs use (vLLM transformers_utils/configs/glm5_next.py: indexer_rope_interleave); read as the same declaration"},
+  "is_neox_style": {"true": "split", "false": "interleaved", "ref": "vLLM's own name for the convention (rotary_embedding/base.py L35); a config that carries it (vLLM's DFlash loader stamps it, #51655) declares it"}
+ },
+ "architectures": {
+  "glm4": {"pairing": "interleaved", "ref": "modeling_glm4.py L150 rotate_half uses x[..., 0::2] / x[..., 1::2] and torch.stack; L179-180 cos/sin repeat_interleave(2)"},
+  "glm": {"pairing": "interleaved", "ref": "modeling_glm.py L162 rotate_half interleaved; L191-192 repeat_interleave(2)"},
+  "glm4v": {"pairing": "interleaved", "ref": "modeling_glm4v.py L503 rotate_half_llm (interleaved) for the text model; L265 rotate_half (split) is the vision tower's"},
+  "glm4v_text": {"pairing": "interleaved", "ref": "the text model of glm4v (modeling_glm4v.py L503)"},
+  "glm_ocr": {"pairing": "interleaved", "ref": "modeling_glm_ocr.py L127 rotate_half_llm (interleaved) for the text model; L335 rotate_half (split) is the vision tower's"},
+  "glm_ocr_text": {"pairing": "interleaved", "ref": "the text model of glm_ocr (modeling_glm_ocr.py L127)"},
+  "ernie4_5": {"pairing": "interleaved", "ref": "modeling_ernie4_5.py L115 rotate_half interleaved; L184-185 repeat_interleave(2)"},
+  "cohere": {"pairing": "interleaved", "ref": "modeling_cohere.py L115 'we interleave() instead of cat()'; L175 rotate_half uses x[..., 1::2]"},
+  "cohere2": {"pairing": "interleaved", "ref": "modeling_cohere2.py L89, L150"},
+  "gptj": {"pairing": "interleaved", "ref": "modeling_gptj.py L57 rotate_every_two; L65-66 repeat_interleave(2)"},
+  "llama": {"pairing": "split", "ref": "modeling_llama.py rotate_half: x[..., : x.shape[-1] // 2] and torch.cat((-x2, x1))"},
+  "qwen2": {"pairing": "split", "ref": "modeling_qwen2.py rotate_half split"},
+  "qwen3": {"pairing": "split", "ref": "modeling_qwen3.py rotate_half split"},
+  "gemma3": {"pairing": "split", "ref": "modeling_gemma3.py rotate_half split"},
+  "gemma3_text": {"pairing": "split", "ref": "the text model of gemma3"},
+  "mllama": {"pairing": "split", "ref": "modeling_mllama.py rotate_half split"},
+  "deepseek_v3": {"pairing": "split", "ref": "modeling_deepseek_v3.py L289 rotate_half split unless the config key rope_interleave is true (L464)"}
+ },
+ "kernels": {
+  "vllm.mrope_triton": {"ignores_pairing_before": "0.27.0", "applies_to": "models with mrope_section", "ref": "vllm/model_executor/layers/rotary_embedding/mrope.py: is_neox_style became a kernel constexpr in #49906 (2026-07-28, first in 0.27.0); before it the kernel paired dimensions split-wise for every model (vllm#42016 GLM-OCR, vllm#49290)"}
+ }
+}

@@ -21,6 +21,7 @@ developer finds it without having asked for it beforehand:
 ENTAIL_LOG_DIR moves the folder, or turns the files off ("off"). A folder that cannot be written is said once, and the
 run goes on (principle 12).
 """
+import atexit
 import json
 import hashlib
 import os
@@ -32,6 +33,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 LOG_DIR_NAME = "entail_logs"
 _READY = set()    # log folders made (with their .gitignore) in this process
 _WARNED = set()   # files this process could not write, said once
+_OPEN = {}        # (pid, path) -> the file, kept open: one write and one flush per line. Opening and closing the
+                  # file per line cost 4.6 ms on a 9P mount (a project under /mnt/c) - 6% of a batch-32 decode when
+                  # a boundary is per request (M17.3's S4 run); kept open it is 0.18 ms there, 0.005 ms on ext4
+_OPEN_LIMIT = 8   # files kept open per process (a day's rollover opens a new one; the oldest is closed past this)
 
 
 def log_dir() -> Optional[str]:
@@ -59,13 +64,48 @@ def _append(path, text) -> None:
                 with open(ignore, "w", encoding="utf-8") as f:
                     f.write("# written by entail: what it said about this project's runs, not part of the project\n*\n")
             _READY.add(folder)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(text)
+        f = _file(path)
+        f.write(text)
+        f.flush()
     except OSError as e:
+        _OPEN.pop((os.getpid(), path), None)
         if path not in _WARNED:
             _WARNED.add(path)
             print(f"[entail] could not write {path}: {e}; what entail says goes to the console only",
                   file=sys.stderr, flush=True)
+
+
+def _file(path):
+    """The file kept open for appending in this process. A forked child drops the handles it inherited (they are
+    the parent's; a spawned child starts with none) and opens its own, in append mode, so every process's lines land
+    at the end of the same file."""
+    pid = os.getpid()
+    f = _OPEN.get((pid, path))
+    if f is not None and not f.closed:
+        return f
+    for key in [k for k in _OPEN if k[0] != pid]:
+        _OPEN.pop(key)
+    while len(_OPEN) >= _OPEN_LIMIT:
+        oldest = next(iter(_OPEN))
+        try:
+            _OPEN.pop(oldest).close()
+        except OSError:
+            pass
+    f = open(path, "a", encoding="utf-8")
+    _OPEN[(pid, path)] = f
+    return f
+
+
+def close_files() -> None:
+    """Close the files this process kept open (at exit, and in tests that make a folder per case)."""
+    for key in list(_OPEN):
+        try:
+            _OPEN.pop(key).close()
+        except OSError:
+            pass
+
+
+atexit.register(close_files)
 
 
 def write_json(obj) -> None:

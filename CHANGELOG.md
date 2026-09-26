@@ -33,6 +33,22 @@
   take strides but was not told this one, it is `unknown` (said once). Each (kernel, layout) is decided once per
   process; warm-up launches are not looked at. sglang#21843 (fused_gdn_gating read interleaved a/b) is the case
   the rule comes from; there the kernel takes row strides, so the decision is `unknown` at the kernel's boundary.
+- `Rotary.pairing` (vocabulary v8): how a rotary embedding pairs the dimensions it rotates, `split` (i with
+  i + d/2, the Llama convention) or `interleaved` (2i with 2i+1, GPT-J's). Declared by a config key
+  (`rope_interleave`, `rope_interleaved`, `is_neox_style`) or, failing that, by the architecture's reference
+  implementation (`data/rotary_pairing.json`: transformers 5.17.0 modeling files with lines; GLM, Cohere, Ernie 4.5
+  and GPT-J interleaved, Llama, Qwen, Gemma, DeepSeek-V3 split). `rotary_pairing_contract.py` decides the layers
+  vLLM built (`is_neox_style`, adapter `vllm_pairing`) against the declaration - `resolved` by setting the layers'
+  convention, `broken` where an engine's kernel path pairs split-wise whatever the layer says (vLLM's Triton MRoPE
+  kernel before 0.27.0: vllm#42016, #49290). A multimodal model's language model only: its vision tower pairs by
+  its own reference and is not compared. An architecture the table does not know, without a key, decides nothing.
+
+**Changed**
+- The log and record files are kept open per process, one write and one flush per line, instead of being opened
+  and closed per line: on a 9P mount (a project under WSL's `/mnt/c`) the open and close cost 4.6 ms per line, and a
+  boundary that runs per request (the prefix-cache key) made a batch-32 decode 6% slower; kept open it is 0.18 ms
+  there and 0.005 ms on ext4. vLLM's CUDA-graph path with every adapter on: 1.005x, 1.009x and 0.999x at batch 1,
+  8 and 32 (control runs without entail 0.994-1.003x).
 
 **Docs**
 - README (EN/KO): the "4 of 4" sentence is marked as the bugs the facts were written from, and the pre-registered

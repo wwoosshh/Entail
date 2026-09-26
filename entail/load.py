@@ -505,6 +505,9 @@ def misspelt(key: str, value=_NO_VALUE) -> Optional[str]:
     again with vocabulary v6 over the 558 distinct keys of 230 popular configs
     (testbed/results/m15/coverage_whatif_v6.json)."""
     base = key.rsplit(".", 1)[-1]
+    if base in VOCABULARY_KEYS:
+        return None       # a vocabulary key spelt right is no misspelling of another alias of the same field
+                          # (v8: rope_interleave and rope_interleaved both name Rotary.pairing, one edit apart)
     best = None
     for name in VOCABULARY_KEYS:
         if len(name) < 5 or name == base:

@@ -101,6 +101,10 @@ RULES = {
                             "permutation that moved its item: another item can be served under the key",
     "kernel_stride_assumed": "a tensor handed to a kernel is strided in its innermost dimension and the kernel "
                              "takes no stride argument: it reads the tensor as if it were contiguous",
+    "rotary_pairing_mismatch": "the built model's rotary layers pair the rotated dimensions differently from what "
+                               "the checkpoint's architecture or config declares",
+    "rotary_pairing_ignored": "the engine's kernel path pairs the rotated dimensions split-wise regardless of the "
+                              "layer, and the model declares interleaved pairing",
     "vocab_not_the_models": "the folder declares two vocabularies and the engine loaded the one that is not the "
                             "model's",
 }

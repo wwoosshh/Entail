@@ -30,6 +30,7 @@ def project(**env):
     try:
         yield d
     finally:
+        record.close_files()
         os.chdir(old_cwd)
         for k in KEYS:
             os.environ.pop(k, None)
@@ -106,6 +107,25 @@ def test_a_process_started_later_writes_to_the_same_folder():
         log = open(os.path.join(folder, f"entail-{today()}.log"), encoding="utf-8").read()
         assert "said in a process started later, elsewhere" in log
         assert not os.path.exists(os.path.join(elsewhere, "entail_logs")) and folder.startswith(d)
+
+
+def test_the_files_are_kept_open_and_every_line_lands_at_once():
+    """One open per file per process, a flush per line (M17.3's S4 run: an open and close per line cost 4.6 ms on a
+    9P mount, 6% of a batch-32 decode with a per-request boundary); closed, a file is reopened for appending."""
+    with project(ENTAIL="load") as d:
+        with redirect_stdout(io.StringIO()):
+            load.enforce([broken()])
+            load.enforce([broken()])
+        folder = os.path.join(d, "entail_logs")
+        rec_path = os.path.join(folder, f"record-{today()}.jsonl")
+        assert sorted(k[1] for k in record._OPEN) == sorted([os.path.join(folder, f"entail-{today()}.log"), rec_path])
+        assert all(k[0] == os.getpid() for k in record._OPEN) and all(not f.closed for f in record._OPEN.values())
+        assert len(open(rec_path, encoding="utf-8").read().splitlines()) == 2, "each line is flushed as it is written"
+        record.close_files()
+        assert record._OPEN == {}
+        with redirect_stdout(io.StringIO()):
+            load.enforce([broken()])
+        assert len(open(rec_path, encoding="utf-8").read().splitlines()) == 3 and len(record._OPEN) == 2
 
 
 def test_a_folder_that_cannot_be_written_is_said_once_and_the_run_goes_on():

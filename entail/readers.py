@@ -105,7 +105,7 @@ def _factor_digest(value):
 
 
 def _rotary(result, spec, theta, theta_key, where, source_kind="config", local_theta=None, omp_top=None,
-            partial=None, local_factor=None):
+            partial=None, local_factor=None, pairing=None):
     """One Rotary fact from a scaling/parameters dict (may be None), a base, and (v6) the local layers' base and
     scaling. `omp_top` and `partial` are the config's top-level original_max_position_embeddings and
     partial_rotary_factor (Phi writes the former beside rope_scaling, not inside it; M15.4 review)."""
@@ -141,11 +141,17 @@ def _rotary(result, spec, theta, theta_key, where, source_kind="config", local_t
     _, partial_in = _first(spec, keys["partial_rotary_factor"])   # transformers 5 keeps it inside rope_parameters
     if partial_in is not None:
         partial = partial_in
+    # v8: the pairing, from a top-level key the caller found (key, value): rope_interleave true = interleaved,
+    # is_neox_style true = split; anything but a bool declares nothing
+    pairing_field = None
+    if pairing is not None and isinstance(pairing[1], bool):
+        pk, pv = pairing
+        pairing_field = ("split" if pv else "interleaved") if pk == "is_neox_style" else ("interleaved" if pv else "split")
     carried = set(keys["type"] + keys["factor"] + keys["original_max_position"] + keys["theta"]
                   + keys["low_freq_factor"] + keys["high_freq_factor"] + keys["beta_fast"] + keys["beta_slow"]
                   + keys["attention_factor"] + keys["mscale"] + keys["mscale_all_dim"] + keys["truncate"]
                   + keys["long_factor"] + keys["short_factor"] + keys["mrope_section"] + keys["mrope_interleaved"]
-                  + keys["partial_rotary_factor"])
+                  + keys["partial_rotary_factor"] + keys["pairing"])
     left = sorted(k for k, v in spec.items() if k not in carried and v is not None)
     if left:   # a key the vocabulary has no field for: say so instead of dropping it
         result.problems.append(f"{where}: RoPE keys {left} are not in vocabulary v{VOCAB_VERSION}; the Rotary fact "
@@ -163,7 +169,8 @@ def _rotary(result, spec, theta, theta_key, where, source_kind="config", local_t
         partial_rotary_factor=None if partial is None else float(partial),
         local_factor=None if local_factor is None else float(local_factor),
         mrope_section=mrope_section,
-        mrope_interleaved=None if mrope_interleaved is None else bool(mrope_interleaved)), source_kind, where)
+        mrope_interleaved=None if mrope_interleaved is None else bool(mrope_interleaved),
+        pairing=pairing_field), source_kind, where)
 
 
 def _props(result, props, used, source_kind, file):
@@ -262,7 +269,8 @@ def read_hf_dict(cfg, label, source_kind="config", from_object=False):
     _, local_theta = _first(text, rk["local_theta"])   # v6: Gemma 3's base for its local (sliding) layers
     _, omp_top = _first(text, rk["original_max_position"])   # Phi writes it beside rope_scaling (M15.4 review)
     _, partial = _first(text, rk["partial_rotary_factor"])
-    top = dict(omp_top=omp_top, partial=partial)
+    pairing = _first(text, rk["pairing"])          # v8: (key, value) or (None, None)
+    top = dict(omp_top=omp_top, partial=partial, pairing=pairing if pairing[0] is not None else None)
     pkey, params = _first(text, rk["parameters"])
     if pkey:
         if isinstance(params, dict) and params and all(isinstance(x, dict) for x in params.values()):
