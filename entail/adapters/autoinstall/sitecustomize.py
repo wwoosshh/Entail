@@ -52,7 +52,7 @@ TARGETS = {
     "sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_config":
         ["entail.adapters.sglang_fp8_tile:install_moe"],
     # The request boundary: the parser manager, the renderer and the chat server, each as soon as it has run.
-    "vllm.parser.parser_manager": ["entail.adapters.vllm_serve:install_parsers"],
+    "vllm.parser.parser_manager": ["entail.adapters.vllm_serve:install_parsers", "entail.adapters.vllm_parse"],
     "vllm.renderers.hf": ["entail.adapters.vllm_serve:install_render"],
     "vllm.entrypoints.openai.chat_completion.serving": ["entail.adapters.vllm_serve:install_serving"],
     # The chat template where transformers' tokenizers apply it (a script's, SGLang's server; M9.3), and SGLang's

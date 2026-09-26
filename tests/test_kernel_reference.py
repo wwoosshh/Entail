@@ -95,7 +95,9 @@ def test_the_fact_checks_its_numbers():
 
 def test_slicing_cuts_the_token_dimension_wherever_it_is():
     q, pos = torch.randn(200, 8), torch.arange(600).reshape(3, 200)
-    assert krc.rows_of((pos, q), {}) == 3 or krc.rows_of((q, pos), {}) == 200
+    assert krc.rows_of((pos, q), {}) == 200, "the largest tensor names the token dimension, positions [3, n] share it"
+    assert krc.rows_of((q, torch.zeros(5, dtype=torch.int32)), {}) is None, "metadata that does not share it: not cut"
+    assert krc.rows_of((), {"flag": True}) is None
     a = krc.sliced((pos, q), 200, 16)
     assert tuple(a[0].shape) == (3, 16) and tuple(a[1].shape) == (16, 8)
     b = krc.sliced({"x": q, "flag": True, "w": torch.randn(8)}, 200, 16, torch.float64)
@@ -200,6 +202,34 @@ def test_positions_of_shape_3_by_n_are_sliced_with_the_query():
     pos, q = torch.arange(3 * 500).reshape(3, 500), torch.randn(500, 8)
     out, ds = decided(lambda: m(pos, q))
     assert len(ds) == 1 and ds[0].verdict is Verdict.PASS, ds
+
+
+def test_a_dummy_or_identity_input_decides_nothing_and_the_next_call_decides():
+    """A profile run feeds zeros and rotary at position 0 is the identity: such a call says nothing about the
+    kernel, so the wrapper stays on and the next real input decides; after TRIES such calls it is given up."""
+    assert krc.vacuous(0.0, 0.0, 0.0) and krc.vacuous(0.0, 0.0, 3.0) and krc.vacuous(0.01, 0.0, 3.0) is None
+    assert krc.vacuous(0.01, None, 3.0) is None and krc.vacuous(0.0, None, 0.0)
+    assert krc.vacuous(0.0, 0.0, 3.0, reduced_precision=False) is None, "in float32 the floor is 0 by nature"
+    setup()
+    m = SiluAndMul("swapped")
+    vk.wrap(m)
+    out, ds = decided(lambda: m(torch.zeros(100, 16)))
+    assert not ds and m._forward_method is not None and vk.stats()["decided"] == 0
+    out, ds = decided(lambda: m(torch.randn(100, 16)))
+    assert len(ds) == 1 and ds[0].verdict is Verdict.BROKEN and "call 2" in ds[0].note, ds
+    setup()
+    m = SiluAndMul("faithful")
+    vk.wrap(m)
+    was = vk.TRIES
+    vk.TRIES = 3
+    try:
+        for _ in range(vk.TRIES - 1):
+            out, ds = decided(lambda: m(torch.zeros(100, 16)))
+            assert not ds
+        out, ds = decided(lambda: m(torch.zeros(100, 16)))
+        assert len(ds) == 1 and ds[0].verdict is Verdict.UNKNOWN and "all zeros" in ds[0].note and "first 3 calls" in ds[0].note
+    finally:
+        vk.TRIES = was
 
 
 def test_instrument_walks_a_model():

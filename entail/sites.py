@@ -6,6 +6,7 @@ with a reference. Its cost is measured in testbed/results/m71 and m73 (target: a
 Never inside a compiled or captured region: a check placed there cost 47.7x and changed the output
 (reinvestigation/feasibility.md 2.3). Before running: `entail check` makes the load decisions without a GPU.
 """
+import json
 import os
 
 SITES = ("load", "container", "request", "debug")
@@ -141,9 +142,27 @@ def check_static(model_path: str, engine: str, settings: dict):
             core.set_mode(was)
         out = vocab_contract.check(f"load:{engine}.tokenizer", f"{engine}.tokenizer", path, size, n, where,
                                    policy=policy, record=False)
-        if tok is not None:   # M18.1: the built tokenizer against the declared one, run on the probe texts
-            out += tokenizer_contract.check(f"load:{engine}.tokenizer", f"{engine}.tokenizer", path, tok, where,
-                                            policy=policy, record=False)
+        # M18.1: the built tokenizer against the declared one, run on the probe texts - only where the folder holds
+        # a tokenizer source, and not for a folder whose tokenizer is its own remote code (the static build does
+        # not run remote code, so the class built here is not the one an engine runs under --trust-remote-code)
+        if tok is not None and tokenizer_contract.has_declaration(path):
+            b, c = f"load:{engine}.tokenizer.ids", f"{engine}.tokenizer"
+            try:
+                auto = {}
+                cfg_path = os.path.join(path, "tokenizer_config.json")
+                if os.path.isfile(cfg_path):
+                    auto = json.load(open(cfg_path, encoding="utf-8")).get("auto_map") or {}
+                if isinstance(auto, dict) and auto.get("AutoTokenizer"):
+                    out.append(load.cannot_check(b, c, "Tokenization",
+                                                 f"tokenizer_config.json maps AutoTokenizer to the folder's own code "
+                                                 f"({auto['AutoTokenizer']}); the static build does not run it, so "
+                                                 f"the ids of the class an engine builds are not compared here",
+                                                 policy))
+                else:
+                    out += tokenizer_contract.check(b, c, path, tok, where, policy=policy, record=False)
+            except Exception as e:  # noqa: BLE001 - said, and the Vocab decisions above are kept
+                out.append(load.cannot_check(b, c, "Tokenization",
+                                             f"entail failed here: {type(e).__name__}: {str(e)[:120]}", policy))
         return out
 
     checks.append(("tokenizer", tokenizer))

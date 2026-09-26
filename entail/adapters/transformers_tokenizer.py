@@ -16,6 +16,7 @@ from .base import Hook
 engine = "transformers"
 versions = "5.17.0"
 BOUNDARY = "load:transformers.tokenizer"
+BOUNDARY_IDS = "load:transformers.tokenizer.ids"   # M18.1: the ids check, timed and counted apart from Vocab
 CONSUMER = "transformers.tokenizer"
 _ORIG = None
 
@@ -51,18 +52,28 @@ def handles():
 
 
 def _decide(name, kwargs, tokenizer):
+    import os
+
     from .. import load
 
     folder = load.local_folder(name, kwargs.get("revision"), kwargs.get("cache_dir"))
+    if folder is not None and kwargs.get("subfolder"):
+        folder = os.path.join(folder, str(kwargs["subfolder"]))     # diffusers: tokenizer_2 (M18.1 review, 12d)
     where = f"{type(tokenizer).__name__} built from {name}"
     if folder is None:
-        load.enforce([load.cannot_check(BOUNDARY, CONSUMER, "Vocab", f"{where}: no local folder to read")])
+        load.enforce([load.cannot_check(BOUNDARY, CONSUMER, "Vocab", f"{where}: no local folder to read"),
+                      load.cannot_check(BOUNDARY_IDS, CONSUMER, "Tokenization", f"{where}: no local folder to read")])
         return
     size, n = read_choice(tokenizer)
     vocab_contract.check(BOUNDARY, CONSUMER, folder, size, n, where, owner=folder)
-    # M18.1: the same tokenizer against the folder's declared tokenizer, run on the probe texts (tokenizer_contract)
-    load.safely(BOUNDARY, CONSUMER, "Tokenization",
-                lambda: tokenizer_contract.check(BOUNDARY, CONSUMER, folder, tokenizer, where, owner=folder))
+    # M18.1: the same tokenizer against the folder's declared tokenizer, run on the probe texts (tokenizer_contract);
+    # only where the folder holds a tokenizer file (a folder with tokenizer_config.json alone gives transformers'
+    # degenerate one-token tokenizer, about which Vocab already says unknown)
+    if tokenizer_contract.has_declaration(folder):
+        user = {k: kwargs[k] for k in tokenizer_contract.USER_KWARGS if k in kwargs}
+        load.safely(BOUNDARY_IDS, CONSUMER, "Tokenization",
+                    lambda: tokenizer_contract.check(BOUNDARY_IDS, CONSUMER, folder, tokenizer, where, owner=folder,
+                                                     user_kwargs=user))
 
 
 def install():

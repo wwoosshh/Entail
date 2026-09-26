@@ -5,7 +5,8 @@
 **Added**
 - `Tokenization` (vocabulary v9) and `tokenizer_contract.py` (M18.1): the tokenizer the engine built is run against
   the tokenizer the folder declares, on ten fixed probe texts, and the ids must be the same. The declaration can be
-  run: tokenizer.json by the `tokenizers` library, a sentencepiece model by `sentencepiece`; tokenizer_config.json's
+  run: tokenizer.json by the `tokenizers` library (a sentencepiece-only folder is `unknown` until that reference is
+  measured); tokenizer_config.json's
   `added_tokens_decoder` (else tokenizer.json's `added_tokens`, else added_tokens.json) names every added token with
   its id, and each is looked up in the built tokenizer. Rules `tokenizer_ids` and `added_token_id`, `broken` (reported,
   the run goes on); a declaration that cannot be run (no file, no library, a tiktoken.model without its
@@ -16,16 +17,26 @@
   replaced, 5.12.1). The `transformers_tokenizer` adapter runs it after the size check; `entail check` runs it
   statically when transformers can build the tokenizer. The declared tokenizer's probe ids are kept per folder in
   `entail_logs/tokenizer_ids.json`, so a process after the first only encodes the probes with the engine's tokenizer.
-  A folder whose own declarations disagree - a legacy-mode tokenizer.json (a normalizer that prepends `▁` to every
-  text) next to a tokenizer_config.json that declares `legacy: false` - is `unknown` with both id lists, since which
-  one the model was trained with is not stated. Measured: the four bugs above at their reported versions are all
-  `broken` at the tokenizer boundary (Kimi by 18 of 23 declared added tokens off by one, the others by 4 to 9 of the
-  10 probe texts) and pass on 5.17.0; the 38 popular models on 5.17.0: 36 pass, 1 unknown (TinyLlama-1.1B-Chat: its
-  declarations disagree), 1 broken (a tiny Llama that declares `legacy: true`, which 5.17.0's LlamaTokenizer does not
-  honour: transformers 5 rebuilds Llama tokenizers without the file's normalizer, so a text after a special token or
-  starting with whitespace gets other ids than tokenizer.json and sentencepiece give; on TinyLlama-1.1B-Chat the
-  greedy outputs of 7 of 8 chat prompts differ between the two id sequences). Cost: the first process on a folder
-  +241 ms at the median (the reference is built), later processes +2 ms.
+  A difference that the folder's own declared flag explains - `legacy: false` (or `add_prefix_space`) next to a
+  tokenizer.json exported the other way, on the text the flag speaks of (after a special token, or at the start)
+  and exactly as the flag's pipeline gives it - is the sources disagreeing (`unknown`, the flag recorded as the
+  conflicting source, `ENTAIL_SOURCE_CONFLICT=stop` honoured); every other difference is `broken`. A difference the
+  user's own build settings explain (`legacy=`, `add_prefix_space=`, ... given to from_pretrained) is the user's
+  choice. Measured (retrospective: the rule was written from these bugs): the four bugs at their reported versions
+  are all `broken` at the tokenizer boundary (Kimi by 18 of 23 declared added tokens with other ids, the others by 4
+  to 9 of the 10 probe texts); on 5.17.0 three pass and Kimi is `unknown` (tiktoken: added tokens compared, texts
+  not). 38 popular folders on 5.17.0 (11 distinct tokenizers): 36 pass, 2 broken - the one Llama-2-era tokenizer in
+  the set (TinyLlama-1.1B-Chat, a tiny test folder): transformers 5 rebuilds a legacy-export tokenizer.json as
+  Metaspace and never doubles the `▁` before text that starts with whitespace, whatever `legacy` says. The 300-folder
+  static corpus on 5.17.0: 201 pass, 9 broken, 5 unknown, 85 without a tokenizer to compare; the 9 are six of that
+  Llama-2 shape and three folders that declare `LlamaTokenizerFast` over a byte-level BPE tokenizer.json
+  (DeepSeek-R1-0528-Qwen3-8B, deepseek-coder-7b-instruct-v1.5, an MLX export), which 5.17.0 builds as a Llama
+  pipeline: "How are you doing?" decodes back as "Howareyoudoing?". Cost: the first process on a folder +241 ms at
+  the median and +894 ms at most (the reference is built), later processes +2 ms at the median, +36 ms at the 90th
+  percentile. The sentencepiece reference is not compared until it is measured on sentencepiece-only folders
+  (special-token strings would differ); tokenizer.json's padding and truncation are cleared in the reference and
+  BPE dropout is not compared; every declared added token is looked up; the machine cache is keyed by the library
+  version too, and lives per start folder.
 - `KernelReference` (vocabulary v9) and `kernel_reference_contract.py` with the vLLM adapter
   `vllm_kernel_reference` (M18.2): a custom op's dispatched kernel against the op's own native definition, run on
   the same input. vLLM's CustomOp carries its meaning as `forward_native` and dispatches to `forward_cuda`; after
@@ -37,7 +48,24 @@
   method is put back, so the steady state costs nothing. Ops that override `forward` (the mamba mixers), calls
   during CUDA-graph capture and definitions that refuse the input are not compared (the last is `unknown` once).
   Under torch.compile most ops run their definition and there is nothing to compare; the record says how many ops
-  were wrapped. FACTOR and ATOL_ULPS are provisional until set from the distribution on healthy runs.
+  were wrapped. A call that decides nothing (a profile run's zeros, rotary at position 0: an identity) leaves the
+  wrapper on for the next call. Measured: vllm#42016 (GLM-OCR on vLLM 0.22.0, the Triton MRoPE kernel pairing
+  split-wise for a model that pairs interleaved) is `broken` at `MRotaryEmbedding` on its first real input - max
+  |kernel - definition| 10.5 at a scale of 10.9, allowed 0.588 - with no architecture table, and passes on 0.30.0;
+  8 popular models on vLLM 0.30.0 in eager mode: 32 decisions, all pass, max |kernel - definition| at most 0.7% of
+  the output's scale. FACTOR 8 and ATOL_ULPS 4 are fixed from that distribution.
+- `Parse` (vocabulary v9), `parse_contract.py` and the vLLM adapter `vllm_parse` (M18.3): a chat parser's streamed
+  message against its parse of the same complete text, and its tool calls against the tools the request declared.
+  The class vLLM's server builds a parser from per request (`ParserManager.get_parser`, 0.30's unified parsers with
+  `parse_delta` and `parse`) is returned wrapped: its instances accumulate what `parse_delta` hands on (content,
+  reasoning, tool-call names and argument pieces), and when the stream finishes a fresh instance parses the whole
+  text and the two must agree exactly (arguments as JSON values): rule `stream_differs_from_full`. A tool call
+  whose arguments carry a key the declared tool's `parameters.properties` do not have (additionalProperties not
+  allowed), or that names an undeclared tool, is `tool_args_outside_schema`, on both paths. Both `broken`
+  (reported; the client already has the streamed message). Measured on vLLM 0.30.0's own parsers, driven as the
+  server drives them: vllm#49316 (kimi_k2: the streamed path skips the schema's type coercion, 4 of 4 texts),
+  #49412 (qwen3: content around tool calls differs between the paths, 3 of 3) and #47986 (deepseek_v4: tool_b
+  unwrapped with tool_a's schema) are `broken`; 6 well-formed texts raise nothing.
 
 ## 1.2.0
 

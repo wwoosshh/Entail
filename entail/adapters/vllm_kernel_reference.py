@@ -24,8 +24,11 @@ BOUNDARY = "kernel:vllm.custom_op"
 CONSUMER = "vllm.custom_op"
 _ORIG = None
 _DECIDED = set()       # (op class name, input pattern) decided in this process
+_TRIED = {}            # (op class name, input pattern) -> calls that decided nothing (dummy or identity inputs)
 _WRAPPED = {}          # id(module) -> (module, original _forward_method)
 _STATS = {"instrumented": 0, "native": 0, "overrides_forward": 0}
+TRIES = 256            # calls a key may decide nothing on before it is given up: a profile run feeds zeros and
+#                        position 0 to every layer, and vLLM shares one rotary instance across the layers
 
 
 def hooks():
@@ -108,26 +111,38 @@ def read_choice(module, orig, args, kwargs):
     return k_out, n_out, r_out, rows
 
 
-def _decide(module, name, orig, args, kwargs):
+def _decide(module, name, orig, args, kwargs, call: int) -> bool:
+    """Compare on this call. Returns whether something was decided (a decision or an unknown was recorded); False
+    when the input decides nothing (zeros, an identity) and the next call should try again."""
     from .. import load
 
     got = read_choice(module, orig, args, kwargs)
     consumer = f"vllm.{name}"
     if got is None:
         load.enforce([load.cannot_check(BOUNDARY, consumer, "KernelReference",
-                                        f"{name}: no tensor argument to slice, so its kernel is not compared")])
-        return
+                                        f"{name}: its arguments share no token dimension to cut (no tensor, or "
+                                        f"metadata such as cu_seqlens), so its kernel is not compared")])
+        return True
     k_out, n_out, r_out, rows = got
     outs = kernel_reference_contract.tensors_of(k_out)
     if not outs:
         load.enforce([load.cannot_check(BOUNDARY, consumer, "KernelReference",
                                         f"{name}: the kernel returns no floating tensor to compare")])
-        return
+        return True
     reference, native = (r_out, n_out) if r_out is not None else (n_out, None)
     diff, floor, scale, elements = kernel_reference_contract.compare(k_out, reference, native)
+    reduced = str(outs[0].dtype) in ("torch.bfloat16", "torch.float16")
+    why = kernel_reference_contract.vacuous(diff, floor, scale, reduced)
+    if why is not None:
+        if call < TRIES:
+            return False
+        load.enforce([load.cannot_check(BOUNDARY, consumer, "KernelReference",
+                                        f"{name}: {why}, on each of its first {call} calls; not compared")])
+        return True
     where = f"{name}'s dispatched {getattr(orig, '__name__', 'kernel')} ({type(module).__module__}) on {rows} rows " \
-            f"of its first call"
+            f"of its call {call}"
     kernel_reference_contract.check(BOUNDARY, consumer, name, str(outs[0].dtype), diff, floor, scale, elements, where)
+    return True
 
 
 def wrap(module) -> bool:
@@ -147,11 +162,15 @@ def wrap(module) -> bool:
                 return out
             if capturing():
                 return out
-            _DECIDED.add(key)
-            module._forward_method = orig
+            call = _TRIED.get(key, 0) + 1
+            _TRIED[key] = call
             from .. import load
 
-            load.safely(BOUNDARY, f"vllm.{name}", "KernelReference", lambda: _decide(module, name, orig, args, kwargs))
+            decided = load.safely(BOUNDARY, f"vllm.{name}", "KernelReference",
+                                  lambda: _decide(module, name, orig, args, kwargs, call), default=True)
+            if decided:
+                _DECIDED.add(key)
+                module._forward_method = orig
         except Exception:  # noqa: BLE001 - never the engine's problem (principle 12)
             pass
         return out
@@ -231,6 +250,7 @@ def reset():
         module._forward_method = orig
     _WRAPPED.clear()
     _DECIDED.clear()
+    _TRIED.clear()
     for k in _STATS:
         _STATS[k] = 0
     kernel_reference_contract.reset(BOUNDARY)

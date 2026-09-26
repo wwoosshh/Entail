@@ -58,11 +58,18 @@ def all_tensors(obj) -> List[Any]:
 
 
 def rows_of(args, kwargs) -> Optional[int]:
-    """The token dimension: the first dimension of the first tensor argument, or None when there is none."""
-    for t in all_tensors(list(args)) + all_tensors(kwargs):
-        if t.dim() >= 1:
-            return int(t.shape[0])
-    return None
+    """The token dimension: the first dimension of the largest tensor argument (the hidden states or query; MRoPE's
+    positions are [3, n] and small), when every tensor argument shares it - along its first dimension, or along
+    the last of a 2-D tensor. None when there is no tensor, or when an argument does not share it (an attention
+    op with cu_seqlens metadata: cutting rows would not give both paths the same problem)."""
+    ts = [t for t in all_tensors(list(args)) + all_tensors(kwargs) if t.dim() >= 1]
+    if not ts:
+        return None
+    n = int(max(ts, key=lambda t: t.numel()).shape[0])
+    for t in ts:
+        if int(t.shape[0]) != n and not (t.dim() == 2 and int(t.shape[-1]) == n):
+            return None
+    return n
 
 
 def sliced(obj, n: int, rows: int, dtype=None):
@@ -108,6 +115,17 @@ def compare(kernel_out, reference_out, native_out=None) -> Tuple[float, Optional
             floor = max(floor, float((ns[i].detach().float() - rf).abs().max().item()) if rf.numel() else 0.0)
         elements += int(rf.numel())
     return diff, (floor if ns is not None else None), scale, elements
+
+
+def vacuous(diff: float, floor: Optional[float], scale: float, reduced_precision: bool = True) -> Optional[str]:
+    """Why this input decides nothing: an all-zero definition output (a profile run's dummy input), or - when the
+    input is of reduced precision, so the definition normally rounds - a definition that is exact on it (rotary at
+    position 0 is the identity: floor 0) with which the kernel agrees. None when the comparison is decisive."""
+    if scale == 0.0:
+        return "the definition's output is all zeros on this input (a dummy input)"
+    if reduced_precision and floor == 0.0 and diff == 0.0:
+        return "the definition is exact on this input (an identity, as rotary at position 0) and the kernel agrees"
+    return None
 
 
 def tolerance(dtype_name: str, floor: Optional[float], scale: float) -> float:

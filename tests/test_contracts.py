@@ -10,7 +10,7 @@ from entail.contracts import RULES, Contract, Resolution, Verdict, agrees, decid
 from entail.coverage import Coverage  # noqa: E402
 from entail.facts import (VOCABULARY, Assumed, Certainty, Epoch, Fact, Identity, KernelConfig, KernelReference,  # noqa: E402
                           LatentScale, Layout, ModelProps, Origin, Positions, Prediction, Quantized, Reduction,
-                          Rotary, Source, Stops, Template, Tokenization, TokenType, Valid, Vocab)
+                          Parse, Rotary, Source, Stops, Template, Tokenization, TokenType, Valid, Vocab)
 from entail.kv_contract import KvExtent  # noqa: E402
 
 # (declared, a different value the consumer might use) for every vocabulary name
@@ -36,6 +36,8 @@ SAMPLES = {
     "Tokenization": (Tokenization(digest="0f3a", probes=10, added=2), Tokenization(digest="9c1d", probes=10, added=2)),
     "KernelReference": (KernelReference(op="RotaryEmbedding", max_abs_diff=0.0, floor=0.0, scale=1.0),
                         KernelReference(op="RotaryEmbedding", max_abs_diff=2.0, floor=0.0, scale=1.0)),
+    "Parse": (Parse(path="full", content=5, reasoning=0, tool_calls=1, digest="ab12"),
+              Parse(path="stream", content=6, reasoning=0, tool_calls=1, digest="cd34")),
     "Assumed": (Assumed((("batch", 4),)), Assumed((("batch", 0),))),
     "Origin": (Origin("temperature", "user"), Origin("temperature", "default")),
 }

@@ -509,6 +509,27 @@ class KernelReference:
         _number("KernelReference", "scale", self.scale, 0)
 
 
+@dataclass(frozen=True)
+class Parse:
+    """What a parser made of a model's text (v9, M18.3): the content and reasoning it handed on (their lengths in
+    characters), the tool calls it extracted, and a digest of all three, so the streamed message and the
+    whole-text message of the same parser on the same text can be compared (parse_contract.py).
+    `path` is "stream" or "full"."""
+    path: str
+    content: int
+    reasoning: int
+    tool_calls: int
+    digest: str
+
+    def __post_init__(self):
+        _closed("Parse", "path", self.path, frozenset({"stream", "full"}), optional=False)
+        _number("Parse", "content", self.content, 0, integer=True)
+        _number("Parse", "reasoning", self.reasoning, 0, integer=True)
+        _number("Parse", "tool_calls", self.tool_calls, 0, integer=True)
+        if not isinstance(self.digest, str) or not self.digest:
+            raise ValueError(f"Parse.digest: expected a hex digest, got {self.digest!r}")
+
+
 # --- not in the vocabulary ------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -552,12 +573,13 @@ VOCABULARY = {
     "Template": "PROPERTY", "Coverage": "MAPPING", "TokenType": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME",
     "Identity": "TIME", "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE", "KernelConfig": "LAYOUT",
     "Vocab": "MAPPING", "Stops": "MAPPING", "Tokenization": "MAPPING", "KernelReference": "PROPERTY",
+    "Parse": "MAPPING",
 }
 _HERE = {"Layout": Layout, "Quantized": Quantized, "Rotary": Rotary, "Positions": Positions, "Valid": Valid,
          "ModelProps": ModelProps, "Prediction": Prediction, "LatentScale": LatentScale, "Template": Template,
          "TokenType": TokenType, "Reduction": Reduction, "Epoch": Epoch, "Identity": Identity, "Assumed": Assumed,
          "Origin": Origin, "KernelConfig": KernelConfig, "Vocab": Vocab, "Stops": Stops, "Tokenization": Tokenization,
-         "KernelReference": KernelReference}
+         "KernelReference": KernelReference, "Parse": Parse}
 
 
 def vocabulary_class(name):

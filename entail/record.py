@@ -133,7 +133,11 @@ def say(text: str, console: bool = True) -> None:
     """A line entail says: printed (unless `console` is False: a non-blocking unknown under ENTAIL_QUIET=unknown),
     and kept in entail-<date>.log in the log folder with its time and process."""
     if console:
-        print(text, flush=True)
+        try:
+            print(text, flush=True)
+        except UnicodeEncodeError:   # a console that cannot show the text (cp949 with '▁'): shown escaped,
+            enc = getattr(sys.stdout, "encoding", None) or "utf-8"   # never an error that cancels a stop
+            print(text.encode(enc, "backslashreplace").decode(enc, "replace"), flush=True)
     folder = log_dir()
     if folder is not None:
         _append(os.path.join(folder, f"entail-{time.strftime('%Y-%m-%d')}.log"),

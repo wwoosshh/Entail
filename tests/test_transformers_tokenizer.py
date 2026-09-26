@@ -65,7 +65,8 @@ def test_a_local_folder_with_the_wrong_tokenizer_is_reported_before_the_first_id
 
 def test_a_name_that_is_not_local_is_not_checked_and_says_so():
     d = decide("no-such-org/no-such-model-entail-test", FakeTokenizer(5))
-    assert len(d) == 1 and d[0].verdict is Verdict.UNKNOWN and "no local folder" in d[0].note, d
+    assert len(d) == 2 and all(x.verdict is Verdict.UNKNOWN and "no local folder" in x.note for x in d), d
+    assert [x.name for x in d] == ["Vocab", "Tokenization"], "both facts are named (M18.1 review, 12f)"
     transformers_tokenizer.reset()
 
 
