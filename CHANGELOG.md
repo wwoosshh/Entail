@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.2.0
+
+Released 2026-09-26. The sites the first pre-registered replay found unread (a LoRA adapter's settings file, a
+request's template settings at the reasoning parser, the prefix-cache key and the beam reorder, Triton kernel
+launches, rotary pairing), each written from the real bug and measured on it, and a second pre-registered replay
+with the vocabulary frozen at this version.
 
 **Added**
 - A LoRA adapter's `adapter_config.json` as a declaration file (`adapter_config_contract.py`,
@@ -76,6 +81,11 @@
   replay with the vocabulary frozen at 1.1.0 is reported next to it: 150 issues screened, 17 passed, 15 reproduced,
   7 in the class by two blind raters, 0 of the 7 detected, 0 false alarms on the 8 outside the class. Known gaps
   list the facts and sites it exposed, and the hub-id loads that the Vocab and Stops checks cannot decide.
+- README (EN/KO): the second pre-registered replay, with the vocabulary frozen at this version's code (`ce79b19`):
+  the next 150 issues screened, 20 passed, 15 reproduced, 8 in the class by two blind raters (kappa 0.72 over
+  seven categories, 0.68 in-class versus not; 18 of 86 settled by a third), 0 of the 8 detected (rule of three: at
+  most 3 of 8), 0 false alarms on the 7 reproduced outside the class, one run broken by entail (the serve wrapper,
+  fixed above). Known gaps name what it left unread, first the ids a built tokenizer produces.
 
 ## 1.1.0
 

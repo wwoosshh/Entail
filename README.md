@@ -36,12 +36,15 @@ run goes on (it stops only if you ask it to); said to be "unknown" when nobody d
 default stand in silently. The name is the logical sense of *entail*: what a checkpoint declares must entail what
 the engine executes. (ent·**AI**·**L**: an AI library.)
 
-> **Status: 1.1.0, measured on one machine.** Everything below was measured on the engines and
+> **Status: 1.2.0, measured on one machine.** Everything below was measured on the engines and
 > versions under [Tested with](#tested-with), on one RTX 4070 Ti. The evaluation is summarised under
 > [How it was measured](#how-it-was-measured), and what it found missing under [Known gaps](#known-gaps). 1.1.0
 > adds five facts the 1.0 evaluation showed it did not read (a stale cache identity, a padding token type, a kernel
 > tile against a quantization block, a tokenizer's vocabulary, and where a generation ends), each measured on the
-> real bug it comes from.
+> real bug it comes from. 1.2.0 adds the sites the first pre-registered replay found unread (a LoRA adapter's
+> settings file, a request's setting names at the reasoning parser, the prefix-cache key and the beam reorder,
+> Triton kernel launches, rotary pairing), each written from the real bug and measured on it, and reports a second
+> pre-registered replay with the vocabulary frozen at this version.
 > entail does not look for defects inside a model, a compiler, a kernel or the hardware: when every boundary it
 > checked held and the output is still wrong, it says so and narrows where to look.
 
@@ -302,6 +305,19 @@ For 1.0 every measurement of the development milestones was run again on the fin
   lines in all, the library's share of load time 1.4% at the median and 8.2% at the 90th percentile (measured
   again with the six rows above added: the same runs, the same repairs, the same 69 lines, nothing new said).
   Statically over 230 popular model folders: no false `broken` from the new facts.
+- **Second replay (pre-registered, vocabulary frozen at this version's code, commit `ce79b19`):** the next 150
+  issues in the same fixed order were screened by the same rules; 20 passed and 15 reproduced here (six
+  environments at the reported versions were built for them). Two blind raters put 8 of the 15 in entail's class
+  (agreement kappa 0.72 over seven categories, 0.68 for in-class versus not; a third blind rater settled the 18
+  of 86 items they disagreed on). entail detected **0 of those 8** (rule of three: at most 3 of 8 at 95%),
+  raised no false alarm on the 7 reproduced outside the class, and broke one run itself (a wrapper with a fixed
+  signature on vLLM 0.23.0; fixed in this version). The misses: three tokenizers whose built class encodes
+  differently from the folder's tokenizer.json (the Vocab check compares sizes, not ids; one of the three was said
+  `unknown` at the tokenizer boundary), and five at sites with no boundary (a kernel's scale layout, a
+  linear-attention kernel's input layout, a tool parser, a multimodal placeholder's binding, a response's
+  logprobs). Class share among the 86 rated reports: 31 (36%). The raters were agents run from the research
+  session, as in the first replay. Protocol section 7, screening, ratings and cases: `testbed/results/m17/replay2/`
+  in the research workspace.
 - **31 test problems** (16 reproduction cases, 8 field cases, 7 simulated market incidents): each defect was
   repaired; where no repair exists, it was reported at the boundary and fact where it happened while the run
   went on, or stopped with `ENTAIL_ON_BROKEN=stop`. No fixed version was flagged. (The two ComfyUI cases were
@@ -328,9 +344,12 @@ For 1.0 every measurement of the development milestones was run again on the fin
   reported versions, the seven come out as: two repaired (the LoRA scale, the prefix-cache key), two reported
   (beam reordering on transformers 5.12.1, GLM-OCR's pairing on vLLM 0.22.0), one `unknown` at its kernel (the
   strides), one resolved by the rule but at a site vLLM 0.22.0 does not have (the parser's setting name), and one
-  not read at all (the Marlin MoE row). That is a retrospective, not a detection rate: the next detection rate
-  comes from a second pre-registered replay with the new vocabulary frozen. A multimodal model's vision tower is not compared for its rotary pairing (its
-  reference pairs on its own terms); only the language model is.
+  not read at all (the Marlin MoE row). That is a retrospective, not a detection rate; the second pre-registered
+  replay above, with this vocabulary frozen, detected 0 of 8. What it left unread: which ids a built tokenizer
+  produces against the folder's tokenizer.json (three of the eight; the Vocab check compares sizes), a kernel's
+  scale layout, a linear-attention kernel's input layout, a tool parser's slots, a multimodal placeholder's origin,
+  and what a response's logprobs cover. A multimodal model's vision tower is not compared for its rotary pairing
+  (its reference pairs on its own terms); only the language model is.
 - **Models loaded by hub id** are read from the snapshot the engine downloaded into the local cache (fixed in this
   version: huggingface_hub refused such snapshots as incomplete, so every hub-id load said "could not be checked"
   for Vocab and Stops; GLM-OCR by hub id on vLLM 0.30 now passes both). A model the cache does not hold at all
