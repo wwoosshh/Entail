@@ -48,6 +48,19 @@ def value_params(fn):
         return []
 
 
+def told_params(fn):
+    """The parameters whose integers count as strides told: the value parameters, and the constexpr parameters
+    with a stride-like name (kernels often take strides as constexprs for specialisation: vLLM's and SGLang's
+    causal_conv1d declare every stride `tl.constexpr`; the first review fix dropped all constexprs and said unknown
+    on those launches). Other constexprs (BLOCK_*) and launch options (num_warps, never among the parameters) do
+    not count."""
+    try:
+        return [p.name for p in fn.params
+                if not getattr(p, "is_constexpr", False) or kernel_launch_contract.stride_like(p.name)]
+    except AttributeError:
+        return []
+
+
 def read_choice(fn, args, kwargs):
     """parameter name -> argument for one launch (positional by the kernel's signature, then keywords)."""
     bound = dict(zip(_names(fn), args))
@@ -102,7 +115,7 @@ def _decide(fn, args, kwargs, key):
     eng, name, module = _where(fn)
     bound = read_choice(fn, args, kwargs)
     kernel_launch_contract.check(f"kernel:{eng}.{name}", f"{eng}.{name}", name, bound, f"{module}.{name} launch",
-                                 owner=key, ints_from=set(value_params(fn)))
+                                 owner=key, ints_from=set(told_params(fn)))
 
 
 def install():

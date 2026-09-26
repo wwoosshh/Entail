@@ -30,9 +30,10 @@
 - What a Triton kernel is told about its tensors (`kernel_launch_contract.py`, adapter `triton_launch`, engine-
   independent: one hook on `JITFunction.run`, so every `@triton.jit` kernel launched eagerly by any engine; kernels
   Inductor generates for a compiled forward are not seen): a tensor strided in its innermost dimension handed to a
-  kernel that was not told that stride (no integer value argument equals it) and whose parameters name no stride
-  at all (`stride`, `_s0`, `sxm`, `ld...`) is `broken` (the kernel reads it as if contiguous); handed to a kernel
-  that names strides but was not told this one, it is `unknown` (said once). Each (kernel, stride pattern) is
+  kernel that was not told that stride (no integer argument among its value parameters and stride-named
+  constexprs equals it) and whose parameters name no stride at all (`stride`, `_s0`, `sxm`, `ld...`) is `broken`
+  (the kernel reads it as if contiguous); handed to a kernel that names strides but was not told this one, it is
+  `unknown` (said once). Each (kernel, stride pattern) is
   decided once per process, and a kernel is looked at for its first eight strided patterns; compile-only warm-ups
   are not launches. sglang#21843 (fused_gdn_gating read interleaved a/b) is the case the rule comes from; there
   the kernel takes row strides, so the decision is `unknown` at the kernel's boundary.

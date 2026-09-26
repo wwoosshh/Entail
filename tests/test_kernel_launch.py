@@ -127,7 +127,8 @@ def test_the_hook_decides_each_stride_pattern_once_and_caps_strided_patterns_per
     from entail.adapters import triton_launch
 
     class FakeJIT:
-        params = [SimpleNamespace(name="x", is_constexpr=False), SimpleNamespace(name="BLOCK", is_constexpr=True)]
+        params = [SimpleNamespace(name="x", is_constexpr=False), SimpleNamespace(name="BLOCK", is_constexpr=True),
+                  SimpleNamespace(name="stride_x_token", is_constexpr=True)]
 
         def fn(self):
             pass
@@ -136,6 +137,13 @@ def test_the_hook_decides_each_stride_pattern_once_and_caps_strided_patterns_per
     try:
         jit = FakeJIT()
         assert triton_launch.value_params(jit) == ["x"]
+        # a stride declared constexpr (causal_conv1d) still tells the stride; BLOCK does not (E2 on 99a4841 said
+        # unknown twice on Nemotron's causal_conv1d launches because every constexpr was dropped)
+        assert triton_launch.told_params(jit) == ["x", "stride_x_token"]
+        x = torch.randn(11, 9728).t()                                    # (9728, 11) strides (1, 9728)
+        out = klc.check("kernel:test.k", "test.k", "k", {"x": x, "BLOCK": 16, "stride_x_token": 9728}, "k launch",
+                        record=False, ints_from=set(triton_launch.told_params(jit)))
+        assert [d.verdict for d in out] == [Verdict.PASS], out
         looked = [triton_launch.should_look(jit, (torch.empty(2, n + 2),), {"BLOCK": 16}) for n in range(20)]
         assert sum(k is not None for k in looked) == 1, "contiguous launches of 20 shapes: one pattern"
         assert triton_launch._COUNT.get(id(jit), 0) == 0, "a contiguous pattern does not count toward the cap"

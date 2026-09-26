@@ -20,8 +20,9 @@ kernel (ladder: a consumer whose use is unknown is unknown, so the rule is conse
   A stride-like name is `stride` anywhere, `_s0`-style suffixes, `s`+one or two letters (with at most one more
   character after an underscore: `sxm`, `sq_d`, not `seq_len`), `s_...`, `ld...` (vLLM's sparse indexer `q_s0`,
   mxfp8's `sxm`, SGLang's `a_s0`/`sq_d`; M17.4 review, finding 1). Integer arguments count
-  only among the kernel's value parameters (`ints_from`): constexprs and launch options (BLOCK_*, num_warps) are
-  not strides, and a collision with them would say "told" falsely. A stride of 0 (an expanded view) and dimensions
+  only among the kernel's value parameters and its stride-named constexprs (`ints_from`; strides are often
+  constexprs for specialisation: causal_conv1d's `stride_x_token: tl.constexpr`): other constexprs and launch
+  options (BLOCK_*, num_warps) are not strides, and a collision with them would say "told" falsely. A stride of 0 (an expanded view) and dimensions
   of size 1 are not strides a kernel can misread; a tensor passed as a plain integer (data_ptr) is invisible here.
 
 Each (kernel, stride pattern of its tensor arguments) is decided once per process (the adapter's memo), so the cost
