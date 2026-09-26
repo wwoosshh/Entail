@@ -266,9 +266,19 @@ For 1.0 every measurement of the development milestones was run again on the fin
   0.7-0.9%. What 1.0.1 cannot decide it now says as `unknown` (69 lines over the 81 runs, one per boundary).
 - **Real bugs, for 1.1.0:** of 8 reported bugs replayed from a random sample of 229 engine issues, 4 were of
   the class entail targets and 1.0 passed all 4; 1.1.0 repairs 2 (vLLM's stale block hashes, SGLang's kernel
-  tile) and reports the other 2 at their boundary (the padding token type, the second vocabulary). The 3 out of
+  tile) and reports the other 2 at their boundary (the padding token type, the second vocabulary). Those 4 are
+  the bugs the 1.1.0 facts were written from, so "4 of 4" is not a detection rate. The 3 out of
   the class (a CUDA-graph weak reference, a parser's streaming logic, a scheduler's arithmetic) are, as designed,
-  not flagged. A fifth, the stop-id class, was replayed on transformers (table above). The 38 popular models on
+  not flagged. A fifth, the stop-id class, was replayed on transformers (table above).
+- **Detection rate on unseen bugs (pre-registered, vocabulary frozen at 1.1.0):** 150 further issues from the
+  same four repositories were screened by fixed rules; 17 passed, 15 reproduced here, and two blind raters put 7
+  of the 15 in entail's class (agreement kappa 0.86 over seven categories, 0.95 for in-class versus not). entail
+  detected **0 of those 7** and raised no false alarm on the 8 outside the class. Every miss was a fact outside
+  the vocabulary, and in 5 of the 7 the defect sits where no adapter checks anything yet (a kernel call, a request
+  parser, a LoRA config file, a prefix-cache key, beam reordering). Read the class claim accordingly: the five
+  facts above are measured on the bugs they came from; a new bug is usually a fact entail does not read yet.
+  Protocol, screening log, ratings and case scripts: `testbed/M16_PROTOCOL.md` and `testbed/results/m16/` in the
+  research workspace (github.com/wwoosshh/entail-research). The 38 popular models on
   three engines again (102 valid runs): no `broken`, no `refused`, the same two repairs plus two where a declared
   end was added to transformers' stop set (Nemotron-3-Nano-4B as shipped, and a tiny test model), outputs identical
   in 97 of 98 comparisons without a repair (the one difference is an engine's own nondeterminism), 69 `unknown`
@@ -291,6 +301,14 @@ For 1.0 every measurement of the development milestones was run again on the fin
 - **Locating:** 11 of 11 planted defects located.
 
 ## Known gaps
+
+- **Unseen bugs.** On the pre-registered replay above, 0 of 7 in-class reproduced bugs were detected. Facts entail
+  does not read yet include what a prefix-cache key is made of, a LoRA adapter's scaling rule (`use_rslora`), the
+  input strides a kernel assumes, the name a request setting travels under, the pairing style of a rotary
+  embedding, and which row a routing weight belongs to. Five of the seven sit at sites with no adapter (a bare
+  kernel call, a request parser, an adapter config file, the prefix-cache key, beam reordering).
+- **Models loaded by hub id.** When a model comes from the hub without a local folder, the Vocab and Stops checks on
+  transformers and vLLM say `unknown` ("could not be checked") instead of deciding.
 
 - The always-on KV contract on transformers' dynamic cache is at the edge of its target: 1.017-1.022x of an eager
   decode of Qwen3-4B, depending on how the runs are paired (target 1.02x; 1.041x before these fixes). On vLLM's

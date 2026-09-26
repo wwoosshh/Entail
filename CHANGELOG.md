@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Docs**
+- README (EN/KO): the "4 of 4" sentence is marked as the bugs the facts were written from, and the pre-registered
+  replay with the vocabulary frozen at 1.1.0 is reported next to it: 150 issues screened, 17 passed, 15 reproduced,
+  7 in the class by two blind raters, 0 of the 7 detected, 0 false alarms on the 8 outside the class. Known gaps
+  list the facts and sites it exposed, and the hub-id loads that the Vocab and Stops checks cannot decide.
+
 ## 1.1.0
 
 Released 2026-09-26. Five facts from the low-level study (codebook v2): classes of wrong output that 1.0 did not read,
