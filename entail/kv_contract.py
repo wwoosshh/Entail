@@ -9,8 +9,10 @@ of this sequence is actually held, and does it match what the sequence has. An a
 keeps the numbers, as a KvExtent; the rules are here, once:
 
   kv_written  the slots reserved and the slots written agree (an engine that counts both)
-  kv_needed   the slots held are the slots the tokens need: equal, or within one allocation unit when the engine
-              allocates in units (vLLM blocks). A sliding window is allowed to hold less
+  kv_needed   the slots held are at least the slots the tokens need. Fewer is the loss; more is not - an engine
+              reserves lookahead slots for speculative decoding and keeps the blocks of the drafts it rejected
+              (until M17.6 more than one allocation unit over was also broken, and vLLM's ngram speculation
+              showed it on a healthy run). A sliding window is allowed to hold less
   kv_shrank   nothing held shrank since the last check of the same sequence, unless a window caps it
   kv_layers   the layers of one cache agree on their length within a round of updates: every layer a round updates
               holds what the first one it updated holds (a window may be shorter)
@@ -82,14 +84,18 @@ def _rules(held, needed=None, written=None, window=None, previous=None, granular
                                          f"sequence, and nothing compares them.", written))
     if needed is not None and not capped:
         checked.append("kv_needed")
-        if granularity:
-            if not (needed <= held < needed + granularity):   # enough, and less than one unit more
+        # Fewer slots than tokens is the loss (tokens with nowhere to live). More is not: an engine reserves
+        # lookahead slots for speculative decoding and keeps the blocks of drafts it rejected (M17.6's probe on
+        # vLLM 0.30, ngram: 48 slots held for 32 tokens, unit 16, said broken until this line; the same on 0.23.0
+        # under extract_hidden_states). Until then the rule also broke on "more than one unit over".
+        if held < needed:
+            if granularity:
                 broken.append(("kv_needed", f"holds {held} KV slots for {needed} tokens, which is not one allocation "
                                             f"unit ({granularity}) of the right size. The slots a sequence holds and the "
                                             f"tokens it has are two numbers nobody compares.", needed))
-        elif held != needed:
-            broken.append(("kv_needed", f"holds {held} KV slots but the sequence has {needed} tokens. The length nobody "
-                                        f"compared is the one that drifts.", needed))
+            else:
+                broken.append(("kv_needed", f"holds {held} KV slots but the sequence has {needed} tokens. The length "
+                                            f"nobody compared is the one that drifts.", needed))
     if previous is not None and not capped:
         checked.append("kv_shrank")
         if held < previous:

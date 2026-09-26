@@ -50,6 +50,11 @@
   set). An architecture the table does not know, without a key, decides nothing.
 
 **Fixed**
+- The KV contract's `kv_needed` rule breaks only when a sequence holds fewer slots than its tokens. Holding more
+  than one allocation unit over its tokens was also `broken`, and under speculative decoding an engine
+  legitimately does that: it reserves lookahead slots and keeps the blocks of the drafts it rejected (vLLM 0.30
+  with ngram speculation said `broken` on a healthy run; vLLM 0.23 with extract_hidden_states likewise, seen in
+  the second replay). Fewer slots than tokens is the loss and is still reported.
 - The vLLM serve adapter's wrapper of `ParserManager.get_parser` binds its arguments by name and passes the rest
   through: with a fixed signature it raised `TypeError` on vLLM 0.23.0 (whose `get_parser` takes `is_harmony`)
   and the API server died - the one run entail broke in the second pre-registered replay.

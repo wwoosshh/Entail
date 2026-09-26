@@ -65,10 +65,14 @@ def test_a_block_table_that_is_short_is_still_refused():
     assert "holds 16 KV slots for 17 tokens" in (decide(1, 0, 1, num_new_computed_tokens=16) or "")
 
 
-def test_the_old_reading_would_have_refused_the_cache_hit():
-    """What the M5.1 adapter saw: the cache-hit tokens left out, 2 blocks for 1 token."""
+def test_the_old_reading_is_over_holding_which_is_no_loss():
+    """What the M5.1 adapter saw: the cache-hit tokens left out, 2 blocks for 1 token. Until M17.6 that was said
+    broken (more than one unit over); now holding more than the tokens need is not a loss - speculative decoding
+    reserves lookahead slots and keeps rejected drafts' blocks - so this reading passes, and the cache-hit count
+    of M14 matters for the shrink rule and the numbers, not for a refusal here."""
     setup()
-    assert "holds 32 KV slots for 1 tokens" in (decide(2, 0, 1) or "")
+    assert decide(2, 0, 1) is None
+    assert kv_contract.stats(vc.BOUNDARY)["refused"] == 0 and kv_contract.stats(vc.BOUNDARY)["broken"] == 0
 
 
 if __name__ == "__main__":
