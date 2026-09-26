@@ -485,6 +485,30 @@ class Tokenization:
         _number("Tokenization", "added", self.added, 0, integer=True)
 
 
+@dataclass(frozen=True)
+class KernelReference:
+    """What a kernel computes against the op's own native definition, on the same input (v9, M18.2).
+
+    An engine's custom op carries its meaning as a native (plain PyTorch) forward and dispatches to a kernel for
+    speed; the kernel is right when it computes the same values. `op` names the op class; `max_abs_diff` is the
+    largest |kernel - definition| over the compared rows, the definition run in float32; `floor` the largest
+    |definition in the input dtype - definition in float32|, the definition's own precision noise, when it could be
+    run; `scale` the largest |definition|. A kernel that pairs, lays out or scales its input differently from the
+    definition is off by the values themselves, far above the floor (vllm#42016: the MRoPE kernel paired split-wise
+    where the model pairs interleaved)."""
+    op: str
+    max_abs_diff: float
+    floor: Optional[float] = None
+    scale: Optional[float] = None
+
+    def __post_init__(self):
+        if not isinstance(self.op, str) or not self.op:
+            raise ValueError(f"KernelReference.op: expected the op's name, got {self.op!r}")
+        _number("KernelReference", "max_abs_diff", self.max_abs_diff, 0)
+        _number("KernelReference", "floor", self.floor, 0)
+        _number("KernelReference", "scale", self.scale, 0)
+
+
 # --- not in the vocabulary ------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -527,12 +551,13 @@ VOCABULARY = {
     "KvExtent": "RANGE", "ModelProps": "PROPERTY", "Prediction": "PROPERTY", "LatentScale": "PROPERTY",
     "Template": "PROPERTY", "Coverage": "MAPPING", "TokenType": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME",
     "Identity": "TIME", "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE", "KernelConfig": "LAYOUT",
-    "Vocab": "MAPPING", "Stops": "MAPPING", "Tokenization": "MAPPING",
+    "Vocab": "MAPPING", "Stops": "MAPPING", "Tokenization": "MAPPING", "KernelReference": "PROPERTY",
 }
 _HERE = {"Layout": Layout, "Quantized": Quantized, "Rotary": Rotary, "Positions": Positions, "Valid": Valid,
          "ModelProps": ModelProps, "Prediction": Prediction, "LatentScale": LatentScale, "Template": Template,
          "TokenType": TokenType, "Reduction": Reduction, "Epoch": Epoch, "Identity": Identity, "Assumed": Assumed,
-         "Origin": Origin, "KernelConfig": KernelConfig, "Vocab": Vocab, "Stops": Stops, "Tokenization": Tokenization}
+         "Origin": Origin, "KernelConfig": KernelConfig, "Vocab": Vocab, "Stops": Stops, "Tokenization": Tokenization,
+         "KernelReference": KernelReference}
 
 
 def vocabulary_class(name):

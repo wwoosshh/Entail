@@ -93,6 +93,9 @@ RULES = {
     # (tokenizer_contract.py, M18.1)
     "tokenizer_ids": "the engine's tokenizer encodes a probe text to other ids than the tokenizer the folder declares",
     "added_token_id": "the engine's tokenizer gives a declared added token another id than the folder declares",
+    # the kernel an op dispatches to against the op's own native definition (kernel_reference_contract.py, M18.2)
+    "kernel_reference_mismatch": "the kernel the op dispatches to computes other values than the op's own native "
+                                 "definition on the same input",
     "stop_dropped": "the consumer's stop set lacks an id the model's files declare as the end of a generation",
     "stop_id_out_of_range": "a declared eos, bos or pad id is past the tokenizer's highest id: no token, no stop",
     "adapter_key_dropped": "the adapter's config declares a setting that changes how its weights apply and this "

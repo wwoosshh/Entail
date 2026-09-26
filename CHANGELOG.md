@@ -26,6 +26,18 @@
   starting with whitespace gets other ids than tokenizer.json and sentencepiece give; on TinyLlama-1.1B-Chat the
   greedy outputs of 7 of 8 chat prompts differ between the two id sequences). Cost: the first process on a folder
   +241 ms at the median (the reference is built), later processes +2 ms.
+- `KernelReference` (vocabulary v9) and `kernel_reference_contract.py` with the vLLM adapter
+  `vllm_kernel_reference` (M18.2): a custom op's dispatched kernel against the op's own native definition, run on
+  the same input. vLLM's CustomOp carries its meaning as `forward_native` and dispatches to `forward_cuda`; after
+  the model is built, every op dispatching to a kernel path is wrapped, and on its first call per (op class, input
+  pattern) the kernel and the definition are run on a 64-row slice of the real input (clones; the engine's tensors
+  are untouched), the definition in the input dtype and in float32. Rule `kernel_reference_mismatch`: max
+  |kernel - definition| above FACTOR times the definition's own precision noise plus ATOL_ULPS units in the last
+  place of the output dtype at its largest magnitude; `broken` (reported, the run goes on). Afterwards the original
+  method is put back, so the steady state costs nothing. Ops that override `forward` (the mamba mixers), calls
+  during CUDA-graph capture and definitions that refuse the input are not compared (the last is `unknown` once).
+  Under torch.compile most ops run their definition and there is nothing to compare; the record says how many ops
+  were wrapped. FACTOR and ATOL_ULPS are provisional until set from the distribution on healthy runs.
 
 ## 1.2.0
 

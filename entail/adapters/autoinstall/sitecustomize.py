@@ -26,7 +26,8 @@ TARGETS = {
     "sglang.srt.model_executor.model_runner": ["entail.adapters.sglang_adapter"],
     "sglang.srt.managers.schedule_batch": ["entail.adapters.sglang_cache_contract"],
     "vllm.model_executor.model_loader.utils": ["entail.adapters.vllm_layout", "entail.adapters.vllm_loader",
-                                               "entail.adapters.vllm_pairing"],
+                                               "entail.adapters.vllm_pairing",
+                                               "entail.adapters.vllm_kernel_reference"],
     # Patched as soon as the selector has run, so attention.py imports the wrapped name.
     "vllm.v1.attention.selector": ["entail.adapters.vllm_attention"],
     "vllm.v1.core.kv_cache_manager": ["entail.adapters.vllm_cache_contract"],

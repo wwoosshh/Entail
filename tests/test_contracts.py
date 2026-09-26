@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 from entail import contracts, policies, record, sources  # noqa: E402
 from entail.contracts import RULES, Contract, Resolution, Verdict, agrees, decide  # noqa: E402
 from entail.coverage import Coverage  # noqa: E402
-from entail.facts import (VOCABULARY, Assumed, Certainty, Epoch, Fact, Identity, KernelConfig,  # noqa: E402
+from entail.facts import (VOCABULARY, Assumed, Certainty, Epoch, Fact, Identity, KernelConfig, KernelReference,  # noqa: E402
                           LatentScale, Layout, ModelProps, Origin, Positions, Prediction, Quantized, Reduction,
                           Rotary, Source, Stops, Template, Tokenization, TokenType, Valid, Vocab)
 from entail.kv_contract import KvExtent  # noqa: E402
@@ -34,6 +34,8 @@ SAMPLES = {
     "Vocab": (Vocab(size=100000), Vocab(size=32000)),
     "Stops": (Stops(eos=(128001, 128009)), Stops(eos=(128001,))),
     "Tokenization": (Tokenization(digest="0f3a", probes=10, added=2), Tokenization(digest="9c1d", probes=10, added=2)),
+    "KernelReference": (KernelReference(op="RotaryEmbedding", max_abs_diff=0.0, floor=0.0, scale=1.0),
+                        KernelReference(op="RotaryEmbedding", max_abs_diff=2.0, floor=0.0, scale=1.0)),
     "Assumed": (Assumed((("batch", 4),)), Assumed((("batch", 0),))),
     "Origin": (Origin("temperature", "user"), Origin("temperature", "default")),
 }
