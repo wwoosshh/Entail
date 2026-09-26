@@ -164,6 +164,23 @@ def check_static(model_path: str, engine: str, settings: dict):
                                     special_ids=built.get("special"), policy=policy, record=False)
 
     checks.append(("stops", stops))
+
+    def adapter_config():
+        """A LoRA adapter's declaration against what `engine` reads of it (data/adapter_config_keys.json; M17.1). A
+        key the engine's adapter carries at load (SGLang's scaling for use_rslora) is said resolved, as the stop-set
+        check says for add_stops; a key nothing carries is broken."""
+        from . import adapter_config_contract as acc
+
+        consumer = acc.consumer_of(engine)
+        declared = acc.read(path)
+        if consumer is None or not declared:
+            return []
+        return acc.check(f"load:{engine}.adapter_config", consumer, engine, declared,
+                         os.path.join(path, "adapter_config.json"), acc.static_handles(engine), policy=policy,
+                         record=False)
+
+    if os.path.isfile(os.path.join(path, "adapter_config.json")):
+        checks.append(("adapter config", adapter_config))
     for label, run in checks:
         try:
             model += run()

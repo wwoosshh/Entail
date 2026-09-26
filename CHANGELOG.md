@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+**Added**
+- A LoRA adapter's `adapter_config.json` as a declaration file (`adapter_config_contract.py`,
+  `data/adapter_config_keys.json`): every PEFT key, which ones each consumer reads (PEFT for transformers and
+  diffusers; vLLM 0.30's PEFTHelper; SGLang 0.5.20's LoRAConfig, with code lines), and one rule: a key declared with
+  a value that changes how the weights apply, that the consumer does not read, is `broken` at that consumer's load
+  boundary, or `resolved` where the consumer can carry it. Neutral values, keys the weights carry and training-time
+  keys decide nothing; a key the consumer refuses loudly passes with a note. Adapters `sglang_lora` (carries
+  `use_rslora` into the adapter's scaling, computed in the core: sglang#40835 served rsLoRA adapters 4-8x too weak)
+  and `vllm_lora` (reports what vLLM drops: `rank_pattern`, `alpha_pattern`, `lora_bias`, ...). `entail check` on an
+  adapter folder decides it per engine.
+
 **Docs**
 - README (EN/KO): the "4 of 4" sentence is marked as the bugs the facts were written from, and the pre-registered
   replay with the vocabulary frozen at 1.1.0 is reported next to it: 150 issues screened, 17 passed, 15 reproduced,

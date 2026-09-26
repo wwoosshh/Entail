@@ -163,6 +163,7 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
 | **vLLM:** a prefix-cache block hash that no longer stands for the tokens it was made from. A streaming-session update truncates a request's tokens but its block hashes are only ever appended, so a hash chained over discarded tokens survives, and a later request whose prefix matches the OLD tokens is served the NEW tokens' KV (vllm#49377, #49449; live in 0.30.0) | the stale hashes are forgotten from the first stale block on and the engine remakes them from the current tokens | vLLM 0.30.0, SmolLM2-135M-Instruct: without entail the rebuilt session got a false 16-token cache hit and a wrong continuation; with entail the hash is caught at the update, recomputed, and the output is the correct recomputed one |
 | **SGLang:** a block-FP8 kernel whose K tile is not a divisor of the weights' quantization block, so the scale steps once per tile and skips blocks (a hand-supplied config, sglang#39626; also one shipped H100 fused-MoE config for E=512, N=256 with BLOCK_SIZE_K 256 over a block of 128) | the tile is clamped to the block, the engine's own default | SGLang 0.5.20: the dense kernel returned 64 where 288 was right, 288 with the clamp; the shipped MoE config gave 256 where 512 was right at the kernel level, 512 with the clamp. All 1,538 other shipped block-FP8 entries divide, so ordinary runs decide nothing |
 | a generation that runs past its end because the file the engine reads for its stop ids is not the file that declares them. generation_config.json, config.json and the tokenizer each declare where a generation ends, and transformers reads only the first, vLLM the first plus the tokenizer, SGLang the first two (the April-2024 Llama 3 shape: config.json named one end, the model emitted another) | the ids the other files declare are added to the engine's stop set at load | transformers 5.17, Llama-3.2-3B-Instruct with a generation_config.json that lists only `<\|end_of_text\|>`: without entail all three test answers ran to the 160-token limit past their `<\|eot_id\|>`; with entail the end config.json declares was added at load and the answers stopped at 8, 18 and 37 tokens |
+| a LoRA adapter served with the wrong scale, because its `adapter_config.json` declares a setting the engine never reads (`use_rslora`: PEFT scales by `lora_alpha / sqrt(r)`, SGLang always by `lora_alpha / r`, so the adapter is 4x too weak at r=16 and 8x at r=64; the same file can declare `rank_pattern`, `alpha_pattern`, `lora_bias`, `modules_to_save`, which vLLM and SGLang drop as silently) | every key of the file against the keys each engine reads (a table with code lines); a dropped key is reported, and carried where the engine has a place for it: SGLang's adapter scaling is set to what PEFT would use | SGLang 0.5.20, sglang#40835's own script (a PEFT rsLoRA adapter, r=64 alpha=128): without entail SGLang held scaling 2.0 where PEFT holds 16.0; with entail 16.0. A real Engine with a PEFT adapter (r=16 alpha=32) on Qwen2.5-3B-Instruct: resolved to 8.0; the same adapter without `use_rslora`, and both on vLLM 0.30: no decision but pass |
 
 **Checks** (and reports what nothing can resolve)
 
@@ -185,6 +186,9 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
 - on vLLM's scoring path, the token type a cross-encoder's padding is given against the tokenizer's declared pad
   type (vllm#58138: the padding got the document's segment and the /rerank scores moved); vLLM 0.30 keeps token
   types in a form that cannot carry the repair, so this is reported, and refused under `ENTAIL_ON_BROKEN=stop`
+- statically, per engine, a LoRA adapter folder's `adapter_config.json` against the keys that engine reads of it
+  (`entail check <adapter folder>`: a dropped key is reported, and said resolved where the engine's adapter carries
+  it at load).
 - statically, per engine, the stop set each engine would build from a model folder against every end its files
   declare (`entail check`)
 - in debug mode, the boundaries you declare in your own code (`@entail.boundary`: what each argument means);
@@ -303,10 +307,12 @@ For 1.0 every measurement of the development milestones was run again on the fin
 ## Known gaps
 
 - **Unseen bugs.** On the pre-registered replay above, 0 of 7 in-class reproduced bugs were detected. Facts entail
-  does not read yet include what a prefix-cache key is made of, a LoRA adapter's scaling rule (`use_rslora`), the
-  input strides a kernel assumes, the name a request setting travels under, the pairing style of a rotary
-  embedding, and which row a routing weight belongs to. Five of the seven sit at sites with no adapter (a bare
-  kernel call, a request parser, an adapter config file, the prefix-cache key, beam reordering).
+  does not read yet include what a prefix-cache key is made of, the input strides a kernel assumes, the name a
+  request setting travels under, the pairing style of a rotary embedding, and which row a routing weight belongs
+  to. Five of the seven sat at sites with no adapter (a bare kernel call, a request parser, an adapter config file,
+  the prefix-cache key, beam reordering); the adapter config file is read since (the LoRA row above), the rest are
+  not. That row is a retrospective repair of one of the seven, not a detection: the next detection rate comes from
+  a second pre-registered replay with the new vocabulary frozen.
 - **Models loaded by hub id.** When a model comes from the hub without a local folder, the Vocab and Stops checks on
   transformers and vLLM say `unknown` ("could not be checked") instead of deciding.
 

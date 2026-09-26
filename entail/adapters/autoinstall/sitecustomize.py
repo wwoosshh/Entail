@@ -34,6 +34,10 @@ TARGETS = {
     # the stop set (M15.8): vLLM keeps it on the input processor, SGLang on its model config
     "vllm.v1.engine.input_processor": ["entail.adapters.vllm_stops"],
     "sglang.srt.configs.model_config": ["entail.adapters.sglang_stops"],
+    # a LoRA adapter's config against what the engine reads of it (M17.1): vLLM reads it on the worker,
+    # SGLang when the adapter object is built
+    "vllm.lora.peft_helper": ["entail.adapters.vllm_lora"],
+    "sglang.srt.lora.lora": ["entail.adapters.sglang_lora"],
     "sglang.kernels.ops.quantization.fp8_kernel": ["entail.adapters.sglang_fp8_tile"],
     # the fused-MoE config lookup: wrapped right after its module runs, so the kernel module binds the wrapped name
     "sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_config":
