@@ -28,20 +28,25 @@
   cache under the names it knows (`transformers_beam`); a model whose cache lives under another name is reported
   (5.12.1 reordered `past_key_values` only: transformers#46612; 5.17.0 reorders every name).
 - What a Triton kernel is told about its tensors (`kernel_launch_contract.py`, adapter `triton_launch`, engine-
-  independent: one hook on `JITFunction.run`): a tensor strided in its innermost dimension handed to a kernel whose
-  parameters name no stride at all is `broken` (the kernel reads it as if contiguous); handed to a kernel that does
-  take strides but was not told this one, it is `unknown` (said once). Each (kernel, layout) is decided once per
-  process; warm-up launches are not looked at. sglang#21843 (fused_gdn_gating read interleaved a/b) is the case
-  the rule comes from; there the kernel takes row strides, so the decision is `unknown` at the kernel's boundary.
+  independent: one hook on `JITFunction.run`, so every `@triton.jit` kernel launched eagerly by any engine; kernels
+  Inductor generates for a compiled forward are not seen): a tensor strided in its innermost dimension handed to a
+  kernel that was not told that stride (no integer value argument equals it) and whose parameters name no stride
+  at all (`stride`, `_s0`, `sxm`, `ld...`) is `broken` (the kernel reads it as if contiguous); handed to a kernel
+  that names strides but was not told this one, it is `unknown` (said once). Each (kernel, stride pattern) is
+  decided once per process, and a kernel is looked at for its first eight strided patterns; compile-only warm-ups
+  are not launches. sglang#21843 (fused_gdn_gating read interleaved a/b) is the case the rule comes from; there
+  the kernel takes row strides, so the decision is `unknown` at the kernel's boundary.
 - `Rotary.pairing` (vocabulary v8): how a rotary embedding pairs the dimensions it rotates, `split` (i with
   i + d/2, the Llama convention) or `interleaved` (2i with 2i+1, GPT-J's). Declared by a config key
   (`rope_interleave`, `rope_interleaved`, `is_neox_style`) or, failing that, by the architecture's reference
-  implementation (`data/rotary_pairing.json`: transformers 5.17.0 modeling files with lines; GLM, Cohere, Ernie 4.5
-  and GPT-J interleaved, Llama, Qwen, Gemma, DeepSeek-V3 split). `rotary_pairing_contract.py` decides the layers
-  vLLM built (`is_neox_style`, adapter `vllm_pairing`) against the declaration - `resolved` by setting the layers'
-  convention, `broken` where an engine's kernel path pairs split-wise whatever the layer says (vLLM's Triton MRoPE
-  kernel before 0.27.0: vllm#42016, #49290). A multimodal model's language model only: its vision tower pairs by
-  its own reference and is not compared. An architecture the table does not know, without a key, decides nothing.
+  implementation (`data/rotary_pairing.json`: transformers 5.17.0 configuration and modeling files with lines; GLM,
+  Cohere, Ernie 4.5, GPT-J and DeepSeek-V3 interleaved, Llama, Qwen and Gemma split). `rotary_pairing_contract.py`
+  decides the rotary modules vLLM built for the language model (`is_neox_style`, adapter `vllm_pairing`) against
+  the declaration - `resolved` by setting the modules' convention, `broken` where the model's MRoPE module
+  dispatches to a kernel that pairs split-wise whatever the layer says (vLLM's Triton MRoPE kernel before 0.27.0
+  with the custom op enabled: vllm#42016, #49290). Not compared: a multimodal model's vision tower (its own
+  reference), a DSA indexer (its own key), and modules that pair both ways in one language model (`unknown`, nothing
+  set). An architecture the table does not know, without a key, decides nothing.
 
 **Fixed**
 - A model loaded by hub id resolves to its cached snapshot folder again, so the Vocab and Stops checks decide

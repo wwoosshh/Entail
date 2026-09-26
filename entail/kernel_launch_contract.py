@@ -11,21 +11,29 @@ The rule is one, generic, for every kernel and every engine; it decides from the
 kernel (ladder: a consumer whose use is unknown is unknown, so the rule is conservative by design):
 
   kernel_stride_assumed   a tensor argument whose innermost dimension of size > 1 has a stride other than 1, handed
-                          to a kernel whose parameters name no stride at all: the kernel cannot know, so it reads
-                          the tensor as if it were contiguous -> broken (reported; nothing here can repair a launch).
-  (unknown)               the same tensor, handed to a kernel that does take stride arguments, none of whose integer
+                          to a kernel that was not told that stride (no integer argument equals it) and whose
+                          parameters name no stride at all: the kernel cannot know, so it reads the tensor as if it
+                          were contiguous -> broken (reported; nothing here can repair a launch).
+  (unknown)               the same tensor, handed to a kernel that does name stride arguments, none of whose integer
                           arguments equals that innermost stride: the kernel may or may not know; said once.
-  A stride of 0 (an expanded view) and dimensions of size 1 are not strides a kernel can misread; a tensor passed
-  as a plain integer (data_ptr) is invisible here.
+  (pass)                  some integer argument of the kernel equals the innermost stride: told, whatever the name.
+  A stride-like name is `stride` anywhere, `_s0`-style suffixes, `s`+one or two letters (with at most one more
+  character after an underscore: `sxm`, `sq_d`, not `seq_len`), `s_...`, `ld...` (vLLM's sparse indexer `q_s0`,
+  mxfp8's `sxm`, SGLang's `a_s0`/`sq_d`; M17.4 review, finding 1). Integer arguments count
+  only among the kernel's value parameters (`ints_from`): constexprs and launch options (BLOCK_*, num_warps) are
+  not strides, and a collision with them would say "told" falsely. A stride of 0 (an expanded view) and dimensions
+  of size 1 are not strides a kernel can misread; a tensor passed as a plain integer (data_ptr) is invisible here.
 
-Each (kernel, layout of its tensor arguments) is decided once per process (the adapter's memo), so the cost sits at
-the first launch of each layout, not on every launch.
+Each (kernel, stride pattern of its tensor arguments) is decided once per process (the adapter's memo), so the cost
+sits at the first launch of each pattern, not on every launch.
 """
-from typing import Dict, List, Optional
+import re
+from typing import Dict, Iterable, List, Optional
 
 from . import tally as _tally
 
 RULE_NAMES = ("kernel_stride_assumed",)
+STRIDE_NAME = re.compile(r"stride|_s\d+$|^s[a-z]{1,2}(_[a-z0-9])?$|^s_|^ld", re.IGNORECASE)   # sq_d, sxm; not seq_len
 
 
 def innermost_stride(t):
@@ -40,13 +48,19 @@ def innermost_stride(t):
     return None
 
 
-def classify(bound: Dict[str, object]) -> List[dict]:
+def stride_like(name: str) -> bool:
+    return bool(STRIDE_NAME.search(name))
+
+
+def classify(bound: Dict[str, object], ints_from: Optional[Iterable[str]] = None) -> List[dict]:
     """Per tensor argument with a strided innermost dimension: its name, the stride, and the status by the
-    kernel's other arguments: 'assumed' (no stride-named parameter), 'unknown' (stride parameters exist, none of
-    the integer arguments equals the stride), 'told' (some integer argument equals it)."""
+    kernel's other arguments: 'told' (an integer value parameter equals the stride), 'unknown' (stride-like
+    parameters exist, none equals it), 'assumed' (no stride-like parameter and none equals it). `ints_from`: the
+    names of the kernel's value (non-constexpr) parameters; None counts every integer argument."""
     names = list(bound)
-    stride_params = [n for n in names if "stride" in n.lower()]
-    ints = {int(v) for v in bound.values() if isinstance(v, int) and not isinstance(v, bool)}
+    stride_params = [n for n in names if stride_like(n)]
+    ints = {int(v) for n, v in bound.items()
+            if isinstance(v, int) and not isinstance(v, bool) and (ints_from is None or n in ints_from)}
     out = []
     for n, v in bound.items():
         if not (hasattr(v, "stride") and hasattr(v, "shape") and callable(getattr(v, "stride", None))):
@@ -57,22 +71,23 @@ def classify(bound: Dict[str, object]) -> List[dict]:
         d, size, s = inner
         if s in (0, 1):
             continue
-        status = "assumed" if not stride_params else ("told" if s in ints else "unknown")
+        status = "told" if s in ints else ("unknown" if stride_params else "assumed")
         out.append({"name": n, "dim": d, "size": size, "stride": s, "status": status,
                     "stride_params": stride_params})
     return out
 
 
 def check(boundary: str, consumer: str, kernel: str, bound: Dict[str, object], where: str, owner=None,
-          policy=None, record: bool = True) -> list:
-    """Decide one launch. `bound`: parameter name -> argument (tensors and scalars alike, constexprs included).
-    Returns the decisions; with `record` they go through load.enforce, once per `owner` (the adapter's layout key).
-    A launch with no strided tensor passes silently (counted)."""
+          policy=None, record: bool = True, ints_from: Optional[Iterable[str]] = None) -> list:
+    """Decide one launch. `bound`: parameter name -> argument (tensors and scalars alike, constexprs included);
+    `ints_from`: the value parameters whose integers count as strides told. Returns the decisions; with `record`
+    they go through load.enforce, once per `owner` (the adapter's layout key). A launch with no strided tensor
+    passes silently (counted)."""
     from . import load, policies
     from .contracts import RULES, Contract, Decision, Verdict, unrepaired
 
     policy = policy or policies.current()
-    found = classify(bound)
+    found = classify(bound, ints_from)
     contract = Contract(boundary, consumer, ("Layout",), ("Layout",))
     decisions: List[Decision] = []
     for f in found:
@@ -85,7 +100,8 @@ def check(boundary: str, consumer: str, kernel: str, bound: Dict[str, object], w
             decisions.append(Decision(contract, "Layout", verdict, RULES["kernel_stride_assumed"], blocking=blocking,
                                       note=(f"{f['name']} is strided in its innermost dimension (dim {f['dim']}, size "
                                             f"{f['size']}, stride {f['stride']}) and {kernel} takes no stride "
-                                            f"argument: it reads {f['name']} as if it were contiguous ({seen})")))
+                                            f"argument and no integer argument equals {f['stride']}: it reads "
+                                            f"{f['name']} as if it were contiguous ({seen})")))
         else:
             decisions.append(Decision(contract, "Layout", Verdict.UNKNOWN, RULES["cannot_check"],
                                       note=(f"{f['name']} is strided in its innermost dimension (dim {f['dim']}, "

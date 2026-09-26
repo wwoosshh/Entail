@@ -23,9 +23,9 @@
   "gemma3": {"pairing": "split", "ref": "modeling_gemma3.py rotate_half split"},
   "gemma3_text": {"pairing": "split", "ref": "the text model of gemma3"},
   "mllama": {"pairing": "split", "ref": "modeling_mllama.py rotate_half split"},
-  "deepseek_v3": {"pairing": "split", "ref": "modeling_deepseek_v3.py L289 rotate_half split unless the config key rope_interleave is true (L464)"}
+  "deepseek_v3": {"pairing": "interleaved", "ref": "configuration_deepseek_v3.py L114: rope_interleave defaults to True, and modeling_deepseek_v3.py L464 applies apply_rotary_pos_emb_interleave (L322) when it is; the repo's own configuration_deepseek.py (trust_remote_code) has no such key, so the default is the declaration there; `rope_interleave: false` declares split (L289 rotate_half). vLLM builds it interleaved (deepseek_v2.py is_neox_style=False). The first table row said split, from L289 alone: a mismatch the review caught before any run (M17.4 review, finding 9)"}
  },
  "kernels": {
-  "vllm.mrope_triton": {"ignores_pairing_before": "0.27.0", "applies_to": "models with mrope_section", "ref": "vllm/model_executor/layers/rotary_embedding/mrope.py: is_neox_style became a kernel constexpr in #49906 (2026-07-28, first in 0.27.0); before it the kernel paired dimensions split-wise for every model (vllm#42016 GLM-OCR, vllm#49290)"}
+  "vllm.mrope_triton": {"ignores_pairing_before": "0.27.0", "applies_to": "models with mrope_section", "applies_when": "the MRoPE module dispatches to its CUDA/HIP kernel (CustomOp enabled: enforce_eager, ROCm, or +rotary_embedding in compilation_config.custom_ops); under the default compiled CUDA path forward_native honours is_neox_style. The adapter reads the module's dispatched forward (_forward_method) and passes mrope only when it is not forward_native", "ref": "vllm/model_executor/layers/rotary_embedding/mrope.py: is_neox_style became a kernel constexpr in #49906 (2026-07-28, first in 0.27.0); before it the kernel paired dimensions split-wise for every model (vllm#42016 GLM-OCR, vllm#49290); dispatch: custom_op.py dispatch_forward / default_on"}
  }
 }

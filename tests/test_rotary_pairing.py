@@ -94,7 +94,11 @@ def test_the_vllm_adapter_reads_the_layers_and_sets_them():
     model = Model()
     cfg = SimpleNamespace(to_dict=lambda: {"model_type": "glm_ocr", "text_config": {"model_type": "glm_ocr_text"}})
     held, mrope, config, path = vllm_pairing.read_choice(model, SimpleNamespace(hf_config=cfg, model="/m"))
-    assert held == {"layers.0.rotary_emb": "split", "layers.1.rotary_emb": "split"} and mrope and path == "/m"
+    assert held == {"layers.0.rotary_emb": "split", "layers.1.rotary_emb": "split"} and path == "/m"
+    assert mrope is False, "no readable dispatch: the kernel row is not claimed (review finding 13)"
+    for _, m in model.mods[:2]:
+        m._forward_method = SimpleNamespace(__name__="forward_cuda")
+    assert vllm_pairing.read_choice(model, SimpleNamespace(hf_config=cfg, model="/m"))[1] is True
     _, rec = decided(lambda: vllm_pairing._decide(model, SimpleNamespace(hf_config=cfg, model="/m")))
     got = [d for d in rec if d.contract.boundary == vllm_pairing.BOUNDARY]
     assert got and got[0].verdict is Verdict.RESOLVED, got
@@ -141,8 +145,72 @@ def test_only_the_language_model_of_a_multimodal_model_is_compared():
     wrong = Multimodal(text_neox=True)
     _, rec = decided(lambda: vllm_pairing._decide(wrong, SimpleNamespace(hf_config=cfg, model="glm-ocr-2")))
     got = [d for d in rec if d.contract.boundary == vllm_pairing.BOUNDARY]
-    assert got and got[0].verdict is Verdict.RESOLVED and "language model's rotary layers" in got[0].chosen.source.where
+    assert got and got[0].verdict is Verdict.RESOLVED and "language model's rotary modules" in got[0].chosen.source.where
+    assert got[0].declared.value.pairing == "interleaved" and got[0].chosen.value.pairing == "split"
     assert all(m.is_neox_style is False for _, m in wrong.lm.mods) and all(m.is_neox_style is True for _, m in wrong.vision)
+
+
+def test_review_findings_deepseek_default_mixed_conventions_indexer_and_a_missing_language_model():
+    """M17.4 review: (9) DeepSeek-V3's reference default is interleaved (rope_interleave defaults to True; the
+    repo's own config class has no key); (10) modules that pair both ways are said unknown and left alone, and a
+    DSA indexer (its own key) is not compared; (12) a multimodal model whose language model cannot be found is said
+    unknown, not compared as a whole; (13) the kernel row applies only when the MRoPE module dispatches to the
+    kernel."""
+    from entail.adapters import vllm_pairing
+
+    assert rpc.declared({"model_type": "deepseek_v3"})[0] == "interleaved"
+    assert rpc.declared({"model_type": "deepseek_v3", "rope_interleave": False})[0] == "split"
+
+    class Rot:
+        def __init__(self, neox, cls="RotaryEmbedding", fwd="forward_native"):
+            self.is_neox_style = neox
+            self._forward_method = SimpleNamespace(__name__=fwd)
+            self.__class__ = type(cls, (Rot,), {})
+
+    class LM:
+        def __init__(self, mods):
+            self.mods = mods
+
+        def named_modules(self):
+            return list(self.mods)
+
+    cfg = SimpleNamespace(to_dict=lambda: {"model_type": "glm4"})
+    # mixed conventions in the language model: unknown, nothing set
+    mixed = LM([("layers.0.rotary_emb", Rot(False)), ("layers.1.other_rotary", Rot(True))])
+    _, rec = decided(lambda: vllm_pairing._decide(mixed, SimpleNamespace(hf_config=cfg, model="mixed")))
+    got = [d for d in rec if d.contract.boundary == vllm_pairing.BOUNDARY]
+    assert got and got[0].verdict is Verdict.UNKNOWN and "pair both ways" in got[0].note, got
+    assert mixed.mods[0][1].is_neox_style is False and mixed.mods[1][1].is_neox_style is True
+    # an indexer with its own key is not compared and not set
+    dsa = LM([("layers.0.self_attn.rotary_emb", Rot(False)), ("layers.0.self_attn.indexer.rotary_emb", Rot(True))])
+    held, mrope, _, _ = vllm_pairing.read_choice(dsa, SimpleNamespace(hf_config=cfg, model="dsa"))
+    assert held == {"layers.0.self_attn.rotary_emb": "interleaved"} and not mrope
+    _, rec = decided(lambda: vllm_pairing._decide(dsa, SimpleNamespace(hf_config=cfg, model="dsa")))
+    got = [d for d in rec if d.contract.boundary == vllm_pairing.BOUNDARY]
+    assert got and all(d.verdict is Verdict.PASS for d in got) and dsa.mods[1][1].is_neox_style is True
+    # the kernel row needs the MRoPE module on its kernel path
+    m_native = LM([("layers.0.rotary_emb", Rot(False, "MRotaryEmbedding", "forward_native"))])
+    m_cuda = LM([("layers.0.rotary_emb", Rot(False, "MRotaryEmbedding", "forward_cuda"))])
+    assert vllm_pairing.read_choice(m_native, SimpleNamespace(hf_config=cfg))[1] is False
+    assert vllm_pairing.read_choice(m_cuda, SimpleNamespace(hf_config=cfg))[1] is True
+
+    # a multimodal model whose language model cannot be found: unknown, the vision tower untouched
+    class Multimodal:
+        def __init__(self):
+            self.vision = [("visual.blocks.0.attn.apply_rotary_emb", Rot(True))]
+
+        def get_language_model(self):
+            raise NotImplementedError
+
+        def named_modules(self):
+            return list(self.vision)
+
+    mm = Multimodal()
+    assert vllm_pairing.language_model(mm) is None
+    _, rec = decided(lambda: vllm_pairing._decide(mm, SimpleNamespace(hf_config=cfg, model="mm")))
+    got = [d for d in rec if d.contract.boundary == vllm_pairing.BOUNDARY]
+    assert got and got[0].verdict is Verdict.UNKNOWN and "could not be found" in got[0].note, got
+    assert mm.vision[0][1].is_neox_style is True
 
 
 if __name__ == "__main__":

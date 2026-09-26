@@ -94,47 +94,60 @@ def test_the_triton_adapter_binds_arguments_memoises_layouts_and_names_the_engin
     assert triton_launch.handles(fn) == {}
 
 
-def test_the_hook_looks_at_a_kernel_for_its_first_layouts_only():
+def test_stride_like_names_and_a_stride_told_by_value_are_not_broken():
+    """Review finding 1: vLLM's sparse indexer names its strides q_s0/q_s1, mxfp8 sxm/sxk, SGLang a_s0/sq_d; a
+    kernel told the innermost stride under any name passes, one with stride-like names but not this value is
+    unknown, and broken is kept for no stride-like name and no equal integer. Finding 2: integers count among the
+    kernel's value parameters only (constexprs and launch options are not strides)."""
+    if torch is None:
+        return
+    a = torch.randn(8, 32)[:, ::2]                                   # strides (32, 2)
+    assert all(klc.stride_like(n) for n in ("stride_am", "q_s0", "weights_s1", "sxm", "sq_d", "s_k", "lda", "ld_a"))
+    assert not any(klc.stride_like(n) for n in ("a", "seq_len", "NUM_HEADS", "scale", "softmax_scale", "seqlen_q"))
+    out = klc.check("kernel:test.k", "test.k", "k", {"a": a, "q_s0": 32, "q_s1": 2}, "k launch", record=False)
+    assert [d.verdict for d in out] == [Verdict.PASS], out                # told under a name without "stride"
+    out = klc.check("kernel:test.k", "test.k", "k", {"a": a, "q_s0": 32, "q_s1": 4}, "k launch", record=False)
+    assert [d.verdict for d in out] == [Verdict.UNKNOWN] and "q_s0, q_s1" in out[0].note
+    out = klc.check("kernel:test.k", "test.k", "k", {"a": a, "n": 32, "inner": 2}, "k launch", record=False)
+    assert [d.verdict for d in out] == [Verdict.PASS], "an integer equal to the stride is told, whatever its name"
+    out = klc.check("kernel:test.k", "test.k", "k", {"a": a, "n": 32, "BLOCK": 2}, "k launch", record=False,
+                    ints_from={"a", "n"})
+    assert out[0].verdict is Verdict.BROKEN and "no integer argument equals 2" in out[0].note, out
+    out = klc.check("kernel:test.k", "test.k", "k", {"a": a, "stride_a": 32, "num_warps": 2}, "k launch",
+                    record=False, ints_from={"a", "stride_a"})
+    assert [d.verdict for d in out] == [Verdict.UNKNOWN], "a launch option equal to the stride does not tell it"
+
+
+def test_the_hook_decides_each_stride_pattern_once_and_caps_strided_patterns_per_kernel():
+    """Review finding 3: the memo key is shape-free (rank and innermost stride per tensor), so a server's decode
+    shapes share one pattern, a strided tensor at a new shape is still seen, and only strided patterns count
+    toward the cap."""
     if torch is None:
         return
     from entail.adapters import triton_launch
 
-    calls = []
-
     class FakeJIT:
-        params = [SimpleNamespace(name="x")]
+        params = [SimpleNamespace(name="x", is_constexpr=False), SimpleNamespace(name="BLOCK", is_constexpr=True)]
 
         def fn(self):
             pass
 
-        def run(self, *args, grid, warmup, **kwargs):
-            calls.append(len(args))
-
     triton_launch.reset()
-    orig = triton_launch._ORIG
-    triton_launch._ORIG = FakeJIT.run
     try:
-        run = triton_launch.__dict__.get("_wrapped_run")
-        # install() builds the wrapper around triton's class; the same wrapper logic, on the fake, through a copy
-        seen_before = len(triton_launch._SEEN)
         jit = FakeJIT()
-        was = core.mode()
-        core.set_mode("load")
-        try:
-            for n in range(triton_launch.LIMIT + 4):
-                key = triton_launch._layout_key(jit, (torch.empty(2, n + 2),), {})
-                if triton_launch._COUNT.get(id(jit), 0) < triton_launch.LIMIT and key not in triton_launch._SEEN:
-                    triton_launch._SEEN.add(key)
-                    triton_launch._COUNT[id(jit)] = triton_launch._COUNT.get(id(jit), 0) + 1
-        finally:
-            core.set_mode(was)
+        assert triton_launch.value_params(jit) == ["x"]
+        looked = [triton_launch.should_look(jit, (torch.empty(2, n + 2),), {"BLOCK": 16}) for n in range(20)]
+        assert sum(k is not None for k in looked) == 1, "contiguous launches of 20 shapes: one pattern"
+        assert triton_launch._COUNT.get(id(jit), 0) == 0, "a contiguous pattern does not count toward the cap"
+        big = torch.randn(4, 64)
+        strided = [triton_launch.should_look(jit, (big[:, ::s],), {}) for s in range(2, 2 + triton_launch.LIMIT + 4)]
+        assert sum(k is not None for k in strided) == triton_launch.LIMIT
         assert triton_launch._COUNT[id(jit)] == triton_launch.LIMIT
-        assert len(triton_launch._SEEN) - seen_before == triton_launch.LIMIT
-        assert triton_launch.stats()["kernels_seen"] >= 1
+        again = triton_launch.should_look(jit, (torch.randn(16, 64)[:, ::2],), {})
+        assert again is None, "the same strided pattern at another shape was decided already"
+        assert triton_launch.stats()["kernels_seen"] == 1 and triton_launch.stats()["patterns_decided"] == 1 + triton_launch.LIMIT
     finally:
-        triton_launch._ORIG = orig
         triton_launch.reset()
-        _ = run
 
 
 if __name__ == "__main__":

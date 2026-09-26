@@ -475,6 +475,17 @@ def _vocabulary_keys() -> Dict[str, str]:
 
 VOCABULARY_KEYS = _vocabulary_keys()
 
+# A key the vocabulary maps is "compared where a consumer of the fact reads it" only on an engine that has such a
+# consumer: the pairing keys are compared at vLLM's rotary modules (adapters/vllm_pairing) and read by nothing on
+# transformers or SGLang, where they stay unread (M17.4 review, finding 15). A field absent here is compared on
+# every engine (the RoPE fields, at the config and the rotary layers).
+COMPARED_BY = {"Rotary.pairing": frozenset({"vllm"})}
+
+
+def compared_by(field: str, engine: str) -> bool:
+    engines = COMPARED_BY.get(field)
+    return True if engines is None else engine in engines
+
 
 def _distance(a: str, b: str) -> int:
     """Edits (insert, delete, substitute) that turn `a` into `b`."""
@@ -560,7 +571,8 @@ def config_keys(engine: str, scopes: Sequence[tuple], where: str, policy: Option
         return []
     values = {prefix + k: v for prefix, raw, _, _ in scopes for k, v in raw.items()}
     wrong = {k: v for k, v in ((k, misspelt(k, values.get(k))) for k in left) if v}
-    mapped = [k for k in left if k not in wrong and k.rsplit(".", 1)[-1] in VOCABULARY_KEYS]
+    mapped = [k for k in left if k not in wrong and k.rsplit(".", 1)[-1] in VOCABULARY_KEYS
+              and compared_by(VOCABULARY_KEYS[k.rsplit(".", 1)[-1]], engine)]
     unread = [k for k in left if k not in wrong and k not in mapped]
     declared_fact = Fact("Coverage", Coverage(given, given, ()), Source("config", f"{where} (every key it gives)"),
                          Certainty.DECLARED)

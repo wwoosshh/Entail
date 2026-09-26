@@ -26,6 +26,7 @@ import json
 import hashlib
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -37,6 +38,7 @@ _OPEN = {}        # (pid, path) -> the file, kept open: one write and one flush 
                   # file per line cost 4.6 ms on a 9P mount (a project under /mnt/c) - 6% of a batch-32 decode when
                   # a boundary is per request (M17.3's S4 run); kept open it is 0.18 ms there, 0.005 ms on ext4
 _OPEN_LIMIT = 8   # files kept open per process (a day's rollover opens a new one; the oldest is closed past this)
+_LOCK = threading.Lock()   # one line at a time: a shared TextIOWrapper would interleave two threads' lines
 
 
 def log_dir() -> Optional[str]:
@@ -64,11 +66,19 @@ def _append(path, text) -> None:
                 with open(ignore, "w", encoding="utf-8") as f:
                     f.write("# written by entail: what it said about this project's runs, not part of the project\n*\n")
             _READY.add(folder)
-        f = _file(path)
-        f.write(text)
-        f.flush()
+        if path in _WARNED:
+            return                      # said once; not reopened per line after a failure
+        with _LOCK:
+            f = _file(path)
+            f.write(text)
+            f.flush()
     except OSError as e:
-        _OPEN.pop((os.getpid(), path), None)
+        stale = _OPEN.pop((os.getpid(), path), None)
+        try:
+            if stale is not None:
+                stale.close()
+        except OSError:
+            pass
         if path not in _WARNED:
             _WARNED.add(path)
             print(f"[entail] could not write {path}: {e}; what entail says goes to the console only",

@@ -83,7 +83,9 @@ def declared(config: Optional[dict], model_type: Optional[str] = None, facts=Non
 
 
 def kernel_ignores(engine: str, version: Optional[str], mrope: bool) -> Optional[dict]:
-    """The table's kernel row that ignores the pairing on this engine version for this model, or None."""
+    """The table's kernel row that ignores the pairing on this engine version for this model, or None. `mrope`:
+    the model's MRoPE module dispatches to that kernel (the adapter reads the dispatched forward; under vLLM's
+    default compiled CUDA path the native forward runs and honours the layer, so the row does not apply)."""
     for name, row in table().get("kernels", {}).items():
         if not name.startswith(engine + "."):
             continue
@@ -98,53 +100,67 @@ def kernel_ignores(engine: str, version: Optional[str], mrope: bool) -> Optional
 def check(boundary: str, consumer: str, engine: str, pairing: Optional[str], where: str, held: Dict[str, str],
           held_where: str, version: Optional[str] = None, mrope: bool = False, handles: Optional[dict] = None,
           owner=None, policy=None, record: bool = True) -> list:
-    """Decide the built model's rotary layers (`held`: layer name -> 'split' | 'interleaved') and the engine's kernel
-    path (by version) against the declared pairing. Nothing is decided without a declaration."""
+    """Decide the built model's rotary modules (`held`: module name -> 'split' | 'interleaved', the part of the
+    model the declaration is about) and the engine's kernel path (by version; `mrope` = an MRoPE module dispatches
+    to that kernel) against the declared pairing. Nothing is decided without a declaration. Modules that pair both
+    ways in the same part (a DSA indexer with its own key beside the main rotary) are said unknown and left alone:
+    which of them consume the declaration cannot be told from the model, and a flip would move the ones that pair
+    by their own key (M17.4 review, finding 10)."""
+    from dataclasses import replace
+
     from . import load, policies
     from .contracts import RULES, Contract, Decision, Resolution, Verdict, decide, unrepaired
-    from .facts import Certainty, Fact, Source
+    from .facts import Certainty, Fact, Rotary, Source
 
     if pairing is None:
         return []
     policy = policy or policies.current()
     handles = handles or {}
+    held = held or {}
     contract = Contract(boundary, consumer, ("Rotary",), ("Rotary",))
     decisions: List[Decision] = []
-    # facts for the ledger: the declared convention and the layers' convention, carried as Coverage-free strings
-    declared_fact = Fact("Rotary", None, Source("config", f"{where}: pairing {pairing}"), Certainty.UNKNOWN)
+    declared_fact = Fact("Rotary", Rotary(pairing=pairing), Source("config", where), Certainty.DECLARED)
     row = kernel_ignores(engine, version, mrope)
     if row is not None:
+        kernel_fact = Fact("Rotary", Rotary(pairing="split"), Source("engine", f"{row['name']} ({engine} {version})"),
+                           Certainty.VERIFIED)
         if pairing == "interleaved":
             verdict, blocking = unrepaired(policy, "Rotary")
             decisions.append(Decision(contract, "Rotary", verdict, RULES["rotary_pairing_ignored"], blocking=blocking,
+                                      declared=declared_fact, chosen=kernel_fact,
                                       note=(f"{where} declares interleaved pairing; {row['name']} ({engine} {version}) "
                                             f"pairs split-wise regardless of the layer ({row['ref']})")))
         else:
-            decisions.append(Decision(contract, "Rotary", Verdict.PASS, RULES["match"],
-                                      note=f"{row['name']} pairs split-wise, as declared"))
-    wrong = {name: style for name, style in (held or {}).items() if style != pairing}
-    if wrong:
-        chosen = Fact("Rotary", None, Source("engine", f"{held_where}: {len(wrong)} layer(s) pair "
-                                                       f"{sorted(set(wrong.values()))[0]}"), Certainty.UNKNOWN)
+            decisions.append(Decision(contract, "Rotary", Verdict.PASS, RULES["match"], declared=declared_fact,
+                                      chosen=kernel_fact, note=f"{row['name']} pairs split-wise, as declared"))
+    styles = sorted(set(held.values()))
+    wrong = {name: style for name, style in held.items() if style != pairing}
+    if len(styles) > 1:
+        counts = ", ".join(f"{sum(1 for s in held.values() if s == st)} {st}" for st in styles)
+        decisions.append(load.cannot_check(boundary, consumer, "Rotary",
+                                           (f"{held_where}: the rotary modules pair both ways ({counts}); which of "
+                                            f"them consume the declaration ({where}: {pairing}) cannot be told from "
+                                            f"the model, so nothing is set"), policy))
+    elif wrong:
+        first = sorted(wrong)[0]
+        chosen = Fact("Rotary", Rotary(pairing=styles[0]),
+                      Source("engine", f"{held_where}: {len(wrong)} rotary module(s) pair {styles[0]}"),
+                      Certainty.VERIFIED)
         res = None
         if "set_pairing" in handles:
-            res = Resolution(f"set the layers' pairing to {pairing}", "set_pairing", target=lambda d, c, p=pairing: p)
-        # decide() compares fact values; here the values are the conventions themselves
-        from .coverage import Coverage
-        d_fact = Fact("Coverage", Coverage(1, 1, ()), Source("config", f"{where}: pairing {pairing}"),
-                      Certainty.DECLARED)
-        c_fact = Fact("Coverage", Coverage(1, 0, ("pairing",)), chosen.source, Certainty.VERIFIED)
-        out = decide(Contract(boundary, consumer, ("Coverage",), ("Coverage",)), {"Coverage": d_fact},
-                     {"Coverage": c_fact}, policy, resolutions={"Coverage": [res]} if res else None)
-        from dataclasses import replace
-        first = sorted(wrong)[0]
-        note = (f"{where} declares {pairing} pairing; {len(wrong)} rotary layer(s) of the built model pair "
+            res = Resolution(f"set the modules' pairing to {pairing}", "set_pairing",
+                             target=lambda d, c, p=pairing: p)
+        out = decide(contract, {"Rotary": declared_fact}, {"Rotary": chosen}, policy,
+                     resolutions={"Rotary": [res]} if res else None)
+        note = (f"{where} declares {pairing} pairing; {len(wrong)} rotary module(s) of the built model pair "
                 f"{wrong[first]} (first: {first})")
-        decisions += [replace(d, name="Rotary", rule=RULES["rotary_pairing_mismatch"],
-                              note=note + ("; " + d.note if d.note else "")) for d in out]
+        decisions += [replace(d, rule=RULES["rotary_pairing_mismatch"], note=note + ("; " + d.note if d.note else ""))
+                      for d in out]
     elif held and row is None:
-        decisions.append(Decision(contract, "Rotary", Verdict.PASS, RULES["match"],
-                                  note=f"{len(held)} rotary layer(s) pair {pairing}, as declared"))
+        decisions.append(Decision(contract, "Rotary", Verdict.PASS, RULES["match"], declared=declared_fact,
+                                  chosen=Fact("Rotary", Rotary(pairing=pairing), Source("engine", held_where),
+                                              Certainty.VERIFIED),
+                                  note=f"{len(held)} rotary module(s) pair {pairing}, as declared"))
     if not decisions:
         return []
     if record:
@@ -160,7 +176,6 @@ def check(boundary: str, consumer: str, engine: str, pairing: Optional[str], whe
         elif done:
             _tally.counts(boundary)["resolved"] += 1
         _tally.tick(boundary)
-    _ = declared_fact
     return decisions
 
 
