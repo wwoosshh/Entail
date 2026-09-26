@@ -94,6 +94,9 @@ RULES = {
     "adapter_key_dropped": "the adapter's config declares a setting that changes how its weights apply and this "
                            "consumer does not read it",
     "adapter_key_unknown": "declared in the adapter's config, but a key entail does not know",
+    "setting_name_not_read": "the request gives a setting under a name the template honoured and its parser does "
+                             "not read, while the parser reads the same setting under another name: the parser "
+                             "runs on its default",
     "vocab_not_the_models": "the folder declares two vocabularies and the engine loaded the one that is not the "
                             "model's",
 }

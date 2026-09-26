@@ -12,6 +12,13 @@
   `use_rslora` into the adapter's scaling, computed in the core: sglang#40835 served rsLoRA adapters 4-8x too weak)
   and `vllm_lora` (reports what vLLM drops: `rank_pattern`, `alpha_pattern`, `lora_bias`, ...). `entail check` on an
   adapter folder decides it per engine.
+- A request's template settings at the reasoning parser (`request_contract.setting_names`,
+  `data/request_settings.json`): a setting the template honoured under one name (`enable_thinking`) that the
+  parser reads under another (`thinking`) leaves the parser on its default (vllm#43728: `content: null`). The
+  table names, per vLLM version and reasoning parser, the names each parser reads (code lines); the vLLM serve
+  adapter wraps the parser class the server builds per request and hands the request's value to the parser under
+  a name it reads (`resolved`), or reports it. A parser that reads no name of the setting, or a setting the
+  template did not read either, decides nothing.
 
 **Docs**
 - README (EN/KO): the "4 of 4" sentence is marked as the bugs the facts were written from, and the pre-registered

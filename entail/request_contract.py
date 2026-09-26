@@ -36,7 +36,7 @@ from typing import Dict, Iterable, Optional, Sequence
 
 from . import load, policies
 from . import tally as _tally
-from .contracts import Contract, Verdict, decide
+from .contracts import RULES, Contract, Decision, Resolution, Verdict, decide
 from .coverage import Coverage
 from .facts import Certainty, Fact, Source, Template
 from .readers import sha256_text
@@ -249,6 +249,84 @@ def settings(boundary: str, consumer: str, given: Iterable[str], taken: Iterable
     contract = Contract(boundary, consumer, ("Coverage",), ("Coverage",))
     return _settle(boundary, "settings", decide(contract, {"Coverage": declared_fact}, {"Coverage": chosen},
                                                 policy or policies.current()))
+
+
+_SETTINGS_TABLE = None
+
+
+def settings_table() -> dict:
+    """data/request_settings.json: the settings that travel under several names and, per engine version and
+    reasoning parser, the names each parser reads (M17.1b)."""
+    global _SETTINGS_TABLE
+    if _SETTINGS_TABLE is None:
+        import json
+        import os
+
+        with open(os.path.join(os.path.dirname(__file__), "data", "request_settings.json"), encoding="utf-8") as f:
+            _SETTINGS_TABLE = json.load(f)
+    return _SETTINGS_TABLE
+
+
+def parser_reads(engine: str, parser: str, version: Optional[str] = None) -> Optional[list]:
+    """The names of the table's groups that `parser` reads on `engine` (the installed version's row when the table
+    has one, else the engine's row). None when the table does not know the parser."""
+    table = settings_table()["parsers"]
+    row = table.get(f"{engine}@{version}") if version else None
+    row = row or table.get(engine)
+    if not row or parser not in row.get("reads", {}):
+        return None
+    return list(row["reads"][parser])
+
+
+def setting_names(boundary: str, consumer: str, given: dict, template_reads: Iterable[str], reads: Iterable[str],
+                  where: str, what: str, handles: Optional[dict] = None, policy=None, groups: Optional[dict] = None
+                  ) -> list:
+    """A setting the request gives under a name the template honoured, that its parser reads under another name
+    (data/request_settings.json groups). The template shaped the model's input by the request's value; the parser,
+    reading a different name, runs on its default (vllm#43728). Resolved where the adapter hands the value to the
+    parser under a name it reads (`apply_setting_name`, target (name, value)); broken otherwise. A parser that reads
+    no name of the group ignores the setting legitimately: nothing is decided. `given`: the request's own template
+    settings (name -> value); `template_reads`: the variables the template's text reads; `reads`: the names the
+    parser reads."""
+    groups = groups or settings_table()["groups"]
+    given = {k: v for k, v in (given or {}).items() if v is not None}
+    template_reads, reads = set(template_reads or ()), list(reads or ())
+    decisions = []
+    for group, names in groups.items():
+        asked = [n for n in names if n in given]
+        parser_names = [n for n in names if n in reads]
+        honoured = [n for n in asked if n in template_reads]
+        if not asked or not parser_names:
+            continue
+        if set(asked) & set(parser_names):
+            declared_fact = Fact("Coverage", Coverage(1, 1, ()), Source("user", f"{where}: {asked[0]}"),
+                                 Certainty.DECLARED)
+            contract = Contract(boundary, consumer, ("Coverage",), ("Coverage",))
+            decisions.append(Decision(contract, "Coverage", Verdict.PASS, RULES["match"], declared=declared_fact,
+                                      chosen=Fact("Coverage", Coverage(1, 1, ()), Source("engine", what),
+                                                  Certainty.VERIFIED)))
+            continue
+        if not honoured:
+            continue        # the template did not read it either: the template rule says so; the two agree
+        name, value = honoured[0], given[honoured[0]]
+        declared_fact = Fact("Coverage", Coverage(1, 1, ()), Source("user", f"{where}: {name}={value!r}"),
+                             Certainty.DECLARED)
+        chosen = Fact("Coverage", Coverage(1, 0, (name,)), Source("engine", f"{what} reads {', '.join(parser_names)}"),
+                      Certainty.VERIFIED)
+        contract = Contract(boundary, consumer, ("Coverage",), ("Coverage",))
+        res = None
+        if handles and "apply_setting_name" in handles:
+            res = Resolution(f"hand the request's {name} to the parser as {parser_names[0]}", "apply_setting_name",
+                             target=lambda d, c, t=(parser_names[0], value): t)
+        out = decide(contract, {"Coverage": declared_fact}, {"Coverage": chosen}, policy or policies.current(),
+                     resolutions={"Coverage": [res]} if res else None)
+        note = (f"the request sets {name}={value!r} and the template read it; {consumer} reads the {group} setting "
+                f"as {', '.join(parser_names)} and runs on its default")
+        decisions += [replace(d, rule=RULES["setting_name_not_read"], note=note + ("; " + d.note if d.note else ""))
+                      for d in out]
+    if handles:
+        load.resolve(decisions, handles)     # the adapter's handle hands the value over, before the parser is built
+    return _settle(boundary, "setting_names", decisions) if decisions else _skip(boundary)
 
 
 class deciding:

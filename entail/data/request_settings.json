@@ -1,0 +1,35 @@
+{
+ "_about": "A request's template settings (chat_template_kwargs) are read by two consumers that never talk to each other: the chat template (Jinja variables, read from the template's text at run time) and the reasoning parser (Python, the names below, from the engine's code with lines). A setting the template honoured under one name and the parser reads under another leaves the parser on its default (vllm#43728: {enable_thinking: false} on Kimi K2 - the template injects no thinking tokens, the 0.2x parser reads `thinking`, defaults to on, and returns content: null). `groups` names the settings that travel under several names; `parsers` names, per engine version and reasoning parser, which names of a group the parser reads. A parser that reads no name of a group ignores the setting legitimately (a non-reasoning parser) and nothing is decided. The repair is to hand the request's value to the parser under a name it reads (request_contract.setting_names; ROADMAP M17.1b).",
+ "groups": {
+  "thinking": ["thinking", "enable_thinking", "thinking_mode"]
+ },
+ "parsers": {
+  "vllm": {
+   "version": "0.30.0",
+   "ref": "vllm/parser/*.py and vllm/reasoning/*.py, the chat_kwargs.get(...) lines: kimi_k2.py L161-162, qwen3.py L231, gemma4.py L424, deepseek_v4.py L249, glm47_moe.py L186-187, ling3.py L41-42, nemotron_v3.py L56/L87, deepseek_v3_reasoning_parser.py L30-31/L90-91, kimi_k3_reasoning_parser.py L94-96, minimax_m3_reasoning_parser.py L43",
+   "reads": {
+    "kimi_k2": ["thinking", "enable_thinking"],
+    "kimi_k3": ["thinking", "enable_thinking"],
+    "qwen3": ["enable_thinking"],
+    "gemma4": ["enable_thinking"],
+    "deepseek_v3": ["thinking", "enable_thinking"],
+    "deepseek_v4": ["thinking", "enable_thinking"],
+    "deepseek_v41": ["thinking", "enable_thinking"],
+    "glm47_moe": ["thinking", "enable_thinking"],
+    "ling3": ["thinking", "enable_thinking"],
+    "nemotron_v3": ["enable_thinking"],
+    "minimax_m3": ["thinking_mode"]
+   }
+  },
+  "vllm@0.22.0": {
+   "version": "0.22.0",
+   "ref": "the reported version of vllm#43728 (retrospective only): vllm/reasoning/kimi_k2_reasoning_parser.py L41 reads `thinking`; deepseek_v3_reasoning_parser.py L33-34 both; nemotron_v3_reasoning_parser.py L26 and qwen3_reasoning_parser.py L46 `enable_thinking`",
+   "reads": {
+    "kimi_k2": ["thinking"],
+    "qwen3": ["enable_thinking"],
+    "deepseek_v3": ["thinking", "enable_thinking"],
+    "nemotron_v3": ["enable_thinking"]
+   }
+  }
+ }
+}

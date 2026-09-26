@@ -115,6 +115,11 @@ def read_choice(kind, *args):
         extra = set(getattr(request, "model_extra", None) or {})
         known = set(getattr(request, "model_fields_set", ())) - extra
         return sorted(known | extra), sorted(known)
+    if kind == "parser_settings":
+        # (the settings handed to the parser, the names the template reads, the names the parser reads)
+        tokenizer, kwargs, reasoning_parser_name = args
+        return (dict(kwargs or {}), sorted(_template_reads(getattr(tokenizer, "chat_template", None))),
+                request_contract.parser_reads("vllm", reasoning_parser_name, _vllm_version()))
     raise ValueError(f"vllm_serve.read_choice: unknown kind {kind!r}")
 
 
@@ -124,6 +129,74 @@ def handles():
 
 def _active():
     return core.mode() in ("load", "debug")
+
+
+# --- the request's settings at the reasoning parser (M17.1b; request_contract.setting_names) ---------------------
+
+SETTING_NAMES = "request:vllm.parser_settings"
+
+
+def _template_reads(text):
+    """The variable names a chat template's text reads: vLLM's own resolver where vLLM is importable, jinja2's
+    otherwise (the same walk vLLM does)."""
+    if not isinstance(text, str) or not text:
+        return set()
+    try:
+        from vllm.renderers import hf
+
+        return set(hf._cached_resolve_chat_template_kwargs(text))
+    except ImportError:
+        import jinja2
+        from jinja2 import meta
+
+        return set(meta.find_undeclared_variables(jinja2.Environment().parse(text)))
+
+
+def _vllm_version():
+    try:
+        import vllm
+
+        return getattr(vllm, "__version__", None)
+    except ImportError:
+        return None
+
+
+def _decide_names(tokenizer, kwargs, reads, reasoning_parser_name):
+    """given: the request's template settings as the server hands them to the parser (its defaults merged);
+    template: what the tokenizer's default template reads; the parser: the table's names; the repair writes the
+    value under a name the parser reads into the same dict the parser is built from."""
+    handles = {"apply_setting_name": lambda t: kwargs.__setitem__(t[0], t[1]) or True}
+    request_contract.setting_names(SETTING_NAMES, f"vllm.reasoning_parser.{reasoning_parser_name}", kwargs,
+                                   _template_reads(getattr(tokenizer, "chat_template", None)), reads,
+                                   "the request's chat_template_kwargs (the server's defaults merged)",
+                                   f"vllm reasoning parser {reasoning_parser_name} ({_vllm_version() or 'table'})",
+                                   handles=handles)
+
+
+def _wrap_parser_cls(cls_, reasoning_parser_name, reads=None):
+    """The parser class the server builds per request, wrapped so that the request's settings are decided against
+    the reasoning parser's names before the parser reads them. A parser the table does not know is returned as is."""
+    if cls_ is None or not reasoning_parser_name or not isinstance(cls_, type):
+        return cls_
+    if reads is None:
+        reads = request_contract.parser_reads("vllm", reasoning_parser_name, _vllm_version())
+    if reads is None:
+        return cls_
+    name = reasoning_parser_name
+
+    class Entailed(cls_):
+        def __init__(self, tokenizer, tools=None, *args, **kw):
+            ck = kw.get("chat_template_kwargs")
+            if _active() and isinstance(ck, dict):
+                ck = dict(ck)
+                kw["chat_template_kwargs"] = ck
+                request_contract.guarded(SETTING_NAMES, f"vllm.reasoning_parser.{name}", _decide_names, tokenizer, ck,
+                                         reads, name)
+            super().__init__(tokenizer, tools, *args, **kw)
+
+    Entailed.__name__, Entailed.__qualname__ = cls_.__name__, cls_.__qualname__
+    Entailed.__module__ = cls_.__module__
+    return Entailed
 
 
 # --- deciding, through the core ----------------------------------------------------------------------------------
@@ -206,8 +279,9 @@ def install_parsers():
                 _PARSERS[key] = load.safely(TOOL_PARSER, f"vllm.tool_parser.{tool_parser_name}", "Template",
                                             lambda: _tool_parser(model_name, tool_parser_name), tool_parser_name)
             name = _PARSERS[key]
-        return orig.__func__(cls, tool_parser_name=name, reasoning_parser_name=reasoning_parser_name,
-                             enable_auto_tools=enable_auto_tools, model_name=model_name, is_harmony=is_harmony)
+        parser_cls = orig.__func__(cls, tool_parser_name=name, reasoning_parser_name=reasoning_parser_name,
+                                   enable_auto_tools=enable_auto_tools, model_name=model_name, is_harmony=is_harmony)
+        return _wrap_parser_cls(parser_cls, reasoning_parser_name) if _active() else parser_cls
 
     ParserManager.get_parser = classmethod(get_parser)
     return 1
