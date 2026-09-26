@@ -4,15 +4,21 @@ the declared tools (LIBRARY_DESIGN.md 11 M18; ROADMAP M18.3; parse_contract.py; 
 
   hook         vllm.parser.parser_manager.ParserManager.get_parser: the class the server builds a parser from, per
                request (0.30: one Parser with parse_delta for streaming and parse for a whole text). The class is
-               returned wrapped: its instances remember how they were built, accumulate what parse_delta hands on,
-               and when the stream finishes (finished=True) parse the whole text again on a fresh instance of the
-               same class and compare. parse (the whole-text path) checks its tool calls against the request's tools.
-  read_choice  the accumulated streamed message and the whole-text message; the rules are in the core.
+               returned wrapped: its instances remember how they were built, accumulate what parse_delta hands on
+               (a plain append per delta, nothing recorded), and when the stream finishes (finished=True) parse the
+               whole text again on a fresh instance of the same class and compare, once per stream. parse (the
+               whole-text path) checks its tool calls against the request's tools.
+  read_choice  the accumulated streamed message and the whole-text message, and what the adapter can read of
+               why an output did not finish (the request's token limit reached, the parser's reasoning state
+               still open, a forced tool_choice); the rules are in the core.
   handles      none: the client already has the streamed message.
 The wrapper binds nothing by position it does not need: every argument is passed through whole (principle 12; the
-serve adapter's wrapper of the same classmethod is composed with, whichever was installed first). Parsers built
-elsewhere than through get_parser (a test driving a parser class directly) are not seen; a parser class without
-parse (before 0.30's unified parsers) is left as it is.
+serve adapter's wrapper of the same classmethod is composed with, whichever was installed first - uninstalling
+in the other order removes both, which only the tests do). Parsers built elsewhere than through get_parser (a
+test driving a parser class directly) are not seen; a parser class without parse (before 0.30's unified parsers,
+where #48217 and #42047 were reported) is left as it is; SGLang's parsers and the Responses API have no adapter
+yet. Under a stop policy the decision raises at the last delta, after the client has the streamed message: the
+server errors the final chunk. A reference parser that cannot be built is said unknown once per class.
 """
 from .. import core, parse_contract
 from .base import Hook
@@ -42,7 +48,8 @@ def read_choice(parser):
     return getattr(parser, "_entail_stream", None)
 
 
-def _on_delta(parser, base_name, args, kwargs, out):
+def _accumulate(parser, args, kwargs, out):
+    """One delta: appended to the instance's stream state. Returns the state when this delta finished the stream."""
     names = ("delta_text", "delta_token_ids", "request", "prompt_token_ids")   # parse_delta's parameters, 0.30
     bound = dict(zip(names, args))
     bound.update({k: v for k, v in kwargs.items() if k in names})
@@ -52,33 +59,60 @@ def _on_delta(parser, base_name, args, kwargs, out):
     state.add(out)
     parser._entail_stream = state
     if not kwargs.get("finished", False):
-        return
+        return None
     parser._entail_stream = None
-    request = bound.get("request")
+    return state, bound.get("request")
+
+
+def _why_unfinished(parser, request, state, streamed):
+    """What the adapter reads of an output that may not have finished by itself; the core decides."""
+    limit = getattr(request, "max_completion_tokens", None) or getattr(request, "max_tokens", None)
+    limit_reached = isinstance(limit, int) and limit > 0 and len(state.ids) >= limit
+    stream_state = getattr(parser, "_stream_state", None)
+    reasoning_open = (getattr(parser, "_reasoning_parser", None) is not None and stream_state is not None
+                      and getattr(stream_state, "reasoning_ended", True) is False)
+    choice = getattr(request, "tool_choice", None)
+    forced = choice is not None and choice not in ("auto", "none")
+    return parse_contract.unfinished(limit_reached, reasoning_open, forced, streamed)
+
+
+def _on_finished(parser, base_name, state, request):
+    from .. import load
+
     consumer = f"vllm.parser.{base_name}"
     init_args, init_kwargs = getattr(parser, "_entail_init", ((), {}))
-    fresh = type(parser)(*init_args, **init_kwargs)
+    try:
+        fresh = type(parser)(*init_args, **init_kwargs)
+    except Exception as e:  # noqa: BLE001 - said once per class, not per stream
+        load.enforce([load.cannot_check(BOUNDARY, consumer, "Parse",
+                                        f"{base_name}: a reference parser could not be built, so the stream is not "
+                                        f"compared: {type(e).__name__}: {e}")], once_for=type(parser))
+        return
     fresh._entail_reference = True
-    reasoning, content, tool_calls = fresh.parse("".join(state.text), request,
+    text = "".join(state.text)
+    reasoning, content, tool_calls = fresh.parse(text, request,
                                                  enable_auto_tools=getattr(parser, "_entail_auto_tools", False),
                                                  model_output_token_ids=state.ids)
     streamed, full = state.message(), parse_contract.full_message(reasoning, content, tool_calls)
     where = f"{base_name} on a streamed response of {len(state.ids)} tokens ({state.deltas} deltas)"
     compare_reasoning = getattr(request, "include_reasoning", True) is not False
-    parse_contract.check_stream(BOUNDARY, consumer, streamed, full, where, compare_reasoning=compare_reasoning)
+    parse_contract.check_stream(BOUNDARY, consumer, streamed, full, where, compare_reasoning=compare_reasoning,
+                                unfinished_why=_why_unfinished(parser, request, state, streamed))
     parse_contract.check_schema(BOUNDARY, consumer, streamed["tool_calls"], getattr(request, "tools", None),
-                                f"{base_name}'s streamed tool calls")
+                                f"{base_name}'s streamed tool calls", raw_text=text)
 
 
 def _on_full(parser, base_name, args, kwargs, out):
     request = args[1] if len(args) > 1 else kwargs.get("request")
+    text = args[0] if args else kwargs.get("model_output")
     try:
         reasoning, content, tool_calls = out
     except (TypeError, ValueError):
         return
     full = parse_contract.full_message(reasoning, content, tool_calls)
     parse_contract.check_schema(BOUNDARY, f"vllm.parser.{base_name}", full["tool_calls"],
-                                getattr(request, "tools", None), f"{base_name}'s tool calls (whole text)")
+                                getattr(request, "tools", None), f"{base_name}'s tool calls (whole text)",
+                                raw_text=text if isinstance(text, str) else None)
 
 
 def wrapped_class(base, auto_tools=False):
@@ -103,10 +137,18 @@ def wrapped_class(base, auto_tools=False):
 
         def parse_delta(self, *a, **kw):
             out = super().parse_delta(*a, **kw)
-            if not getattr(self, "_entail_reference", False) and _active():
+            if getattr(self, "_entail_reference", False) or not _active():
+                return out
+            try:
+                done = _accumulate(self, a, kw, out)
+            except Exception:  # noqa: BLE001 - a delta that could not be kept: the stream is not compared
+                self._entail_stream = None
+                return out
+            if done is not None:
                 from .. import load
 
-                load.safely(BOUNDARY, f"vllm.parser.{name}", "Parse", lambda: _on_delta(self, name, a, kw, out))
+                state, request = done
+                load.safely(BOUNDARY, f"vllm.parser.{name}", "Parse", lambda: _on_finished(self, name, state, request))
             return out
 
         def parse(self, *a, **kw):

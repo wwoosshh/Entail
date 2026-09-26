@@ -11,7 +11,7 @@ from .core import (RoleError, boundary, carry, check_config_keys, check_props, c
 from .boundaries import advance  # noqa: E402
 from .facts import (LAYOUT_KINDS, Assumed, Epoch, Identity, KernelCaps, KernelConfig, LatentScale, Layout,
                     ModelProps, Origin, Positions, Prediction, Quantized, Reduction, Rotary, Template, TokenType,
-                    Valid, Vocab, Stops, Tokenization, KernelReference, Parse)
+                    Valid, Vocab, Stops, Tokenization, KernelReference, Parse, Placeholder)
 
 __version__ = "1.2.0"
 
@@ -44,4 +44,4 @@ __all__ = ["RoleError", "advance", "boundary", "carry", "check_config_keys", "ch
            "LAYOUT_KINDS",
            "Assumed", "Epoch", "Identity", "KernelCaps", "KernelConfig", "LatentScale", "Layout", "ModelProps",
            "Origin", "Positions", "Prediction", "Quantized", "Reduction", "Rotary", "Template", "TokenType", "Valid",
-           "Vocab", "Stops", "Tokenization", "KernelReference", "Parse", "__version__"]
+           "Vocab", "Stops", "Tokenization", "KernelReference", "Parse", "Placeholder", "__version__"]

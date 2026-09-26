@@ -101,6 +101,11 @@ RULES = {
     "stream_differs_from_full": "the parser's streamed message differs from its parse of the same complete text",
     "tool_args_outside_schema": "a tool call carries arguments the declared tool's parameters do not have, or names "
                                 "a tool the request did not declare",
+    "logprobs_cover_other_text": "the response's logprobs cover other text than its content, so they cannot be "
+                                 "aligned with the message",
+    # a multimodal item's placeholder against the markup the model declares (placeholder_contract.py, M18.4)
+    "placeholder_outside_markup": "a multimodal placeholder is bound where the model's declared markup puts none: "
+                                  "the run came from the prompt's text, not from the template",
     "stop_dropped": "the consumer's stop set lacks an id the model's files declare as the end of a generation",
     "stop_id_out_of_range": "a declared eos, bos or pad id is past the tokenizer's highest id: no token, no stop",
     "adapter_key_dropped": "the adapter's config declares a setting that changes how its weights apply and this "

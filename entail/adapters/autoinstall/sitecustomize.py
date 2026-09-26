@@ -28,6 +28,11 @@ TARGETS = {
     "vllm.model_executor.model_loader.utils": ["entail.adapters.vllm_layout", "entail.adapters.vllm_loader",
                                                "entail.adapters.vllm_pairing",
                                                "entail.adapters.vllm_kernel_reference"],
+    # the engine's dummy runs (profile, capture warm-ups) are marked so the kernel comparison lands on real input;
+    # 0.30 has two GPU model runners and one for encoder-only models, and the worker picks one
+    "vllm.v1.worker.gpu_model_runner": ["entail.adapters.vllm_kernel_reference:install_dummy_run"],
+    "vllm.v1.worker.gpu.model_runner": ["entail.adapters.vllm_kernel_reference:install_dummy_run"],
+    "vllm.v1.worker.mm_encoder_model_runner": ["entail.adapters.vllm_kernel_reference:install_dummy_run"],
     # Patched as soon as the selector has run, so attention.py imports the wrapped name.
     "vllm.v1.attention.selector": ["entail.adapters.vllm_attention"],
     "vllm.v1.core.kv_cache_manager": ["entail.adapters.vllm_cache_contract"],
@@ -53,6 +58,8 @@ TARGETS = {
         ["entail.adapters.sglang_fp8_tile:install_moe"],
     # The request boundary: the parser manager, the renderer and the chat server, each as soon as it has run.
     "vllm.parser.parser_manager": ["entail.adapters.vllm_serve:install_parsers", "entail.adapters.vllm_parse"],
+    # where a multimodal item's placeholder is bound, against the model's declared markup (M18.4)
+    "vllm.multimodal.processing.processor": ["entail.adapters.vllm_multimodal"],
     "vllm.renderers.hf": ["entail.adapters.vllm_serve:install_render"],
     "vllm.entrypoints.openai.chat_completion.serving": ["entail.adapters.vllm_serve:install_serving"],
     # The chat template where transformers' tokenizers apply it (a script's, SGLang's server; M9.3), and SGLang's
@@ -131,6 +138,9 @@ class _PatchAfterImport:
             return None
         _done.add(name)  # keeps the lookup below from coming back here
         spec = importlib.util.find_spec(name)
+        if os.environ.get("ENTAIL_VERBOSE"):
+            _say(f"[entail] claimed {name} in pid {os.getpid()} (loaded already: {name in sys.modules}; "
+                 f"spec: {spec is not None and spec.loader is not None})")
         if spec is None or spec.loader is None:
             return None
         orig_exec = spec.loader.exec_module

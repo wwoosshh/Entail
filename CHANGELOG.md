@@ -40,32 +40,77 @@
 - `KernelReference` (vocabulary v9) and `kernel_reference_contract.py` with the vLLM adapter
   `vllm_kernel_reference` (M18.2): a custom op's dispatched kernel against the op's own native definition, run on
   the same input. vLLM's CustomOp carries its meaning as `forward_native` and dispatches to `forward_cuda`; after
-  the model is built, every op dispatching to a kernel path is wrapped, and on its first call per (op class, input
-  pattern) the kernel and the definition are run on a 64-row slice of the real input (clones; the engine's tensors
-  are untouched), the definition in the input dtype and in float32. Rule `kernel_reference_mismatch`: max
-  |kernel - definition| above FACTOR times the definition's own precision noise plus ATOL_ULPS units in the last
-  place of the output dtype at its largest magnitude; `broken` (reported, the run goes on). Afterwards the original
-  method is put back, so the steady state costs nothing. Ops that override `forward` (the mamba mixers), calls
-  during CUDA-graph capture and definitions that refuse the input are not compared (the last is `unknown` once).
-  Under torch.compile most ops run their definition and there is nothing to compare; the record says how many ops
-  were wrapped. A call that decides nothing (a profile run's zeros, rotary at position 0: an identity) leaves the
-  wrapper on for the next call. Measured: vllm#42016 (GLM-OCR on vLLM 0.22.0, the Triton MRoPE kernel pairing
-  split-wise for a model that pairs interleaved) is `broken` at `MRotaryEmbedding` on its first real input - max
-  |kernel - definition| 10.5 at a scale of 10.9, allowed 0.588 - with no architecture table, and passes on 0.30.0;
-  8 popular models on vLLM 0.30.0 in eager mode: 32 decisions, all pass, max |kernel - definition| at most 0.7% of
-  the output's scale. FACTOR 8 and ATOL_ULPS 4 are fixed from that distribution.
+  the model is built, every op dispatching to a kernel path is wrapped, and on its first real call per (op class
+  and module, configuration, input pattern) the kernel and the definition are run on a 64-row slice of the real
+  input (clones cut before the kernel touched its arguments; the engine's tensors are untouched), the definition in
+  the input dtype and in float32, and the op's own tensors put back afterwards (a definition may convert its cache
+  to the query's dtype). Rule `kernel_reference_mismatch`, decided value by value and per output tensor in its own
+  dtype: a value non-finite on one side only, or differing from the float32 definition by more than FACTOR times
+  the definition's own rounding noise at that value (backed by the tensor's typical noise) plus ATOL_ULPS units in
+  the last place of the output dtype at that value; `broken` (reported, the run goes on). Afterwards the original
+  method is put back, so the steady state costs nothing; under a stop policy the decision raises once. Not
+  compared, each said `unknown` once: ops that override `forward` (the mamba mixers), ops holding the engine's
+  state (a KV cache, an index buffer, a forward that reads the forward context), every op when the process is one
+  rank of several, every op enabled under torch.compile (traced, the wrapper hands the call to the kernel), ops in
+  vLLM's registry not reached from the model's modules, arguments that share no token dimension or cannot be cut
+  and are too large to clone, and definitions that refuse the input. Calls inside vLLM's own dummy runs (profile,
+  capture warm-ups) are neither compared nor counted, and an input that decides nothing (zeros, one repeated row,
+  an identity such as rotary at position 0) leaves the wrapper on for the next real call (64 such calls at most).
+  Measured (retrospective: the rule was written from this bug): vllm#42016 (GLM-OCR on vLLM 0.22.0, the Triton
+  MRoPE kernel pairing split-wise for a model that pairs interleaved) is `broken` at `MRotaryEmbedding` on its
+  first real input - max |kernel - definition| 10.5 at a scale of 10.9, allowed 0.588 - with no architecture
+  table, and passes on 0.30.0; 8 popular models on vLLM 0.30.0 with `enforce_eager`: 35 decisions, 34 pass and one
+  `unknown` (144 `quant_fp8` instances held by linear-kernel helpers, not reached from the model's modules), every
+  decision on the first real input. Of the 34, 13 compare an independent kernel (rotary 6, activations 7, the
+  activations bitwise equal to the definition) and 21 hold the definition against itself, which the record says:
+  in eager mode vLLM 0.30's `RMSNorm.forward_cuda` returns `forward_native` (the fused kernels are reached under
+  torch.compile, where entail does not compare). The worst value's ratio to its allowance is at most 0.095
+  (median 0.062). FACTOR 8 and ATOL_ULPS 4 are headroom, not derived from that distribution (the kernels'
+  largest error equals the definition's own largest rounding step there, which any FACTOR of 1 or more admits);
+  every decision records that ratio so a later measurement can fix them from data.
 - `Parse` (vocabulary v9), `parse_contract.py` and the vLLM adapter `vllm_parse` (M18.3): a chat parser's streamed
   message against its parse of the same complete text, and its tool calls against the tools the request declared.
   The class vLLM's server builds a parser from per request (`ParserManager.get_parser`, 0.30's unified parsers with
   `parse_delta` and `parse`) is returned wrapped: its instances accumulate what `parse_delta` hands on (content,
   reasoning, tool-call names and argument pieces), and when the stream finishes a fresh instance parses the whole
   text and the two must agree exactly (arguments as JSON values): rule `stream_differs_from_full`. A tool call
-  whose arguments carry a key the declared tool's `parameters.properties` do not have (additionalProperties not
-  allowed), or that names an undeclared tool, is `tool_args_outside_schema`, on both paths. Both `broken`
-  (reported; the client already has the streamed message). Measured on vLLM 0.30.0's own parsers, driven as the
-  server drives them: vllm#49316 (kimi_k2: the streamed path skips the schema's type coercion, 4 of 4 texts),
-  #49412 (qwen3: content around tool calls differs between the paths, 3 of 3) and #47986 (deepseek_v4: tool_b
-  unwrapped with tool_a's schema) are `broken`; 6 well-formed texts raise nothing.
+  that names an undeclared tool, lacks a parameter the declared tool requires, or carries a key the tool's
+  `parameters.properties` do not have when the tool forbids additional properties (`additionalProperties: false`;
+  JSON Schema allows them by default, so under a tool that did not forbid them an extra key is a note on a pass)
+  is `tool_args_outside_schema`, on both paths; whether the key is in the model's text (the model's call does not
+  fit the declared tool, or the parser reshaped it) or not (the parser added it) is said. Both `broken` (reported;
+  the client already has the streamed message). An output that did not finish by itself - the request's token
+  limit reached, the reasoning block still open, a forced tool whose arguments never became JSON - is where vLLM
+  documents its two paths to differ, so a difference there is `unknown`; reasoning the stream sent again as
+  content (vLLM's fallback) is a note. Deltas are accumulated with nothing recorded, the comparison runs once at
+  the end of the stream, and a silent pass is counted, not recorded. Measured on vLLM 0.30.0's own parsers
+  (retrospective: the rules were written from these bugs), driven as the server drives them with a stand-in
+  tokenizer and no prompt: vllm#49316 (kimi_k2: the streamed path skips the schema's type coercion, 4 of 4 texts),
+  #49412 (qwen3: the content around tool calls is dropped on the whole-text path, 2 of 3; the third differs in
+  surrounding whitespace only) and #47986 (deepseek_v4: tool_b unwrapped with tool_a's schema, with tool_b
+  declared precisely so that a correct parser passes the same rule) are `broken`; the well-formed texts raise
+  nothing. Content that differs in surrounding whitespace only is a note on a pass, not broken: on a live vLLM
+  server (Qwen3-0.6B, qwen3 reasoning parser, hermes tool parser, 18 streamed and whole requests) every tool-call
+  stream streamed two newlines and parsed nothing whole, and a newline loses no meaning.
+- `Placeholder` (vocabulary v9), `placeholder_contract.py` and the vLLM adapter `vllm_multimodal` (M18.4): where
+  vLLM binds a multimodal item's placeholder against the markup the model's config declares
+  (`vision_start_token_id` before `image_token_id`, the Qwen-VL family): an image placeholder run not preceded by
+  the declared start token came from the prompt's text, not from the template - a literal `<|image_pad|>` typed by
+  the user took the image (vllm#57740). Rule `placeholder_outside_markup`, `broken`; a model that declares no markup
+  decides nothing, and vLLM's own profiling prompts (placeholder runs from token 0, no template) are not decided.
+  Measured: Qwen2.5-VL-3B-Instruct on vLLM 0.30.0 with the report's two message orders - the attack order is
+  `broken` ("the image placeholder bound at tokens 20..275 is preceded by id 220"), the control order passes.
+- The SGLang serve adapter also decides a chat completion's logprobs against its message (M18.4,
+  `parse_contract.check_logprobs`): the logprob tokens must decode to the content the client gets; with
+  `separate_reasoning` SGLang's logprobs covered the whole raw output, `<think>` span and markers included, while
+  `message.content` held the parsed answer (sglang#25055). Rule `logprobs_cover_other_text`, `broken`. Measured:
+  SGLang 0.5.20, Qwen3-0.6B with the qwen3 reasoning parser, one request with `logprobs` and `separate_reasoning`:
+  `broken` ("the 155 logprob tokens cover the reasoning span (545 characters and its markers) as well as the
+  content (12 characters)").
+- The false-alarm yardstick now covers a live vLLM server with every adapter on (18 streamed and whole chat
+  requests through a reasoning parser and a tool parser: nothing broken), ngram speculative decoding (nothing
+  broken: the M17.6 narrowing of `kv_needed` holds) and a hybrid Mamba-attention model with several KV groups
+  (nothing broken); prefill-decode disaggregation is not measured on one card.
 
 ## 1.2.0
 

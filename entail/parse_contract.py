@@ -13,14 +13,28 @@ declared (vllm#47986: two calls with the same raw arguments shared one slot and 
 tool's schema, so a tool with no `city` parameter received {"city": ...}). The rules are here, once:
 
   stream_differs_from_full   the streamed message and the whole-text message differ (which part, and how)
-  tool_args_outside_schema   a tool call's arguments carry a key the declared tool's parameters do not have
-                             (additionalProperties not allowed), or name a tool the request did not declare
+  tool_args_outside_schema   a tool call names a tool the request did not declare, lacks a parameter the tool
+                             declares required, or carries a key the tool's parameters do not have when the tool
+                             forbids additional properties (additionalProperties false; JSON Schema allows them
+                             by default, so an extra key under a tool that did not forbid it is a note on a pass)
+  logprobs_cover_other_text  the response's logprobs decode to other text than its content (sglang#25055: with
+                             separate_reasoning the logprobs covered the <think> span the server had parsed out,
+                             so they cannot be aligned with the message)
 
 Exact comparison, no tolerance: the same text through the same parser. Argument strings are compared as parsed
-JSON (values, not spacing); when either side is not JSON, as text. A difference is `broken` (reported, the run goes
-on; the client already has the streamed message, so nothing is repaired). A request without tools decides nothing
-about schemas, and a request that asked for no reasoning is compared without it. Nothing here reads a device; an
-error inside entail never breaks the server (the adapter runs this under load.safely).
+JSON (values, not spacing); when either side is not JSON, as text. Content that differs in surrounding whitespace
+only is noted on a pass, not broken: vLLM's tool parsers strip the text around a tool call on one path and not the
+other on every healthy tool-call stream, and a newline loses no meaning. Reasoning that the stream sent again as
+content (vLLM's fallback when the output ends inside its reasoning) is a note too. An output that did not finish
+by itself - the token limit reached, the reasoning block still open, a forced tool whose arguments never became
+JSON - is where vLLM documents its two paths to differ on the unfinished part, so a difference there is unknown,
+not broken. A difference is `broken` (reported, the run goes on; the client already has the streamed message, so
+nothing is repaired). A request without tools decides nothing about schemas, and a request that asked for no
+reasoning is compared without it. A silent pass is counted, not recorded (one line per stream would be the
+request path's cost); a pass with a note is recorded. Whether an extra key came from the model's text or from the
+parser is said when the text is at hand; which of the model and the declared tool is wrong is not decided here.
+Nothing here reads a device; an error inside entail never breaks the server (the adapter runs this under
+load.safely).
 """
 import hashlib
 import json
@@ -104,22 +118,32 @@ def _show(s: Optional[str], n: int = 60) -> str:
     return repr(s if s is not None else None)[:n]
 
 
-def differences(streamed: dict, full: dict, compare_reasoning: bool = True) -> List[str]:
-    """How the streamed message differs from the whole-text one, in words; empty when they agree."""
-    out = []
-    if (streamed.get("content") or "") != (full.get("content") or ""):
-        a, b = streamed.get("content") or "", full.get("content") or ""
+def differences(streamed: dict, full: dict, compare_reasoning: bool = True) -> Tuple[List[str], List[str]]:
+    """How the streamed message differs from the whole-text one: (differences that change what the client gets,
+    notes that do not). Content or reasoning that differs in surrounding whitespace only is a note, not a
+    difference: vLLM's tool parsers strip the text around a tool call on the whole-text path and stream it as it
+    comes, on every tool-call stream of healthy traffic (M18.5: the hermes parser streamed two newlines and parsed
+    nothing whole, in two of two tool-call requests), and no meaning is lost in a newline."""
+    out, notes = [], []
+    for field in ("content",) + (("reasoning",) if compare_reasoning else ()):
+        a, b = streamed.get(field) or "", full.get(field) or ""
+        if a == b:
+            continue
         if a.strip() == b.strip():
-            out.append(f"content differs in surrounding whitespace only: streamed {_show(a)}, whole {_show(b)}")
+            notes.append(f"{field} differs in surrounding whitespace only: streamed {_show(a)}, whole {_show(b)}")
+        elif field == "reasoning" and a and not b and (full.get("content") or "").strip() == a.strip():
+            if (streamed.get("content") or "").strip() == a.strip():
+                notes.append(f"the stream sent its reasoning ({len(a)} characters) again as content, the parser's "
+                             f"fallback for an output that ended inside its reasoning; the whole parse calls it content")
+            else:
+                out.append(f"reasoning differs: streamed {len(a)} characters, whole {len(b)} (streamed as reasoning "
+                           f"what the whole parse calls content)")
+        elif field == "reasoning":
+            out.append(f"reasoning differs: streamed {len(a)} characters, whole {len(b)}")
         else:
             i = next((k for k in range(min(len(a), len(b))) if a[k] != b[k]), min(len(a), len(b)))
             out.append(f"content differs from character {i}: streamed {_show(a[i:i + 40])}, whole "
                        f"{_show(b[i:i + 40])} ({len(a)} against {len(b)} characters)")
-    if compare_reasoning and (streamed.get("reasoning") or "") != (full.get("reasoning") or ""):
-        a, b = streamed.get("reasoning") or "", full.get("reasoning") or ""
-        out.append(f"reasoning differs: streamed {len(a)} characters, whole {len(b)}"
-                   + (" (streamed as reasoning what the whole parse calls content)"
-                      if a and not b and (full.get("content") or "").strip() == a.strip() else ""))
     sc, fc = streamed.get("tool_calls") or [], full.get("tool_calls") or []
     if len(sc) != len(fc):
         out.append(f"{len(sc)} tool calls streamed, {len(fc)} in the whole parse")
@@ -134,7 +158,7 @@ def differences(streamed: dict, full: dict, compare_reasoning: bool = True) -> L
                            f"whole {_show(json.dumps(fv))}")
         elif (sa or "").strip() != (fa or "").strip():
             out.append(f"tool call {k} ({sn}): arguments differ: streamed {_show(sa)}, whole {_show(fa)}")
-    return out
+    return out, notes
 
 
 def digest_of(msg: dict) -> str:
@@ -156,35 +180,69 @@ def _tool_schema(t) -> Tuple[Optional[str], Optional[dict]]:
     return _get(fn, "name"), params if isinstance(params, dict) else None
 
 
-def schema_mismatches(tool_calls: List[Tuple[str, str]], tools) -> List[str]:
-    """The tool calls whose arguments do not fit the declared tools: an undeclared tool name, or a key the tool's
-    parameters do not declare when additionalProperties is not allowed. Non-JSON arguments and tools without a
-    properties table decide nothing."""
+def _origin(keys: List[str], raw_text: Optional[str]) -> str:
+    """Where a key the declared tool does not name came from, when the model's text is at hand."""
+    if raw_text is None:
+        return ""
+    if all(f'"{k}"' in raw_text or f"'{k}'" in raw_text or f"<parameter name=\"{k}\"" in raw_text
+           or f"<parameter={k}>" in raw_text for k in keys):
+        return " (the model's text carries it: the model's call does not fit the declared tool, or the parser reshaped it)"
+    return " (the model's text does not carry it: the parser added it)"
+
+
+def schema_mismatches(tool_calls: List[Tuple[str, str]], tools, raw_text: Optional[str] = None) -> Tuple[List[str], List[str]]:
+    """(breaks, notes): the tool calls whose arguments do not fit the declared tools. Breaks: an undeclared tool
+    name, a required parameter missing, a key the tool's parameters do not declare when the tool forbids additional
+    properties. Notes: an extra key under a tool that did not forbid it (JSON Schema's default allows it). Non-JSON
+    arguments decide nothing, and tools without a properties table only their required list."""
     declared = {}
     for t in tools or []:
         name, params = _tool_schema(t)
         if name:
             declared[name] = params
     if not declared:
-        return []
-    out = []
+        return [], []
+    out, notes = [], []
     for k, (name, args) in enumerate(tool_calls or []):
         if name not in declared:
             out.append(f"tool call {k} names {name!r}, which the request did not declare (declared: "
                        f"{', '.join(sorted(declared))})")
             continue
         params = declared[name] or {}
-        props = params.get("properties")
-        if not isinstance(props, dict) or params.get("additionalProperties") is True:
-            continue
         kind, v = _value(args)
         if kind != "json" or not isinstance(v, dict):
             continue
+        required = [r for r in (params.get("required") or []) if isinstance(r, str)]
+        missing = [r for r in required if r not in v]
+        if missing:
+            out.append(f"tool call {k} ({name}) lacks its required {missing} (it carries {sorted(v) or 'nothing'})")
+        props = params.get("properties")
+        if not isinstance(props, dict) or params.get("additionalProperties") is True:
+            continue
         extra = sorted(set(v) - set(props))
-        if extra:
-            out.append(f"tool call {k} ({name}) carries {extra}, which its declared parameters "
-                       f"({', '.join(sorted(props)) or 'none'}) do not have")
-    return out
+        if not extra:
+            continue
+        named = ', '.join(sorted(props)) or 'none'
+        if params.get("additionalProperties") is False:
+            out.append(f"tool call {k} ({name}) carries {extra}, which its declared parameters ({named}) do not "
+                       f"have and the tool forbids{_origin(extra, raw_text)}")
+        else:
+            notes.append(f"tool call {k} ({name}) carries {extra} beyond its declared parameters ({named}); the tool "
+                         f"does not forbid additional properties{_origin(extra, raw_text)}")
+    return out, notes
+
+
+def unfinished(limit_reached: bool, reasoning_open: bool, forced_tool: bool, streamed: dict) -> Optional[str]:
+    """Why the output did not finish by itself, from what the adapter read: the request's token limit reached, the
+    reasoning block still open at the end, or a forced tool (tool_choice named or required) whose streamed
+    arguments never became JSON - vLLM's whole-text path then returns no call. None when it finished."""
+    if limit_reached:
+        return "the stream reached the request's token limit"
+    if reasoning_open:
+        return "the output ended inside its reasoning block"
+    if forced_tool and any(_value(a)[0] != "json" for _, a in (streamed.get("tool_calls") or [])):
+        return "tool_choice forced a tool and the streamed arguments never became valid JSON"
+    return None
 
 
 def _fact(path: str, msg: dict, where: str, certainty):
@@ -195,9 +253,28 @@ def _fact(path: str, msg: dict, where: str, certainty):
                                digest=digest_of(msg)), Source("engine", where), certainty)
 
 
+def _record(boundary: str, d, rules, noted: bool = False) -> None:
+    """Count a decision and record it - except a silent pass, which is counted only (the request path's cost)."""
+    from . import load
+    from .contracts import Verdict
+
+    _tally.counts(boundary)["checks"] += 1
+    if d.verdict is Verdict.PASS:
+        _tally.passed(boundary, rules)
+    if d.blocking:
+        _tally.refused(boundary)
+    elif d.verdict is Verdict.BROKEN:
+        _tally.broken(boundary)
+    _tally.tick(boundary)
+    if d.verdict is not Verdict.PASS or noted:
+        load.enforce([d])
+
+
 def check_stream(boundary: str, consumer: str, streamed: dict, full: dict, where: str, policy=None,
-                 compare_reasoning: bool = True, record: bool = True) -> list:
-    """Decide the streamed message against the whole-text message of the same parser on the same text."""
+                 compare_reasoning: bool = True, record: bool = True, unfinished_why: Optional[str] = None) -> list:
+    """Decide the streamed message against the whole-text message of the same parser on the same text. With
+    `unfinished_why` (the output did not finish by itself) a difference is unknown, not broken. A silent pass is
+    counted, not recorded; a pass with notes is recorded."""
     from . import load, policies
     from .contracts import RULES, Contract, Decision, Verdict, unrepaired
     from .facts import Certainty
@@ -206,31 +283,30 @@ def check_stream(boundary: str, consumer: str, streamed: dict, full: dict, where
     contract = Contract(boundary, consumer, ("Parse",))
     declared = _fact("full", full, f"{where}: the whole text parsed once", Certainty.VERIFIED)
     held = _fact("stream", streamed, f"{where}: the streamed deltas", Certainty.VERIFIED)
-    diffs = differences(streamed, full, compare_reasoning)
-    if diffs:
+    diffs, notes = differences(streamed, full, compare_reasoning)
+    if diffs and unfinished_why:
+        d = load.cannot_check(boundary, consumer, "Parse",
+                              f"{where}: the output did not finish by itself ({unfinished_why}), where vLLM's "
+                              f"streaming and whole-text paths are documented to differ on the unfinished part, so "
+                              f"the difference is not held against the parser: " + "; ".join(diffs + notes), policy)
+    elif diffs:
         verdict, blocking = unrepaired(policy, "Parse")
         d = Decision(contract, "Parse", verdict, RULES["stream_differs_from_full"], declared=declared, chosen=held,
-                     blocking=blocking, note=f"{where}: " + "; ".join(diffs))
+                     blocking=blocking, note=f"{where}: " + "; ".join(diffs + notes))
     else:
         d = Decision(contract, "Parse", Verdict.PASS, RULES["match"], declared=declared, chosen=held,
-                     note=f"{where}: the streamed message and the whole-text message agree")
+                     note=f"{where}: the streamed message and the whole-text message agree"
+                          + ("; " + "; ".join(notes) if notes else ""))
     if record:
-        _tally.counts(boundary)["checks"] += 1
-        if d.verdict is Verdict.PASS:
-            _tally.passed(boundary, ["parse"])
-        if d.blocking:
-            _tally.refused(boundary)
-        elif d.verdict is Verdict.BROKEN:
-            _tally.broken(boundary)
-        _tally.tick(boundary)
-        load.enforce([d])
+        _record(boundary, d, ["parse"], noted=bool(notes))
     return [d]
 
 
 def check_schema(boundary: str, consumer: str, tool_calls: List[Tuple[str, str]], tools, where: str, policy=None,
-                 record: bool = True) -> list:
-    """Decide the tool calls handed on against the tools the request declared. No tools, no calls: nothing."""
-    from . import load, policies
+                 record: bool = True, raw_text: Optional[str] = None) -> list:
+    """Decide the tool calls handed on against the tools the request declared. No tools, no calls: nothing. A
+    call that fits is counted, not recorded; an extra key the tool did not forbid is a note on a recorded pass."""
+    from . import policies
     from .contracts import RULES, Contract, Decision, Verdict, unrepaired
     from .facts import Certainty
 
@@ -240,12 +316,53 @@ def check_schema(boundary: str, consumer: str, tool_calls: List[Tuple[str, str]]
     contract = Contract(boundary, consumer, ("Parse",))
     msg = {"content": None, "reasoning": None, "tool_calls": list(tool_calls)}
     held = _fact("full", msg, where, Certainty.VERIFIED)
-    bad = schema_mismatches(tool_calls, tools)
-    if not bad:
-        return []          # fitting the schema is the ordinary case; only a break is said
+    bad, notes = schema_mismatches(tool_calls, tools, raw_text)
+    if bad:
+        verdict, blocking = unrepaired(policy, "Parse")
+        d = Decision(contract, "Parse", verdict, RULES["tool_args_outside_schema"], chosen=held, blocking=blocking,
+                     note=f"{where}: " + "; ".join(bad + notes))
+    else:
+        d = Decision(contract, "Parse", Verdict.PASS, RULES["match"], chosen=held,
+                     note=f"{where}: the tool calls fit the declared tools" + ("; " + "; ".join(notes) if notes else ""))
+    if record:
+        _record(boundary, d, ["schema"], noted=bool(notes))
+    return [d] if (bad or notes) else []
+
+
+def check_logprobs(boundary: str, consumer: str, content: Optional[str], reasoning: Optional[str],
+                   tokens: List[str], where: str, policy=None, record: bool = True) -> list:
+    """Decide a response's logprobs against its message (M18.4; sglang#25055): the logprob tokens decode to the
+    message's content, or the client cannot align them. A response whose logprobs also cover the reasoning span
+    (and its markers) that the server parsed out of the content is broken. Whitespace at the ends is not held
+    against it. Returns the non-pass decisions (nothing is recorded on a pass)."""
+    from . import load, policies
+    from .contracts import RULES, Contract, Decision, Verdict, unrepaired
+    from .facts import Certainty
+
+    if not tokens:
+        return []
+    joined, c, r = "".join(tokens), content or "", reasoning or ""
+    if joined == c or joined.strip() == c.strip():
+        if record:                    # a silent pass: counted, not recorded (one line per response otherwise)
+            _tally.counts(boundary)["checks"] += 1
+            _tally.passed(boundary, ["logprobs"])
+            _tally.tick(boundary)
+        return []
+    if r and r.strip() and r.strip() in joined and c.strip() in joined:
+        markers = " and its markers" if "<think>" in joined or "</think>" in joined else ""
+        what = (f"the {len(tokens)} logprob tokens cover the reasoning span ({len(r)} characters{markers}) as well "
+                f"as the content ({len(c)} characters), so they cannot be aligned with the message's content")
+    else:
+        what = (f"the {len(tokens)} logprob tokens decode to {len(joined)} characters that are not the message's "
+                f"content ({len(c)} characters)")
+    policy = policy or policies.current()
+    contract = Contract(boundary, consumer, ("Parse",))
+    declared = _fact("full", {"content": c, "reasoning": r, "tool_calls": []}, f"{where}: the message", Certainty.VERIFIED)
+    held = _fact("full", {"content": joined, "reasoning": None, "tool_calls": []}, f"{where}: what the logprobs cover",
+                 Certainty.VERIFIED)
     verdict, blocking = unrepaired(policy, "Parse")
-    d = Decision(contract, "Parse", verdict, RULES["tool_args_outside_schema"], chosen=held, blocking=blocking,
-                 note=f"{where}: " + "; ".join(bad))
+    d = Decision(contract, "Parse", verdict, RULES["logprobs_cover_other_text"], declared=declared, chosen=held,
+                 blocking=blocking, note=f"{where}: {what}")
     if record:
         _tally.counts(boundary)["checks"] += 1
         if d.blocking:

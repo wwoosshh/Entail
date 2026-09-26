@@ -530,6 +530,26 @@ class Parse:
             raise ValueError(f"Parse.digest: expected a hex digest, got {self.digest!r}")
 
 
+@dataclass(frozen=True)
+class Placeholder:
+    """Where an engine put a multimodal item's placeholder in the prompt (v9, M18.4): the modality, the token
+    offset and length of the run the item is bound to, and the id just before that run. A model declares its
+    image markup in its config (the Qwen-VL family: `vision_start_token_id` right before the image tokens,
+    `image_token_id` for them); a placeholder bound where the markup puts none came from the prompt's text, not
+    from the template (vllm#57740: a literal `<|image_pad|>` in the user's message took the image)."""
+    modality: str
+    offset: int
+    length: int
+    preceded_by: Optional[int] = None
+
+    def __post_init__(self):
+        if not isinstance(self.modality, str) or not self.modality:
+            raise ValueError(f"Placeholder.modality: expected a modality name, got {self.modality!r}")
+        _number("Placeholder", "offset", self.offset, 0, integer=True)
+        _number("Placeholder", "length", self.length, 0, integer=True, strict=True)
+        _number("Placeholder", "preceded_by", self.preceded_by, 0, integer=True)
+
+
 # --- not in the vocabulary ------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -573,13 +593,13 @@ VOCABULARY = {
     "Template": "PROPERTY", "Coverage": "MAPPING", "TokenType": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME",
     "Identity": "TIME", "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE", "KernelConfig": "LAYOUT",
     "Vocab": "MAPPING", "Stops": "MAPPING", "Tokenization": "MAPPING", "KernelReference": "PROPERTY",
-    "Parse": "MAPPING",
+    "Parse": "MAPPING", "Placeholder": "FRAME",
 }
 _HERE = {"Layout": Layout, "Quantized": Quantized, "Rotary": Rotary, "Positions": Positions, "Valid": Valid,
          "ModelProps": ModelProps, "Prediction": Prediction, "LatentScale": LatentScale, "Template": Template,
          "TokenType": TokenType, "Reduction": Reduction, "Epoch": Epoch, "Identity": Identity, "Assumed": Assumed,
          "Origin": Origin, "KernelConfig": KernelConfig, "Vocab": Vocab, "Stops": Stops, "Tokenization": Tokenization,
-         "KernelReference": KernelReference, "Parse": Parse}
+         "KernelReference": KernelReference, "Parse": Parse, "Placeholder": Placeholder}
 
 
 def vocabulary_class(name):
