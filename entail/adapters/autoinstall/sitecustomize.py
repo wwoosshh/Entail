@@ -38,6 +38,13 @@ TARGETS = {
     # SGLang when the adapter object is built
     "vllm.lora.peft_helper": ["entail.adapters.vllm_lora"],
     "sglang.srt.lora.lora": ["entail.adapters.sglang_lora"],
+    # a store's key against the fields that shaped the item (M17.2): vLLM's request block hashes, transformers'
+    # beam-search cache reorder
+    "vllm.v1.request": ["entail.adapters.vllm_cache_key"],
+    "transformers.generation.utils": ["entail.adapters.transformers_beam"],
+    # every Triton kernel launch in the process, engine-independent (M17.3): what the kernel is told about its
+    # tensors' strides
+    "triton.runtime.jit": ["entail.adapters.triton_launch"],
     "sglang.kernels.ops.quantization.fp8_kernel": ["entail.adapters.sglang_fp8_tile"],
     # the fused-MoE config lookup: wrapped right after its module runs, so the kernel module binds the wrapped name
     "sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_config":

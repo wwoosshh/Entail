@@ -97,6 +97,10 @@ RULES = {
     "setting_name_not_read": "the request gives a setting under a name the template honoured and its parser does "
                              "not read, while the parser reads the same setting under another name: the parser "
                              "runs on its default",
+    "cache_key_incomplete": "a field that shaped the stored item is not in its key, or a state is not moved by the "
+                            "permutation that moved its item: another item can be served under the key",
+    "kernel_stride_assumed": "a tensor handed to a kernel is strided in its innermost dimension and the kernel "
+                             "takes no stride argument: it reads the tensor as if it were contiguous",
     "vocab_not_the_models": "the folder declares two vocabularies and the engine loaded the one that is not the "
                             "model's",
 }

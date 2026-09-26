@@ -1,0 +1,35 @@
+{
+ "_about": "A store keyed by identity must key every item by everything that shaped it, and a step that permutes items must permute every state that belongs to them (ROADMAP M17.2; LIBRARY_DESIGN.md 4.6 Identity). Two consumers, as declaration-consumption tables with code lines. vLLM's prefix cache keys a request's blocks by a chained hash of the tokens plus extra keys; the request's fields that shape the model's input are the declaration (v1/request.py), the hash function's reads are the consumer (v1/core/kv_cache_utils.py). transformers' beam search reorders the cache under the names it knows; a model's cache kwarg names are the declaration, the reorderer's names the consumer. A declared field the consumer does not read makes the key incomplete: an item computed from one input can be served under another's key (vllm#56655: prompt_is_token_ids missing from the hash, B served A's KV), or a state is carried across a permutation unmoved (transformers#46612: cache_params never reordered).",
+ "fields": {
+  "vllm.request": {
+   "version": "0.30.0",
+   "ref": "vllm/v1/request.py Request.__init__: prompt_token_ids L132, prompt_embeds L133, prompt_is_token_ids L137 (positions taken from the embeddings vs the ids; the ids at embedded positions are a sentinel, L150-156), mm_features L186, lora_request L87, cache_salt L183",
+   "names": ["prompt_token_ids", "prompt_embeds", "prompt_is_token_ids", "mm_features", "lora_request", "cache_salt"]
+  },
+  "transformers.model_cache": {
+   "version": "5.17.0",
+   "ref": "transformers/generation/utils.py ALL_CACHE_NAMES L131-137: past_key_values, cache_params (mamba), state (rwkv), mems (xlnet), past_buckets_states (reformer); a model declares its cache by the kwarg its forward takes",
+   "names": ["past_key_values", "cache_params", "state", "mems", "past_buckets_states"]
+  }
+ },
+ "consumers": {
+  "vllm.block_hashes": {
+   "version": "0.30.0", "fields": "vllm.request",
+   "ref": "vllm/v1/core/kv_cache_utils.py: hash_block_tokens L638 (the block's token ids, chained), generate_block_hash_extra_keys L600-636: _gen_lora_extra_hash_keys L559-571 (lora_request.lora_name), _gen_mm_extra_hash_keys L492 (mm_features hashes), cache_salt L621-623 (first block), _gen_prompt_embeds_extra_hash_keys L574-596 (a per-block digest of prompt_embeds); prompt_is_token_ids is read nowhere (the fix PR #56656 is unmerged)",
+   "reads": ["prompt_token_ids", "prompt_embeds", "mm_features", "lora_request", "cache_salt"]
+  },
+  "transformers.beam_reorder": {
+   "version": "5.17.0", "fields": "transformers.model_cache",
+   "ref": "transformers/generation/utils.py _beam_search L3640-3646: the first name of ALL_CACHE_NAMES present in model_kwargs is reordered (fixed by PR #46819, 2026-06-24)",
+   "reads": ["past_key_values", "cache_params", "state", "mems", "past_buckets_states"]
+  },
+  "transformers.beam_reorder@5.12.1": {
+   "version": "5.12.1", "fields": "transformers.model_cache",
+   "ref": "transformers 5.12.1 generation/utils.py _beam_search L3395-3400: only model_kwargs['past_key_values'] is reordered (transformers#46612)",
+   "reads": ["past_key_values"]
+  }
+ },
+ "carries": {
+  "vllm": {"prompt_is_token_ids": "an extra key per block: the digest of the block's mask, appended to the hash's extra keys (the adapter's extend_key_prompt_is_token_ids handle); the request's block hashes are remade"}
+ }
+}

@@ -19,6 +19,20 @@
   adapter wraps the parser class the server builds per request and hands the request's value to the parser under
   a name it reads (`resolved`), or reports it. A parser that reads no name of the setting, or a setting the
   template did not read either, decides nothing.
+- A store's key against the fields that shaped the item (`cache_key_contract.py`, `data/cache_key_fields.json`):
+  vLLM's prefix-cache block hash keys a request by its tokens, embeddings digest, multimodal hashes, LoRA name and
+  cache salt, but not by `prompt_is_token_ids` (which positions take the embeddings), so two requests that differ
+  only in that mask share a key (vllm#56655, fix unmerged at 0.30.0). The adapter `vllm_cache_key` decides at
+  `Request.__init__` and repairs by appending a digest of the block's mask to the hash's extra keys and remaking
+  the request's hashes (`resolved`). The same rule covers a permutation: transformers' beam search reorders the
+  cache under the names it knows (`transformers_beam`); a model whose cache lives under another name is reported
+  (5.12.1 reordered `past_key_values` only: transformers#46612; 5.17.0 reorders every name).
+- What a Triton kernel is told about its tensors (`kernel_launch_contract.py`, adapter `triton_launch`, engine-
+  independent: one hook on `JITFunction.run`): a tensor strided in its innermost dimension handed to a kernel whose
+  parameters name no stride at all is `broken` (the kernel reads it as if contiguous); handed to a kernel that does
+  take strides but was not told this one, it is `unknown` (said once). Each (kernel, layout) is decided once per
+  process; warm-up launches are not looked at. sglang#21843 (fused_gdn_gating read interleaved a/b) is the case
+  the rule comes from; there the kernel takes row strides, so the decision is `unknown` at the kernel's boundary.
 
 **Docs**
 - README (EN/KO): the "4 of 4" sentence is marked as the bugs the facts were written from, and the pre-registered
