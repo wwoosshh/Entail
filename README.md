@@ -299,14 +299,15 @@ For 1.0 every measurement of the development milestones was run again on the fin
   three engines again (102 valid runs): no `broken`, no `refused`, the same two repairs plus two where a declared
   end was added to transformers' stop set (Nemotron-3-Nano-4B as shipped, and a tiny test model), outputs identical
   in 97 of 98 comparisons without a repair (the one difference is an engine's own nondeterminism), 69 `unknown`
-  lines in all, the library's share of load time 1.2% at the median and 9.1% at the 90th percentile. Statically over 230 popular model
-  folders: no false `broken` from the new facts.
+  lines in all, the library's share of load time 1.4% at the median and 8.2% at the 90th percentile (measured
+  again with the six rows above added: the same runs, the same repairs, the same 69 lines, nothing new said).
+  Statically over 230 popular model folders: no false `broken` from the new facts.
 - **31 test problems** (16 reproduction cases, 8 field cases, 7 simulated market incidents): each defect was
   repaired; where no repair exists, it was reported at the boundary and fact where it happened while the run
   went on, or stopped with `ENTAIL_ON_BROKEN=stop`. No fixed version was flagged. (The two ComfyUI cases were
   measured before 1.0 and not run again.)
-- **Cost:** at load, 0.3-2.6% of the load time. Always on, vLLM's CUDA-graph path 1.005x, 1.009x and 0.999x at
-  batch 1, 8 and 32 with every adapter on (control runs without entail: 0.994-1.003x; measured before the
+- **Cost:** at load, 0.3-2.6% of the load time. Always on, vLLM's CUDA-graph path 1.008x, 1.003x and 1.006x at
+  batch 1, 8 and 32 with every adapter on (control runs without entail: 0.997-1.004x; measured before the
   per-request boundaries were added: 0.999-1.000x), transformers' dynamic KV cache 1.017-1.022x of an eager decode. About 60 us per request on
   vLLM's server. The diagnosis mode 1.74x (eager) and 1.85x (sdpa). With `ENTAIL` unset, 0.2-0.3 ms per Python start
   and no module imported.
