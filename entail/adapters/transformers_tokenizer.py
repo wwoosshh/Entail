@@ -7,8 +7,10 @@ both call AutoTokenizer (LIBRARY_DESIGN.md 4.8; ROADMAP M15.3; realworld/CODEBOO
   handles      none: a tokenizer that is not the model's is reported with the source that is (no repair measured).
 vocab_contract reads the folder (tokenizer files, config vocab_size, embedding rows) and decides. A hub id is
 resolved to its local cache folder (load.local_folder); nothing is downloaded here.
+M18.1: the built tokenizer is also run against the folder's declared tokenizer on fixed probe texts
+(tokenizer_contract): a tokenizer built from the right file by the wrong class passes the size check and fails this.
 """
-from .. import core, vocab_contract
+from .. import core, tokenizer_contract, vocab_contract
 from .base import Hook
 
 engine = "transformers"
@@ -58,6 +60,9 @@ def _decide(name, kwargs, tokenizer):
         return
     size, n = read_choice(tokenizer)
     vocab_contract.check(BOUNDARY, CONSUMER, folder, size, n, where, owner=folder)
+    # M18.1: the same tokenizer against the folder's declared tokenizer, run on the probe texts (tokenizer_contract)
+    load.safely(BOUNDARY, CONSUMER, "Tokenization",
+                lambda: tokenizer_contract.check(BOUNDARY, CONSUMER, folder, tokenizer, where, owner=folder))
 
 
 def install():

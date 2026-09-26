@@ -104,9 +104,10 @@ def check_static(model_path: str, engine: str, settings: dict):
     def tokenizer():
         """The tokenizer transformers builds for the folder against the model's vocabulary (M15.3). vLLM and SGLang
         build theirs through the same AutoTokenizer, so the static verdict stands for the three engines."""
-        from . import vocab_contract
+        from . import tokenizer_contract, vocab_contract
 
         size = n = None
+        tok = None
         where = "no tokenizer built"
         # a folder with Mistral's own tokenizer files is loaded by another tokenizer in vLLM's auto mode and by
         # transformers' MistralCommonBackend, neither of which passes this check (M15.3 review): said, not silent
@@ -138,8 +139,12 @@ def check_static(model_path: str, engine: str, settings: dict):
             notes.append(f"transformers could not build the tokenizer ({type(e).__name__}: {e})")
         finally:
             core.set_mode(was)
-        return vocab_contract.check(f"load:{engine}.tokenizer", f"{engine}.tokenizer", path, size, n, where,
-                                    policy=policy, record=False)
+        out = vocab_contract.check(f"load:{engine}.tokenizer", f"{engine}.tokenizer", path, size, n, where,
+                                   policy=policy, record=False)
+        if tok is not None:   # M18.1: the built tokenizer against the declared one, run on the probe texts
+            out += tokenizer_contract.check(f"load:{engine}.tokenizer", f"{engine}.tokenizer", path, tok, where,
+                                            policy=policy, record=False)
+        return out
 
     checks.append(("tokenizer", tokenizer))
 

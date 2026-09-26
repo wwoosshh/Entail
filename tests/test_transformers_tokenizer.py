@@ -54,7 +54,12 @@ def test_read_choice_gives_the_base_size_and_the_length():
 
 def test_a_local_folder_with_the_wrong_tokenizer_is_reported_before_the_first_id():
     d = decide(folder(5, vocab_txt=8, config_vocab=8), FakeTokenizer(5))
-    assert len(d) == 1 and d[0].verdict is Verdict.BROKEN and "vocab.txt" in d[0].note, d
+    v = [x for x in d if x.name == "Vocab"]
+    assert len(v) == 1 and v[0].verdict is Verdict.BROKEN and "vocab.txt" in v[0].note, d
+    # M18.1: the same load also runs the declared tokenizer against the built one; a hand-written tokenizer.json
+    # the tokenizers library cannot read, and a stand-in without encode, are said as unknown, not silent
+    t = [x for x in d if x.name == "Tokenization"]
+    assert len(t) == 1 and t[0].verdict is Verdict.UNKNOWN and "tokenizer.json" in t[0].note, d
     transformers_tokenizer.reset()
 
 
@@ -66,7 +71,8 @@ def test_a_name_that_is_not_local_is_not_checked_and_says_so():
 
 def test_an_ordinary_folder_is_quiet():
     d = decide(folder(10, config_vocab=12), FakeTokenizer(10))
-    assert all(x.verdict is Verdict.PASS for x in d), d
+    assert all(x.verdict is Verdict.PASS for x in d if x.name == "Vocab"), d
+    assert [x.verdict for x in d if x.name == "Tokenization"] == [Verdict.UNKNOWN], d
     transformers_tokenizer.reset()
 
 

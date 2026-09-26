@@ -30,8 +30,8 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Optional, Tuple
 
-VOCAB_VERSION = 8
-READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8})   # a later version only adds optional fields or classes; fields in ADDED_IN
+VOCAB_VERSION = 9
+READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9})   # a later version only adds optional fields or classes; fields in ADDED_IN
 ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("Template", "tool_call_format"): 3,
             ("Rotary", "low_freq_factor"): 4, ("Rotary", "high_freq_factor"): 4,
             ("Rotary", "beta_fast"): 6, ("Rotary", "beta_slow"): 6, ("Rotary", "attention_factor"): 6,
@@ -463,6 +463,28 @@ class Stops:
         # M15.8 E2: tiny-random-Llama's) - the readers emit a fact only when a file states something
 
 
+@dataclass(frozen=True)
+class Tokenization:
+    """What a tokenizer does (v9, M18.1): the ids it gives a fixed set of probe texts, as a digest, and how many
+    declared added tokens it maps to their declared ids.
+
+    The folder's tokenizer file is a declaration that can be run (tokenizer.json by the `tokenizers` library, a
+    sentencepiece model by `sentencepiece`), and the tokenizer the engine built from the folder must do the same
+    thing on the same texts. A size check (Vocab) passes a tokenizer built from the right file by the wrong class;
+    the ids it produces are what the model reads (transformers#46489, #45812, #45356, #46710).
+    `digest` is a hex digest of the probe ids (tokenizer_contract.PROBES); `probes` how many texts it covers;
+    `added` how many declared added tokens were compared (None when the folder declares none)."""
+    digest: str
+    probes: int
+    added: Optional[int] = None
+
+    def __post_init__(self):
+        if not isinstance(self.digest, str) or not self.digest or any(c not in "0123456789abcdef" for c in self.digest):
+            raise ValueError(f"Tokenization.digest: expected a hex digest, got {self.digest!r}")
+        _number("Tokenization", "probes", self.probes, 0, integer=True)   # 0: only the added tokens were compared
+        _number("Tokenization", "added", self.added, 0, integer=True)
+
+
 # --- not in the vocabulary ------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -505,12 +527,12 @@ VOCABULARY = {
     "KvExtent": "RANGE", "ModelProps": "PROPERTY", "Prediction": "PROPERTY", "LatentScale": "PROPERTY",
     "Template": "PROPERTY", "Coverage": "MAPPING", "TokenType": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME",
     "Identity": "TIME", "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE", "KernelConfig": "LAYOUT",
-    "Vocab": "MAPPING", "Stops": "MAPPING",
+    "Vocab": "MAPPING", "Stops": "MAPPING", "Tokenization": "MAPPING",
 }
 _HERE = {"Layout": Layout, "Quantized": Quantized, "Rotary": Rotary, "Positions": Positions, "Valid": Valid,
          "ModelProps": ModelProps, "Prediction": Prediction, "LatentScale": LatentScale, "Template": Template,
          "TokenType": TokenType, "Reduction": Reduction, "Epoch": Epoch, "Identity": Identity, "Assumed": Assumed,
-         "Origin": Origin, "KernelConfig": KernelConfig, "Vocab": Vocab, "Stops": Stops}
+         "Origin": Origin, "KernelConfig": KernelConfig, "Vocab": Vocab, "Stops": Stops, "Tokenization": Tokenization}
 
 
 def vocabulary_class(name):

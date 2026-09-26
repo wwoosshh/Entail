@@ -35,7 +35,7 @@ ENGINE_SPECIFIC = {   # repairs of one engine's own defect: not contracts of ent
 }
 NOT_ADAPTERS = ("__init__", "base")
 ALLOWED = {"load": None, "kv_contract": None, "epochs": None, "identity_contract": None, "tile_contract": None,
-           "vocab_contract": None, "stops_contract": None, "request_contract": None, "adapter_config_contract": None, "cache_key_contract": None, "kernel_launch_contract": None, "rotary_pairing_contract": None,
+           "vocab_contract": None, "tokenizer_contract": None, "stops_contract": None, "request_contract": None, "adapter_config_contract": None, "cache_key_contract": None, "kernel_launch_contract": None, "rotary_pairing_contract": None,
            "policies": {"current"}, "core": {"mode"},
            "readers": {"rotary_of", "config_dict", "prediction_kind", "lora_modules", "is_text_module", "lora_base"},
            "facts": None, "base": {"Hook"}}

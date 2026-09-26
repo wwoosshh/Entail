@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+- `Tokenization` (vocabulary v9) and `tokenizer_contract.py` (M18.1): the tokenizer the engine built is run against
+  the tokenizer the folder declares, on ten fixed probe texts, and the ids must be the same. The declaration can be
+  run: tokenizer.json by the `tokenizers` library, a sentencepiece model by `sentencepiece`; tokenizer_config.json's
+  `added_tokens_decoder` (else tokenizer.json's `added_tokens`, else added_tokens.json) names every added token with
+  its id, and each is looked up in the built tokenizer. Rules `tokenizer_ids` and `added_token_id`, `broken` (reported,
+  the run goes on); a declaration that cannot be run (no file, no library, a tiktoken.model without its
+  pre-tokenization pattern: the added tokens are still compared) is `unknown` once per folder. The size check
+  (`Vocab`) passed every tokenizer built from the right file by the wrong class; this is the check those bugs
+  needed: transformers#46489 (deepseek-coder as LlamaTokenizer, 5.10.2), #45812 (Granite as GPT2Tokenizer, 5.8.0),
+  #45356 (Kimi-K2.5's `</think>` given `<|media_end|>`'s id, 5.4.0), #46710 (DeepSeek-R1-Distill's declared class
+  replaced, 5.12.1). The `transformers_tokenizer` adapter runs it after the size check; `entail check` runs it
+  statically when transformers can build the tokenizer. The declared tokenizer's probe ids are kept per folder in
+  `entail_logs/tokenizer_ids.json`, so a process after the first only encodes the probes with the engine's tokenizer.
+  A folder whose own declarations disagree - a legacy-mode tokenizer.json (a normalizer that prepends `▁` to every
+  text) next to a tokenizer_config.json that declares `legacy: false` - is `unknown` with both id lists, since which
+  one the model was trained with is not stated. Measured: the four bugs above at their reported versions are all
+  `broken` at the tokenizer boundary (Kimi by 18 of 23 declared added tokens off by one, the others by 4 to 9 of the
+  10 probe texts) and pass on 5.17.0; the 38 popular models on 5.17.0: 36 pass, 1 unknown (TinyLlama-1.1B-Chat: its
+  declarations disagree), 1 broken (a tiny Llama that declares `legacy: true`, which 5.17.0's LlamaTokenizer does not
+  honour: transformers 5 rebuilds Llama tokenizers without the file's normalizer, so a text after a special token or
+  starting with whitespace gets other ids than tokenizer.json and sentencepiece give; on TinyLlama-1.1B-Chat the
+  greedy outputs of 7 of 8 chat prompts differ between the two id sequences). Cost: the first process on a folder
+  +241 ms at the median (the reference is built), later processes +2 ms.
+
 ## 1.2.0
 
 Released 2026-09-26. The sites the first pre-registered replay found unread (a LoRA adapter's settings file, a
