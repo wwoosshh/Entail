@@ -6,15 +6,20 @@ kernel_reference_contract.py; vllm#42016).
                it is forward_native when custom ops are off, as under torch.compile by default) gets that method
                wrapped. The wrapper compares once per (op class and module, configuration, input pattern) per
                process, on the first real call, and then puts the original back, so the steady state costs nothing.
-               vllm.v1.worker.gpu_model_runner.GPUModelRunner._dummy_run (install_dummy_run): the engine's own
-               profile run and capture warm-ups feed zeros to every layer; calls made inside them decide nothing
-               and are not counted, so the comparison lands on the first real input.
+               vllm.v1.worker.gpu_model_runner.GPUModelRunner._dummy_run (install_dummy_run; and the second GPU
+               runner's capture_model and profile_cudagraph_memory, which capture outside _dummy_run): the engine's
+               own profile run and capture warm-ups feed zeros to every layer; calls made inside them decide
+               nothing and are not counted, so the comparison lands on the first real input.
   read_choice  the kernel's and the definition's outputs on a slice of the real input (ROWS rows of the token
                dimension, cloned before the kernel touched its arguments), the definition run in the input dtype
                and in float32, the op's tensors put back afterwards (a definition may convert its own cache to the
                query's dtype: rotary's _match_cos_sin_cache_dtype); the rule is in the core.
-  handles      none: a kernel that differs from its definition is reported. Switching the op to its native path is
-               a repair to be measured (cost, CUDA graphs) before it is offered.
+  handles      the op's dispatched method (M19 L3): a kernel that differs from its definition is resolved by sending
+               the op to its definition, the meaning-keeping consumer (principle 7) - from the very call that was
+               compared (the slice is decided before the real input is computed) and for every later call of that
+               module in the process. Offered only when the engine runs without CUDA graphs: captured graphs replay
+               the kernel whatever the module's method says, so there it stays broken, with that reason. Under
+               ENTAIL_POLICY=refuse (or KernelReference=refuse) nothing is switched and the mismatch is broken.
 Not compared, each said once as unknown: ops that override forward() (the mamba mixers, static sink attention:
 stateful, not row-wise); ops that hold the engine's state (a KV cache, an index buffer, a forward that reads the
 forward context: DeepSeek's sparse attention indexer - re-running it on a slice would write the engine's buffers
@@ -38,14 +43,17 @@ engine = "vllm"
 versions = "0.30.0"
 BOUNDARY = "kernel:vllm.custom_op"
 CONSUMER = "vllm.custom_op"
-_ORIG = {}             # "loader" -> process_weights_after_loading, <runner module> -> its class's _dummy_run
+_ORIG = {}             # "loader" -> process_weights_after_loading, <runner module> -> {method in DUMMY: original}
 RUNNERS = ("vllm.v1.worker.gpu_model_runner", "vllm.v1.worker.gpu.model_runner",
            "vllm.v1.worker.mm_encoder_model_runner")     # the model runner classes 0.30 picks one of
+DUMMY = ("_dummy_run", "capture_model", "profile_cudagraph_memory")   # the runner methods that feed the model
+#                                                                        the engine's own dummy input
 _DECIDED = set()       # keys (module, class, configuration, input pattern) decided in this process
 _TRIED = {}            # key -> real calls that decided nothing (dummy or identity inputs)
 _WRAPPED = {}          # id(module) -> (module, original _forward_method)
 _STATS = {}            # counts by reason: instrumented, native, overrides_forward, stateful, unreached, decided
 _STATE = {"dummy": 0}  # depth of vLLM's dummy runs (profile run, capture warm-ups) in this process
+_REPAIRED = {}         # id(module) -> True: the op was sent to its definition (a resolved mismatch)
 TRIES = 64             # real calls a key may decide nothing on before it is given up: the dummy runs are not counted,
 #                        and a real slice decides unless every row is one token; a single-token request through a
 #                        rotary instance shared by 32 layers gives 32 such calls, so 64 covers two of them
@@ -55,6 +63,7 @@ def hooks():
     return [Hook("vllm.model_executor.model_loader.utils.process_weights_after_loading", "kernel"),
             Hook("vllm.v1.worker.gpu_model_runner.GPUModelRunner._dummy_run", "kernel"),
             Hook("vllm.v1.worker.gpu.model_runner.GPUModelRunner._dummy_run", "kernel"),
+            Hook("vllm.v1.worker.gpu.model_runner.GPUModelRunner.capture_model", "kernel"),
             Hook("vllm.v1.worker.mm_encoder_model_runner.MMEncoderModelRunner._dummy_run", "kernel")]
 
 
@@ -208,6 +217,26 @@ def compile_mode():
         return 0, {}
 
 
+def graph_mode():
+    """vLLM's cudagraph mode by name (NONE under enforce_eager), or None when it cannot be read. It is read when the
+    model is built (instrument): the current config is set then, and vLLM 0.22 raises when it is asked during a
+    forward."""
+    try:
+        from vllm.config import get_current_vllm_config
+
+        mode = getattr(get_current_vllm_config().compilation_config, "cudagraph_mode", None)
+        return None if mode is None else str(getattr(mode, "name", mode)).upper()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def graphs_off() -> bool:
+    """Whether the engine runs without CUDA graphs (enforce_eager, or a cudagraph mode of none). Only then does a
+    switch of an op's dispatched method reach every later call; captured graphs replay the kernel regardless. Not
+    known to be off: no repair is offered."""
+    return (_STATE.get("cudagraph_mode") or graph_mode()) == "NONE"
+
+
 def prepare(args, kwargs):
     """The slices, cut and cloned before the kernel runs on the real input (a kernel may work in place):
     (args, kwargs, n, rows, bytes), or None when the arguments share no token dimension."""
@@ -325,7 +354,14 @@ def _decide(module, name, orig, cut, call: int) -> bool:
     extra = f"; the runs replaced {changed} tensors of the op's state, put back" if changed else ""
     if via_definition:
         extra += "; the dispatched method calls the definition itself on this input (not an independent kernel)"
-    krc.check(BOUNDARY, consumer, name, cmp, where, extra=extra)
+    repair = None
+    if graphs_off() and not via_definition:
+        repair = (f"{name} sent to its definition (forward_native) from this call on, for every later call of this "
+                  f"module in the process")
+    elif cmp.violations or cmp.nonfinite:
+        extra += "; not repaired: CUDA graphs are captured with the kernel and replay it whatever the op dispatches"
+    if krc.resolved(krc.check(BOUNDARY, consumer, name, cmp, where, extra=extra, repair=repair)):
+        _REPAIRED[id(module)] = True
     return True
 
 
@@ -352,8 +388,9 @@ def wrap(module) -> bool:
             return orig(*args, **kwargs)
         from .. import load
 
+        # the slice is cut and decided before the real input is computed, so a resolved mismatch is kept from this
+        # very call's output (the kernel on the real input would already have gone to the engine otherwise)
         cut = load.safely(BOUNDARY, f"vllm.{name}", "KernelReference", lambda: prepare(args, kwargs), default="failed")
-        out = orig(*args, **kwargs)
         call = _TRIED.get(key, 0) + 1
         _TRIED[key] = call
         try:
@@ -368,8 +405,12 @@ def wrap(module) -> bool:
         if decided:
             _DECIDED.add(key)
             _count("decided")
+            if _REPAIRED.get(id(module)):
+                module._forward_method = module.forward_native
+                _count("sent_to_definition")
+                return module.forward_native(*args, **kwargs)
             module._forward_method = orig
-        return out
+        return orig(*args, **kwargs)
 
     module._forward_method = run
     _WRAPPED[id(module)] = (module, orig)
@@ -393,6 +434,7 @@ def instrument(model) -> int:
     n, seen = 0, {}
     ws = world_size()
     mode, enabled = compile_mode()
+    _STATE["cudagraph_mode"] = graph_mode()
     if ws > 1:
         unknown(f"custom ops are not compared on one rank of {ws}: a definition that all-reduces would run its "
                 f"collectives out of step with the other ranks")
@@ -444,10 +486,22 @@ def install():
     return 1
 
 
+def _marked(orig):
+    def run(self, *a, **kw):
+        _STATE["dummy"] += 1
+        try:
+            return orig(self, *a, **kw)
+        finally:
+            _STATE["dummy"] -= 1
+    return run
+
+
 def install_dummy_run():
-    """Mark vLLM's dummy runs (profile run, CUDA-graph capture and warm-ups), whose calls decide nothing: the
-    `_dummy_run` of every model runner class already imported (0.30 has two runners for GPUs and one for
-    encoder-only models; the worker picks one). Returns how many classes were hooked by this call."""
+    """Mark vLLM's dummy runs (profile run, CUDA-graph capture and warm-ups), whose calls decide nothing: each
+    method in DUMMY that the model runner class defines, for every runner class already imported (0.30 has two
+    runners for GPUs and one for encoder-only models; the worker picks one). The second GPU runner captures and
+    profiles its graphs outside `_dummy_run` (capture_model, profile_cudagraph_memory), so those are marked too.
+    Returns how many classes were hooked by this call."""
     import sys
 
     n = 0
@@ -458,16 +512,9 @@ def install_dummy_run():
         for cls in list(vars(mod).values()):
             if not (isinstance(cls, type) and cls.__module__ == modname and "_dummy_run" in vars(cls)):
                 continue
-            orig = _ORIG[modname] = cls._dummy_run
-
-            def _dummy_run(self, *a, **kw):
-                _STATE["dummy"] += 1
-                try:
-                    return orig(self, *a, **kw)
-                finally:
-                    _STATE["dummy"] -= 1
-
-            cls._dummy_run = _dummy_run
+            _ORIG[modname] = {m: vars(cls)[m] for m in DUMMY if m in vars(cls)}
+            for m, orig in _ORIG[modname].items():
+                setattr(cls, m, _marked(orig))
             _ORIG[modname + ":class"] = cls
             n += 1
             break
@@ -487,7 +534,8 @@ def uninstall():
     for modname in RUNNERS:
         if modname in _ORIG:
             cls = _ORIG.pop(modname + ":class")
-            cls._dummy_run = _ORIG.pop(modname)
+            for m, orig in _ORIG.pop(modname).items():
+                setattr(cls, m, orig)
             n += 1
     return n
 
@@ -507,5 +555,6 @@ def reset():
     _DECIDED.clear()
     _TRIED.clear()
     _STATS.clear()
+    _REPAIRED.clear()
     _STATE["dummy"] = 0
     kernel_reference_contract.reset(BOUNDARY)

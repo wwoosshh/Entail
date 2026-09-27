@@ -3,6 +3,32 @@
 ## Unreleased
 
 **Added**
+- Definitions for engine functions that carry none (M19 L3): `entail/definitions.py` writes, in plain PyTorch, what
+  vLLM 0.30's `fused_experts` (unquantized or INT8 W8A8: weight scales applied by their own shape, activations
+  quantized as the config says), vLLM 0.30's `w8a8_triton_block_scaled_mm` and SGLang 0.5.20's `fused_gdn_gating`
+  compute - the functions' own arguments, outputs of the same shape and dtype; a call a definition does not cover
+  raises NotImplementedError and is `unknown`. `adapters/function_reference.py` wraps each function's name as soon as
+  its module has loaded (start-up shim) and holds it against its definition on the first real call with the kernel
+  reference rule (a 64-row slice, the definition in its noise dtype and in float32; calls whose rows are all one row,
+  an engine's dummy batch, decide nothing and are not counted towards giving up); a mismatch is resolved by sending
+  the name to the definition (float32, the function's output dtype) from that call on, unless the function was
+  already called inside a CUDA graph capture in the process; a repaired function captured later puts its definition
+  in the graph when the definition is capturable, else the kernel, said once as broken. Measured on an RTX 4070 Ti:
+  vllm#58532 (INT8 MoE, per-channel weight scales, static activation scale), vllm#52576 (block FP8, BLOCK_SIZE_K 256)
+  and sglang#21843 (GDN gate on inputs with an inner stride of 2) resolved on their first call, the output's error
+  against a float64 formula 0.956 -> 0.0020, 0.612 -> 0.0027, 0.937 -> 1.5e-7; seven healthy controls of the same
+  functions pass with the kernel's output untouched. Not caught: a bad launch configuration used only by a later,
+  larger call (decided once, on the first call). On healthy engines (entail on against off, six greedy probes):
+  SGLang Qwen3.5-4B with and without CUDA graphs and vLLM Qwen3-4B-FP8 on the Triton block-FP8 path (Marlin
+  disabled; vLLM picks Marlin on sm_89 by default, which never reaches the function), eager and default mode: the
+  function is reached, passes, and the output is unchanged (6/6).
+
+- Kernel reference repair (M19 L3): a custom op whose kernel differs from its own native definition is sent to that
+  definition (`forward_native`) - from the very call that was compared (the slice is now decided before the real
+  input is computed) and for every later call of that module in the process. Resolved in the record, with the
+  resolution; offered only when the engine runs without CUDA graphs (captured graphs replay the kernel), and not
+  under `ENTAIL_POLICY=refuse` or `KernelReference=refuse`. Measured: vllm#42016 (GLM-OCR, vLLM 0.22.0, eager)
+  resolved, eager output now equal to the native mode's; a healthy Llama-3.2-3B changed nothing.
 - `Tokenization` (vocabulary v9) and `tokenizer_contract.py` (M18.1): the tokenizer the engine built is run against
   the tokenizer the folder declares, on ten fixed probe texts, and the ids must be the same. The declaration can be
   run: tokenizer.json by the `tokenizers` library (a sentencepiece-only folder is `unknown` until that reference is
@@ -111,6 +137,13 @@
   requests through a reasoning parser and a tool parser: nothing broken), ngram speculative decoding (nothing
   broken: the M17.6 narrowing of `kv_needed` holds) and a hybrid Mamba-attention model with several KV groups
   (nothing broken); prefill-decode disaggregation is not measured on one card.
+
+**Changed**
+- Kernel reference slices keep their strides (`kernel_reference_contract.kept`): `clone()` made a view with gaps
+  contiguous, so a kernel that misreads a layout read the slice right.
+- vLLM's dummy runs are marked in the second GPU runner's graph capture and memory profiling too (`capture_model`,
+  `profile_cudagraph_memory`, which run outside `_dummy_run`): their warm-up calls had used up TRIES before the first
+  real request.
 
 ## 1.2.0
 

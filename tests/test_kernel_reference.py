@@ -471,6 +471,92 @@ def test_an_in_place_kernel_is_compared_on_the_input_it_was_given():
     assert len(ds) == 1 and ds[0].verdict is Verdict.PASS, ds
 
 
+def test_a_mismatch_is_sent_to_the_definition_when_graphs_are_off():
+    """M19 L3: resolved by the meaning-keeping consumer, from the very call that was compared."""
+    setup()
+    was = vk.graphs_off
+    vk.graphs_off = lambda: True
+    try:
+        m = SiluAndMul("swapped")
+        vk.wrap(m)
+        x = torch.randn(100, 16)
+        out, ds = decided(lambda: m(x))
+        assert len(ds) == 1 and ds[0].verdict is Verdict.RESOLVED and ds[0].rule == RULES["resolved"], ds
+        assert "forward_native" in (ds[0].resolution or ""), ds[0].resolution
+        assert torch.equal(out, m.forward_native(x)), "the call that was compared already gets the definition"
+        assert m._forward_method == m.forward_native, "later calls go to the definition"
+        out2, ds2 = decided(lambda: m(torch.randn(50, 16)))
+        assert not ds2 and torch.equal(out2.shape and out2, out2)
+        assert vk.stats()["resolved"] == 1 and vk.stats()["sent_to_definition"] == 1, vk.stats()
+    finally:
+        vk.graphs_off = was
+
+
+def test_with_graphs_or_under_refuse_a_mismatch_stays_broken():
+    setup()
+    m = SiluAndMul("swapped")             # without vLLM, graphs are not known to be off: no repair is offered
+    vk.wrap(m)
+    x = torch.randn(100, 16)
+    out, ds = decided(lambda: m(x))
+    assert ds[0].verdict is Verdict.BROKEN and "not repaired: CUDA graphs" in ds[0].note, ds[0].note
+    assert torch.equal(out, SiluAndMul("swapped").forward_cuda(x)), "unrepaired: the engine gets the kernel's output"
+    setup()
+    was, pol = vk.graphs_off, core.policy()
+    vk.graphs_off = lambda: True
+    core.set_policy("refuse")
+    try:
+        m = SiluAndMul("swapped")
+        vk.wrap(m)
+        out, ds = decided(lambda: m(x))
+        assert ds[0].verdict is Verdict.BROKEN and m._forward_method != m.forward_native, ds
+    finally:
+        vk.graphs_off = was
+        core.set_policy(pol)
+
+
+def test_every_runner_method_that_feeds_dummy_input_is_marked():
+    """vLLM 0.30's second GPU runner captures and profiles its graphs outside _dummy_run (capture_model,
+    profile_cudagraph_memory): calls made there are the engine's own dummy input too."""
+    import types
+    setup()
+    name = "vllm.v1.worker.gpu.model_runner"
+    seen = {}
+
+    class GPUModelRunner:
+        def _dummy_run(self):
+            seen["_dummy_run"] = vk._STATE["dummy"]
+
+        def capture_model(self):
+            seen["capture_model"] = vk._STATE["dummy"]
+
+        def profile_cudagraph_memory(self):
+            seen["profile_cudagraph_memory"] = vk._STATE["dummy"]
+
+        def execute_model(self):
+            seen["execute_model"] = vk._STATE["dummy"]
+
+    mod = types.ModuleType(name)
+    GPUModelRunner.__module__ = name
+    mod.GPUModelRunner = GPUModelRunner
+    was = sys.modules.get(name)
+    sys.modules[name] = mod
+    try:
+        assert vk.install_dummy_run() == 1 and vk.install_dummy_run() == 0
+        r = GPUModelRunner()
+        for m in ("_dummy_run", "capture_model", "profile_cudagraph_memory", "execute_model"):
+            getattr(r, m)()
+        assert seen == {"_dummy_run": 1, "capture_model": 1, "profile_cudagraph_memory": 1, "execute_model": 0}, seen
+        assert vk._STATE["dummy"] == 0
+        vk.uninstall()
+        r.capture_model()
+        assert seen["capture_model"] == 0, "uninstall puts every method back"
+    finally:
+        if was is None:
+            del sys.modules[name]
+        else:
+            sys.modules[name] = was
+
+
 def test_instrument_walks_a_model_and_says_what_it_skipped():
     setup()
     model = nn.Sequential(SiluAndMul("faithful"), nn.Linear(8, 8), SiluAndMul("faithful", native=True), Indexer())

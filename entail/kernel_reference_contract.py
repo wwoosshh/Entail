@@ -94,18 +94,32 @@ def rows_of(args, kwargs, hint: Optional[int] = None) -> Optional[int]:
     return n
 
 
+def kept(t):
+    """A copy of a tensor with its strides kept (M19 L3). clone() makes a view with gaps - a row of a fused
+    projection, a column of an interleaved one - contiguous, and a kernel that misreads that layout would then be
+    handed one it reads right. An expanded tensor (a stride of 0) is copied contiguous: its elements share memory."""
+    t = t.detach()
+    if t.is_contiguous() or any(int(s) == 0 and int(n) > 1 for s, n in zip(t.stride(), t.shape)):
+        return t.clone()
+    import torch
+
+    buf = torch.empty_strided(tuple(t.shape), tuple(t.stride()), dtype=t.dtype, device=t.device)
+    buf.copy_(t)
+    return buf
+
+
 def sliced(obj, n: int, rows: int, dtype=None):
     """A copy of an argument with the token dimension cut to `rows`: tensors whose first dimension is n are cut
     along it, a 2-D tensor whose last dimension is n (MRoPE positions, [3, n]) along that; everything else is
-    copied whole. Reduced-precision floating tensors (REDUCED) are cast to `dtype` when given; fp8 and integer
-    tensors keep their dtype. Containers are rebuilt; other values pass."""
+    copied whole. Copies keep the argument's strides (kept). Reduced-precision floating tensors (REDUCED) are cast
+    to `dtype` when given; fp8 and integer tensors keep their dtype. Containers are rebuilt; other values pass."""
     if _is_tensor(obj):
         t = obj
         if t.dim() >= 1 and int(t.shape[0]) == n:
             t = t[:rows]
         elif t.dim() == 2 and int(t.shape[-1]) == n:
             t = t[:, :rows]
-        t = t.detach().clone()
+        t = kept(t)
         if dtype is not None and str(t.dtype) in REDUCED:
             t = t.to(dtype)
         return t
@@ -135,6 +149,8 @@ def uniform_rows(tensors) -> bool:
     if not ts:
         return False
     t = max(ts, key=lambda x: x.numel())
+    if t.element_size() == 1:          # fp8 codes: compared as the values they hold
+        t = t.float()
     return bool((t == t[:1]).all())
 
 
@@ -217,7 +233,8 @@ def compare(kernel_out, reference_out, native_out=None, inputs=None) -> Comparis
     same_def = all(k.equal(n) for k, n in zip(ks, ns)) if ns is not None else all(k.equal(r) for k, r in zip(ks, rs))
     defs = ns if ns is not None else rs
     ins = [t for t in (inputs or []) if _is_tensor(t)]
-    same_in = bool(defs) and all(any(tuple(t.shape) == tuple(d.shape) and d.detach().to(t.dtype).equal(t.detach())
+    same_in = bool(defs) and all(any(tuple(t.shape) == tuple(d.shape)
+                                     and d.detach().to(t.dtype).float().equal(t.detach().float())
                                      for t in ins) for d in defs)
     return Comparison(diff=diff, floor=(floor if ns is not None else None), noise=(noise if ns is not None else None),
                       scale=scale, elements=elements, violations=violations, nonfinite=nonfinite, margin=margin,
@@ -259,9 +276,12 @@ def describe(cmp: Comparison) -> str:
 
 
 def check(boundary: str, consumer: str, op: str, cmp: Comparison, where: str, policy=None, record: bool = True,
-          owner=None, extra: str = "") -> list:
+          owner=None, extra: str = "", repair: Optional[str] = None) -> list:
     """Decide the kernel's output against the definition's. Returns the decisions; with `record` they are also
-    recorded through load.enforce (the run goes on, or stops where the policy says)."""
+    recorded through load.enforce (the run goes on, or stops where the policy says). `repair`: what the caller can do
+    about a mismatch (send the op to its definition, M19 L3); offered, a mismatch is resolved unless the policy
+    repairs nothing for KernelReference (ENTAIL_POLICY=refuse or KernelReference=refuse), and the caller carries it
+    out when the decision says resolved."""
     from . import load, policies
     from .contracts import RULES, Contract, Decision, Verdict, unrepaired
     from .facts import Certainty, Fact, KernelReference, Source
@@ -273,7 +293,10 @@ def check(boundary: str, consumer: str, op: str, cmp: Comparison, where: str, po
     held = Fact("KernelReference", KernelReference(op=op, max_abs_diff=cmp.diff, floor=cmp.floor, scale=cmp.scale),
                 Source("engine", where), Certainty.VERIFIED)
     note = f"{where}: {describe(cmp)}{extra}"
-    if cmp.violations or cmp.nonfinite:
+    if (cmp.violations or cmp.nonfinite) and repair and policy.mismatch_setting("KernelReference") == "resolve":
+        d = Decision(contract, "KernelReference", Verdict.RESOLVED, RULES["resolved"], declared=declared, chosen=held,
+                     resolution=repair, note=note)
+    elif cmp.violations or cmp.nonfinite:
         verdict, blocking = unrepaired(policy, "KernelReference")
         d = Decision(contract, "KernelReference", verdict, RULES["kernel_reference_mismatch"], declared=declared,
                      chosen=held, blocking=blocking, note=note)
@@ -289,9 +312,18 @@ def check(boundary: str, consumer: str, op: str, cmp: Comparison, where: str, po
             _tally.refused(boundary)
         elif d.verdict is Verdict.BROKEN:
             _tally.broken(boundary)
+        elif d.verdict is Verdict.RESOLVED:
+            _tally.counts(boundary)["resolved"] += 1
         _tally.tick(boundary)
         load.enforce(decisions, once_for=owner)
     return decisions
+
+
+def resolved(decisions) -> bool:
+    """Whether the decision says the repair the caller offered is to be carried out (M19 L3)."""
+    from .contracts import Verdict
+
+    return bool(decisions) and decisions[0].verdict is Verdict.RESOLVED
 
 
 def stats(boundary: str) -> dict:

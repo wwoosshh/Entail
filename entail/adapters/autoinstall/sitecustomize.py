@@ -35,6 +35,11 @@ TARGETS = {
     "vllm.v1.worker.mm_encoder_model_runner": ["entail.adapters.vllm_kernel_reference:install_dummy_run"],
     # Patched as soon as the selector has run, so attention.py imports the wrapped name.
     "vllm.v1.attention.selector": ["entail.adapters.vllm_attention"],
+    # engine functions with no definition of their own, held against entail's (M19 L3; entail/definitions.py):
+    # wrapped as soon as the defining module has loaded, so every later import gets the wrapped name
+    "vllm.model_executor.layers.fused_moe.fused_moe": ["entail.adapters.function_reference:install"],
+    "vllm.model_executor.layers.quantization.utils.fp8_utils": ["entail.adapters.function_reference:install"],
+    "sglang.kernels.ops.attention.fla.fused_gdn_gating": ["entail.adapters.function_reference:install"],
     "vllm.v1.core.kv_cache_manager": ["entail.adapters.vllm_cache_contract"],
     "vllm.v1.core.sched.scheduler": ["entail.adapters.vllm_identity"],
     "vllm.entrypoints.pooling.scoring.io_processor": ["entail.adapters.vllm_scoring"],
