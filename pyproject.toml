@@ -46,4 +46,4 @@ version = { attr = "entail.__version__" }
 include = ["entail*"]
 
 [tool.setuptools.package-data]
-entail = ["data/*.json"]
+entail = ["data/*.json", "platform/static/*"]

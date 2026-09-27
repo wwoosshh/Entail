@@ -1,0 +1,64 @@
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --ink: #1f2328; --muted: #6b7280; --line: #e3e3e0;
+  --pass: #2e7d32; --resolved: #1565c0; --unknown: #8a7a12; --unchecked: #6b7280;
+  --broken: #c62828; --refused: #7f1d1d; --none: #b8b8b4;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+       background: var(--bg); color: var(--ink); }
+header { display: flex; align-items: baseline; gap: 12px; padding: 10px 16px; background: var(--panel);
+         border-bottom: 1px solid var(--line); }
+header strong { font-size: 17px; }
+.sub, .en, .folder { color: var(--muted); font-size: 12px; }
+.folder { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45vw; }
+.live { color: var(--none); }
+.live.on { color: var(--pass); }
+main { display: grid; grid-template-columns: 250px minmax(0, 1fr) 400px; gap: 12px; padding: 12px;
+       height: calc(100vh - 50px); }
+aside, #center { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+                 overflow: auto; }
+h2 { font-size: 14px; margin: 2px 0 10px; }
+#runlist { list-style: none; margin: 0; padding: 0; }
+#runlist li { padding: 7px 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+#runlist li:hover { background: #f1f1ee; }
+#runlist li.sel { border-color: var(--ink); }
+#runlist .when { font-size: 12px; color: var(--muted); }
+.banner { padding: 10px 12px; border-radius: 6px; background: #f1f1ee; margin-bottom: 12px; }
+.banner.broken { background: #fdecea; color: var(--broken); }
+.banner.intact { background: #edf7ee; color: var(--pass); }
+.flow { margin-bottom: 18px; }
+.flow h3 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+.row { display: flex; align-items: stretch; flex-wrap: wrap; row-gap: 10px; padding-bottom: 6px; }
+.arrow { align-self: center; color: var(--muted); padding: 0 6px; }
+.node { min-width: 150px; max-width: 170px; border: 2px solid var(--none); border-radius: 8px; padding: 8px;
+        background: var(--panel); cursor: pointer; }
+.node.sel { box-shadow: 0 0 0 3px #1f232833; }
+.node .name { font-weight: 600; }
+.node .counts { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px; color: #fff;
+         background: var(--none); margin-top: 4px; }
+.st-pass { border-color: var(--pass); } .b-pass { background: var(--pass); }
+.st-resolved { border-color: var(--resolved); } .b-resolved { background: var(--resolved); }
+.st-unknown { border-color: var(--unknown); border-style: dashed; } .b-unknown { background: var(--unknown); }
+.st-unchecked { border-color: var(--unchecked); border-style: dashed; } .b-unchecked { background: var(--unchecked); }
+.st-broken { border-color: var(--broken); } .b-broken { background: var(--broken); }
+.st-refused { border-color: var(--refused); } .b-refused { background: var(--refused); }
+.st-none { border-color: var(--none); } .b-none { background: var(--none); }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+.hint { color: var(--muted); }
+.dec { border-top: 1px solid var(--line); padding: 8px 0; }
+.dec .head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.dec .bnd { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--muted); }
+.kv { font-size: 12px; margin-top: 3px; word-break: break-word; }
+.kv b { color: var(--muted); font-weight: 600; margin-right: 4px; }
+table.small { font-size: 12px; border-collapse: collapse; width: 100%; margin-top: 6px; }
+table.small td, table.small th { border-bottom: 1px solid var(--line); padding: 3px 4px; text-align: left; }
+
+@media (max-width: 1150px) {
+  main { grid-template-columns: 220px minmax(0, 1fr); height: auto; }
+  #detail { grid-column: 1 / -1; }
+}
+@media (max-width: 720px) {
+  main { grid-template-columns: 1fr; }
+  .folder { display: none; }
+}

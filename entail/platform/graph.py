@@ -189,7 +189,11 @@ def graph(lines: List[dict]) -> dict:
     worst = "none"
     for n in nodes:
         worst = _worse(n["state"], worst)
+    # what the program itself said, in process, about where the fault lies (diagnose: it knew whether the output was
+    # wrong, and which layers it compared), the latest such line
+    said_located = [o["located"] for o in lines if isinstance(o.get("located"), dict)]
     return {"flows": flows, "nodes": nodes, "state": worst, "locate": located.to_json(),
+            "located": said_located[-1] if said_located else None,
             "start": min(stamps) if stamps else None, "end": max(stamps) if stamps else None,
             "pids": sorted({o.get("pid") for o in lines if o.get("pid") is not None}),
             "engines": sorted({e for n in nodes for b in n["boundaries"] for e in [engine_of(b)] if e}),

@@ -141,6 +141,18 @@ def test_an_image_launch_draws_the_image_flow():
     assert {n["id"]: n["state"] for n in g["nodes"]}["prediction"] == "resolved"
 
 
+def test_what_the_program_located_in_process_is_kept():
+    """diagnose writes a "located" line when the program knew the output was wrong (inside a layer, M7.3); the graph
+    hands the latest one on, so the page can say what the records alone cannot."""
+    lines = _launch()[:1] + [{"v": 2, "t": 20.0, "run": "4242-1790000000", "pid": 1,
+                              "located": {"broken_at": None, "suspects": ["inside attention"], "why": ["inside it"]}},
+                             {"v": 2, "t": 21.0, "run": "4242-1790000000", "pid": 1,
+                              "located": {"broken_at": None, "suspects": ["inside mlp"], "why": ["inside mlp"]}}]
+    g = graph.graph(lines)
+    assert g["located"]["suspects"] == ["inside mlp"] and g["locate"]["broken_at"] is None
+    assert graph.graph(_launch())["located"] is None
+
+
 def test_a_kernel_without_an_engine_joins_the_launch_flow():
     """P0 evaluation: a Triton kernel names no engine, so in an image launch it must not bring the LLM flow in; it is
     drawn at the end of the image flow. On its own it shows in its home flow."""

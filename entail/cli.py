@@ -10,6 +10,9 @@
   entail pin MANIFEST                    mark a reviewed manifest pinned, so its facts count as declarations
   entail probe --engine E --consumer C --fact Name.field --model DIR [--out FILE] [--no-gate]
                                          check one capability-table row with data (runs the engine on the GPU)
+  entail serve [--dir DIR] [--port N] [--open]
+                                         the platform: the project's runs as live nodes, where and why meaning
+                                         broke, from the record files (a local web server, read-only)
   entail locate [RECORD ...] [--wrong] [--pid N] [--json]
                                          where meaning broke, from the record files (default: the newest one in
                                          entail_logs/); --wrong says the output was wrong (M7.1)
@@ -193,6 +196,17 @@ def _locate(args):
     return 1 if found.broken else 0
 
 
+def _serve(args):
+    from . import record
+    from .platform import server
+
+    folder = args.dir
+    if not folder:
+        env = os.environ.get("ENTAIL_LOG_DIR")
+        folder = env if env and env.strip().lower() != "off" else os.path.join(os.getcwd(), record.LOG_DIR_NAME)
+    return server.serve(os.path.abspath(folder), args.port, args.open)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="entail", description="Keep what a value means intact across LLM "
                                  "inference-stack boundaries.")
@@ -225,6 +239,10 @@ def main(argv=None):
     lc.add_argument("--wrong", action="store_true", help="the output was wrong: say where the fault lies")
     lc.add_argument("--pid", type=int, help="only the decisions of this process")
     lc.add_argument("--json", action="store_true", help="print the localization as JSON")
+    sv = sub.add_parser("serve", help="the platform: the project's runs as live nodes (a local web server)")
+    sv.add_argument("--dir", help="the log folder (default: ENTAIL_LOG_DIR, else entail_logs/ here)")
+    sv.add_argument("--port", type=int, default=8765, help="the port on 127.0.0.1 (default 8765)")
+    sv.add_argument("--open", action="store_true", help="open the page in the browser")
     sub.add_parser("version", help="print the version")
     args, rest = ap.parse_known_args(argv)
     if args.cmd == "preflight":
@@ -250,6 +268,8 @@ def main(argv=None):
         return _check(args)
     if args.cmd == "locate":
         return _locate(args)
+    if args.cmd == "serve":
+        return _serve(args)
     return _hook(args)
 
 
