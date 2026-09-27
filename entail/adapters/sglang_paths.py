@@ -10,6 +10,13 @@ offline engine is up (M19 L3.3c; path_contract.py holds the rule, vllm_paths.py 
                afterwards.
   handles      none (a running engine cannot be given another path; a disagreement is reported).
 Not compared, said once as unknown: an embedding model, a context shorter than the probes, a probe the engine refuses.
+Off unless asked for (ENTAIL_PATHS=1; said once as unknown otherwise; M19 L4): SGLang runs no prefill while it starts,
+so the probes would be the engine's first prefills, and a defect on that path kills the engine before the caller's
+first request (principle 12). Measured: SGLang 0.5.20 with Phi-3.5-mini-instruct (head_dim 96) picks flashinfer, whose
+state merge does not take head_dim 96; a 128-token prompt stops the scheduler, a longer one hits an illegal memory
+access - with entail off as well, and the E2 harness's short prompts never reach it
+(testbed/results/m19/l4/bisect_phi35/). vLLM's path check stays on: its start-up runs the model's forward (the
+profile run) and its attention selector checks the head size.
 """
 import os
 
@@ -26,6 +33,11 @@ _DONE = set()
 
 def hooks():
     return [Hook("sglang.srt.entrypoints.engine.Engine.__init__", "start")]
+
+
+def asked():
+    """The probes run on SGLang only when asked for (the module docstring says why)."""
+    return os.environ.get("ENTAIL_PATHS", "").strip().lower() in ("1", "on", "yes", "true")
 
 
 def handles():
@@ -139,7 +151,13 @@ def install():
             _DONE.add(id(self))
             from .. import load
 
-            load.safely(BOUNDARY, CONSUMER, "PathAgreement", lambda: decide(self))
+            if asked():
+                load.safely(BOUNDARY, CONSUMER, "PathAgreement", lambda: decide(self))
+            else:
+                load.enforce([load.cannot_check(
+                    BOUNDARY, CONSUMER, "PathAgreement",
+                    "SGLang has run no prefill yet: the probe requests would be the engine's first, and a defect on "
+                    "that path would stop it before your first request; set ENTAIL_PATHS=1 to compare its paths")])
 
     Engine.__init__ = __init__
     return 1

@@ -227,6 +227,47 @@ def test_an_older_vllm_without_the_cache_skip_resets_the_cache_before_cold_reque
     assert ds[2].verdict is Verdict.BROKEN and ds[2].chosen.value.paths == "cold_cache", ds
 
 
+def test_sglang_probes_only_when_asked():
+    """SGLang runs no prefill while it starts, so the probes would be its first requests (M19 L4: a defect there
+    stopped the engine before the caller's first request); they run only with ENTAIL_PATHS=1."""
+    from entail.adapters import sglang_paths as sp
+
+    calls = []
+
+    class Engine:
+        def __init__(self, *a, **k):
+            self.server_args = SimpleNamespace(model_path="fake/model", is_embedding=False, context_length=4096)
+
+    mods = {n: types.ModuleType(n) for n in ("sglang", "sglang.srt", "sglang.srt.entrypoints",
+                                            "sglang.srt.entrypoints.engine")}
+    mods["sglang.srt.entrypoints.engine"].Engine = Engine
+    was = {n: sys.modules.get(n) for n in mods}
+    sys.modules.update(mods)
+    real_decide, env = sp.decide, os.environ.pop("ENTAIL_PATHS", None)
+    sp.decide = lambda eng: calls.append(eng) or []
+    try:
+        sp.reset()
+        sp.uninstall()
+        assert sp.install() == 1
+        _, ds = decided(lambda: Engine())
+        assert not calls and len(ds) == 1 and ds[0].verdict is Verdict.UNKNOWN, ds
+        assert "ENTAIL_PATHS=1" in ds[0].note and "first request" in ds[0].note
+        os.environ["ENTAIL_PATHS"] = "1"
+        _, ds = decided(lambda: Engine())
+        assert len(calls) == 1, "asked for: the probes run"
+    finally:
+        sp.uninstall()
+        sp.decide = real_decide
+        os.environ.pop("ENTAIL_PATHS", None)
+        if env is not None:
+            os.environ["ENTAIL_PATHS"] = env
+        for n, m in was.items():
+            if m is None:
+                sys.modules.pop(n, None)
+            else:
+                sys.modules[n] = m
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
