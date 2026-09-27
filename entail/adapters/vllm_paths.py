@@ -145,6 +145,11 @@ def decide(llm) -> list:
     if recs["cache"] is not None:
         base = {path_contract.TARGET: recs["alone"][path_contract.TARGET]}
         out += pc.check(BOUNDARY, CONSUMER, "cold_cache", pc.verdict(pc.pair(base, recs["cache"])), where)
+    # the selective safe path (product track P3): which pairs disagreed, for safe_mode to move on
+    from .. import safe_mode
+
+    disagree = [d.chosen.value.paths for d in out if d.verdict.value in ("broken", "refused") and d.chosen is not None]
+    load.enforce(safe_mode.after_self_check("vllm", disagree, "start:vllm.safe_mode", "vllm.engine_args", where))
     return out
 
 

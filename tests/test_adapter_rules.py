@@ -27,7 +27,8 @@ V2 = ("transformers_adapter", "transformers_config", "sglang_adapter", "vllm_att
       "vllm_serve", "comfyui", "diffusers_adapter", "transformers_template", "sglang_serve", "vllm_identity",
       "vllm_scoring", "sglang_fp8_tile", "transformers_tokenizer", "transformers_stops", "vllm_stops",
       "sglang_stops", "vllm_lora", "sglang_lora", "vllm_cache_key", "transformers_beam", "triton_launch", "vllm_pairing",
-      "vllm_kernel_reference", "vllm_parse", "vllm_multimodal", "function_reference", "vllm_paths", "sglang_paths")
+      "vllm_kernel_reference", "vllm_parse", "vllm_multimodal", "function_reference", "vllm_paths", "sglang_paths",
+      "vllm_safe", "sglang_safe")
 # Not yet on the v2 interface: where they move, and why they have not yet. Empty since M9.3, when the research tools
 # (fault injection, the layout ledger, a probe) left the package.
 LEGACY = {}
@@ -39,6 +40,8 @@ ALLOWED = {"load": None, "kv_contract": None, "epochs": None, "identity_contract
            "vocab_contract": None, "tokenizer_contract": None, "kernel_reference_contract": None, "stops_contract": None,
            "request_contract": None, "parse_contract": None, "placeholder_contract": None, "adapter_config_contract": None, "cache_key_contract": None, "kernel_launch_contract": None, "rotary_pairing_contract": None,
            "path_contract": None,
+           # the two safety modes (product track P3): which optimizations to turn off is decided there
+           "safe_mode": None,
            "policies": {"current"}, "core": {"mode"},
            "readers": {"rotary_of", "config_dict", "prediction_kind", "lora_modules", "is_text_module", "lora_base"},
            "facts": None, "base": {"Hook"},

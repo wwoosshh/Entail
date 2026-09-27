@@ -133,6 +133,11 @@ def decide(eng) -> list:
     out += pc.check(BOUNDARY, CONSUMER, "alone_batched", pc.verdict(pc.pair(recs["alone"], recs["batched"])), where)
     base = {pc.TARGET: recs["alone"][pc.TARGET]}
     out += pc.check(BOUNDARY, CONSUMER, "cold_cache", pc.verdict(pc.pair(base, recs["cache"])), where)
+    # the selective safe path (product track P3): which pairs disagreed, for safe_mode to move on
+    from .. import safe_mode
+
+    disagree = [d.chosen.value.paths for d in out if d.verdict.value in ("broken", "refused") and d.chosen is not None]
+    load.enforce(safe_mode.after_self_check("sglang", disagree, "start:sglang.safe_mode", "sglang.server_args", where))
     return out
 
 

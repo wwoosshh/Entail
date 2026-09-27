@@ -45,6 +45,9 @@ TARGETS = {
     "vllm.v1.worker.gpu.block_table": ["entail.adapters.function_reference:install"],
     # the engine's own paths against each other on probe requests, once the offline engine is up (M19 L3.3c)
     "vllm.entrypoints.llm": ["entail.adapters.vllm_paths"],
+    # the two safety modes turn an optimization off in the engine's arguments, before they are built (product P3)
+    "vllm.engine.arg_utils": ["entail.adapters.vllm_safe"],
+    "sglang.srt.server_args": ["entail.adapters.sglang_safe"],
     "sglang.srt.entrypoints.engine": ["entail.adapters.sglang_paths"],
     "vllm.v1.core.kv_cache_manager": ["entail.adapters.vllm_cache_contract"],
     "vllm.v1.core.sched.scheduler": ["entail.adapters.vllm_identity"],

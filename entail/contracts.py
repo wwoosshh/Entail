@@ -121,6 +121,12 @@ RULES = {
     "paths_disagree": "the engine answers the same request differently along two of its own paths that mean the "
                       "same (decode against a fresh prefill, alone against batched, cold against a prefix-cache "
                       "hit): a confident prediction changed or a kept token's probability moved",
+    "safe_mode": "the explicit safe mode (ENTAIL_SAFE=all) turns off an optimization the engine declares does not "
+                 "change results, so a fault that stays is outside the optimizations and one that goes is inside them",
+    "safe_path": "the engine's own paths disagreed with this optimization on, so this configuration starts without it "
+                 "(the selective safe path, ENTAIL_SAFE=auto; one candidate per start until the paths agree)",
+    "safe_path_outside": "every candidate optimization was turned off and the engine's paths still disagree: the "
+                         "cause is outside them, so they are turned back on",
     "kernel_layout_variant": "the kernel writes other values when a tensor it is handed is strided in its innermost "
                              "dimension than when the same values are laid out contiguously there: it reads the "
                              "tensor as if it were contiguous",

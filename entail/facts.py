@@ -21,7 +21,8 @@ which a generation ends (and begins, and is padded), declared in up to three fil
 different subset of (Llama 3, April 2024: config.json named one end, the model emitted another). v8 (M17.4) adds
 Rotary.pairing; v9 (M18) Tokenization, KernelReference, Parse and Placeholder; v10 (M19 L3.3c) PathAgreement: what
 one request comes to along two of the engine's own paths that mean the same (decode against a fresh prefill, alone
-against batched, cold against a prefix-cache hit). Each version only adds optional fields or whole classes, so an
+against batched, cold against a prefix-cache hit); v11 (product track P3) SafeMode: an optimization declared not to
+change results, and whether a safety mode turned it off. Each version only adds optional fields or whole classes, so an
 older fact is a newer fact with
 them open, and a fact written with an older version is still read (READABLE_VERSIONS); it may not state a field its
 version did not have (ADDED_IN).
@@ -33,8 +34,8 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Optional, Tuple
 
-VOCAB_VERSION = 10
-READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 10})   # a later version only adds optional fields or classes; fields in ADDED_IN
+VOCAB_VERSION = 11
+READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11})   # a later version only adds optional fields or classes; fields in ADDED_IN
 ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("Template", "tool_call_format"): 3,
             ("Rotary", "low_freq_factor"): 4, ("Rotary", "high_freq_factor"): 4,
             ("Rotary", "beta_fast"): 6, ("Rotary", "beta_slow"): 6, ("Rotary", "attention_factor"): 6,
@@ -574,6 +575,30 @@ class PathAgreement:
         _number("PathAgreement", "pdrift", self.pdrift, 0)
 
 
+SAFE_FEATURES = frozenset({"cuda_graphs", "prefix_cache", "speculative_decoding", "custom_kernels",
+                           "attention_kernels"})
+SAFE_REASONS = frozenset({"all", "path"})
+
+
+@dataclass(frozen=True)
+class SafeMode:
+    """One of an engine's optimizations that it declares do not change results, and whether it runs (v11, product
+    track P3; LIBRARY_DESIGN.md 13.6): `feature` names it ("cuda_graphs", "prefix_cache", "speculative_decoding",
+    "custom_kernels", "attention_kernels"), `on` whether it runs, and `why` which safety mode turned it off - "all"
+    (the explicit safe mode, ENTAIL_SAFE=all: every such optimization off, to tell which side a fault is on) or
+    "path" (the selective safe path: the engine's own paths disagreed with it on, so this configuration runs without
+    it)."""
+    feature: str
+    on: bool
+    why: Optional[str] = None
+
+    def __post_init__(self):
+        _closed("SafeMode", "feature", self.feature, SAFE_FEATURES, optional=False)
+        if not isinstance(self.on, bool):
+            raise ValueError(f"SafeMode.on: expected a bool, got {self.on!r}")
+        _closed("SafeMode", "why", self.why, SAFE_REASONS)
+
+
 # --- not in the vocabulary ------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -617,14 +642,14 @@ VOCABULARY = {
     "Template": "PROPERTY", "Coverage": "MAPPING", "TokenType": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME",
     "Identity": "TIME", "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE", "KernelConfig": "LAYOUT",
     "Vocab": "MAPPING", "Stops": "MAPPING", "Tokenization": "MAPPING", "KernelReference": "PROPERTY",
-    "Parse": "MAPPING", "Placeholder": "FRAME", "PathAgreement": "PROPERTY",
+    "Parse": "MAPPING", "Placeholder": "FRAME", "PathAgreement": "PROPERTY", "SafeMode": "SPECIALIZATION",
 }
 _HERE = {"Layout": Layout, "Quantized": Quantized, "Rotary": Rotary, "Positions": Positions, "Valid": Valid,
          "ModelProps": ModelProps, "Prediction": Prediction, "LatentScale": LatentScale, "Template": Template,
          "TokenType": TokenType, "Reduction": Reduction, "Epoch": Epoch, "Identity": Identity, "Assumed": Assumed,
          "Origin": Origin, "KernelConfig": KernelConfig, "Vocab": Vocab, "Stops": Stops, "Tokenization": Tokenization,
          "KernelReference": KernelReference, "Parse": Parse, "Placeholder": Placeholder,
-         "PathAgreement": PathAgreement}
+         "PathAgreement": PathAgreement, "SafeMode": SafeMode}
 
 
 def vocabulary_class(name):

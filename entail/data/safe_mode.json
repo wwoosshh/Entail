@@ -1,0 +1,29 @@
+{
+  "_about": "The two safety modes' table (LIBRARY_DESIGN.md 13.6; ROADMAP product track P3). 'engines': per engine, the optimizations it declares do not change results, the engine option that turns each off and the value that does, with where the engine says so. 'candidates': which optimizations a disagreement between two of the engine's own paths points at (path_contract's pairs), in the order the selective safe path tries them - one per start.",
+  "version": 1,
+  "candidates": {
+    "decode_prefill": ["speculative_decoding", "cuda_graphs"],
+    "alone_batched": ["cuda_graphs", "custom_kernels"],
+    "cold_cache": ["prefix_cache"]
+  },
+  "engines": {
+    "vllm": {
+      "cuda_graphs": {"option": "enforce_eager", "safe": true,
+        "evidence": "vLLM 0.30 config/model.py ModelConfig.enforce_eager: 'If True, we will disable CUDA graph and always execute the model in eager mode' (torch.compile is off in eager mode too)"},
+      "prefix_cache": {"option": "enable_prefix_caching", "safe": false,
+        "evidence": "vLLM 0.30 engine/arg_utils.py EngineArgs.enable_prefix_caching (a cache hit reuses KV computed for the same tokens)"},
+      "speculative_decoding": {"option": "speculative_config", "safe": null,
+        "evidence": "vLLM 0.30 engine/arg_utils.py EngineArgs.speculative_config (None: no draft tokens; rejection sampling keeps the target model's distribution)"},
+      "custom_kernels": {"option": "compilation_config.custom_ops", "safe": ["none"],
+        "evidence": "vLLM 0.30 config/compilation.py CompilationConfig.custom_ops: 'none' to disable all custom ops, each op then runs its forward_native definition"}
+    },
+    "sglang": {
+      "cuda_graphs": {"option": "disable_cuda_graph", "safe": true,
+        "evidence": "SGLang 0.5.20 arg_groups/cuda_graph_hook.py reads ServerArgs.disable_cuda_graph"},
+      "prefix_cache": {"option": "disable_radix_cache", "safe": true,
+        "evidence": "SGLang 0.5.20 arg_groups/fields/memory.py ServerArgs.disable_radix_cache"},
+      "speculative_decoding": {"option": "speculative_algorithm", "safe": null,
+        "evidence": "SGLang 0.5.20 arg_groups/fields/spec.py ServerArgs.speculative_algorithm (None: no speculative decoding)"}
+    }
+  }
+}
