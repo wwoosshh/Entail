@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="entail-token" content="__ENTAIL_TOKEN__">
 <title>entail</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -17,6 +18,14 @@
   <aside id="runs">
     <h2>실행 <span class="en">Runs</span></h2>
     <ul id="runlist"></ul>
+    <h2 class="gap">안전모드 <span class="en">Safe mode</span></h2>
+    <select id="safemode" aria-label="안전모드 · safe mode">
+      <option value="auto">자동: 선택적 안전 경로 (기본)</option>
+      <option value="all">명시적 안전모드: 모두 끔</option>
+      <option value="off">끔</option>
+    </select>
+    <div id="safenote" class="hint small"></div>
+    <ul id="safepaths"></ul>
   </aside>
   <section id="center">
     <div id="banner" class="banner">기록을 읽는 중… <span class="en">reading records</span></div>

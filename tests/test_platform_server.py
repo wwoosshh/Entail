@@ -135,6 +135,78 @@ def test_the_event_stream_sends_the_graph_again_when_lines_arrive():
         srv.server_close()
 
 
+def _post(port, body, token=None, origin="self", host=None, path="/api/safe-mode"):
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    headers = {"Host": host or f"127.0.0.1:{port}", "Content-Type": "application/json"}
+    if origin:
+        headers["Origin"] = f"http://127.0.0.1:{port}" if origin == "self" else origin
+    if token is not None:
+        headers["X-Entail-Token"] = token
+    c.request("POST", path, body=body if isinstance(body, bytes) else json.dumps(body).encode(), headers=headers)
+    r = c.getresponse()
+    out = r.read()
+    c.close()
+    return r.status, out
+
+
+def test_the_one_write_is_the_safety_mode_and_needs_the_page_token_and_origin():
+    folder, _ = _folder()
+    srv, port = _start(folder)
+    try:
+        st, _, body = _get(port, "/api/safe-mode")
+        s = json.loads(body)
+        assert st == 200 and s["mode"] == "auto" and s["set"] is False and s["paths"] == [], s
+        page = _get(port, "/")[2].decode("utf-8")
+        token = srv.safe.token
+        assert f'content="{token}"' in page and "__ENTAIL_TOKEN__" not in page
+        # refused: another site's page, no Origin, a wrong token, another address, a mode that is not one
+        assert _post(port, {"mode": "all"}, token, origin="http://evil.example")[0] == 403
+        assert _post(port, {"mode": "all"}, token, origin=None)[0] == 403
+        assert _post(port, {"mode": "all"}, "not-the-token")[0] == 403
+        assert _post(port, {"mode": "all"}, token, host="evil.example:80")[0] == 403
+        assert _post(port, {"mode": "everything"}, token)[0] == 400
+        assert _post(port, b"x" * 5000, token)[0] == 413
+        assert _post(port, {"mode": "all"}, token, path="/api/runs")[0] == 404
+        assert not os.path.exists(os.path.join(folder, "safe_mode.json"))
+        # the write: the file the next start reads, and a new token (the old one works once)
+        st, body = _post(port, {"mode": "all"}, token)
+        d = json.loads(body)
+        assert st == 200 and d["mode"] == "all" and d["set"] is True and d["token"] != token, d
+        with open(os.path.join(folder, "safe_mode.json"), encoding="utf-8") as f:
+            assert json.load(f)["mode"] == "all"
+        from entail import safe_mode
+        old = {k: os.environ.get(k) for k in ("ENTAIL_LOG_DIR", "ENTAIL_SAFE")}
+        os.environ["ENTAIL_LOG_DIR"] = folder
+        os.environ.pop("ENTAIL_SAFE", None)
+        try:
+            assert safe_mode.mode() == "all"
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        assert _post(port, {"mode": "off"}, token)[0] == 403              # used once
+        st, body = _post(port, {"mode": "off"}, d["token"], origin=f"http://localhost:{port}")
+        assert st == 200 and json.loads(body)["mode"] == "off"
+        # the selective safe path's state, as the engine left it
+        with open(os.path.join(folder, "safe_paths.json"), "w", encoding="utf-8") as f:
+            json.dump({"k1": {"engine": "vllm", "model": "/m/nemotron", "status": "searching",
+                              "candidates": ["speculative_decoding", "cuda_graphs"], "tried": [], "off": [],
+                              "pairs": ["decode_prefill"], "updated": 5.0}}, f)
+        s = json.loads(_get(port, "/api/safe-mode")[2])
+        assert s["paths"][0]["key"] == "k1" and s["paths"][0]["status"] == "searching", s
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)    # no preflight is answered
+        c.request("OPTIONS", "/api/safe-mode", headers={"Host": f"127.0.0.1:{port}", "Origin": "http://evil.example"})
+        r = c.getresponse()
+        assert r.status >= 400 and r.getheader("Access-Control-Allow-Origin") is None
+        c.close()
+    finally:
+        srv.stopping = True
+        srv.shutdown()
+        srv.server_close()
+
+
 def test_a_line_still_being_written_waits_for_its_newline():
     folder, path = _folder()
     store = server.Store(folder)

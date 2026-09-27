@@ -8,6 +8,18 @@ const STATES = {
   refused: ["멈춤", "refused: stopped before output"], none: ["판정 없음", "nothing decided here"],
 };
 let current = { run: null, node: null, graph: null, source: null };
+// The safety mode of the next start (LIBRARY_DESIGN.md 13.6): the page's one write, which needs this server's token
+// (in the page; a new one comes back with each write).
+const SAFE = {
+  auto: ["자동: 선택적 안전 경로", "엔진의 경로 점검이 어긋나면, 다음 시작부터 그 어긋남에 걸린 최적화를 하나씩 꺼서 원인을 찾는다. 지금 도는 실행은 그대로 간다."],
+  all: ["명시적 안전모드", "결과를 바꾸지 않는다고 선언된 최적화(CUDA 그래프, 프리픽스 캐시, 추측 디코딩, 커스텀 커널)를 다음 시작부터 모두 끈다. 문제가 남으면 원인은 그 밖에 있고, 사라지면 그 안에 있다."],
+  off: ["끔", "안전모드를 쓰지 않는다. 어긋남은 그대로 기록만 된다."],
+};
+const FEATURES = {
+  cuda_graphs: "CUDA 그래프", prefix_cache: "프리픽스 캐시", speculative_decoding: "추측 디코딩",
+  custom_kernels: "커스텀 커널", attention_kernels: "어텐션 커널",
+};
+let safe = { token: (document.querySelector('meta[name="entail-token"]') || {}).content || "", mode: null, file: "" };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -191,6 +203,71 @@ async function selectNode(id, quiet) {
   for (const s of d.said) body.append(kv("말한 것 (" + s.where + ")", s.text));
 }
 
+function features(list) {
+  return (list || []).map(f => FEATURES[f] || f).join(", ");
+}
+
+function pathLine(p) {
+  const cands = p.candidates || [], tried = p.tried || [];
+  if (p.status === "searching") {
+    const left = cands.filter(f => !tried.includes(f));
+    return "원인 찾는 중 (" + (tried.length + 1) + "/" + cands.length + "), 꺼 두는 기능: " + features(left.slice(0, 1));
+  }
+  if (p.status === "found") return "원인: " + features(p.off) + " (이 설정은 그것을 끄고 시작한다)";
+  if (p.status === "outside") {
+    return cands.length ? "후보 밖: " + features(cands) + "을(를) 하나씩 꺼도 경로가 어긋났다 (다시 켰다)"
+                        : "어긋난 짝에 걸린 최적화가 켜져 있지 않았다";
+  }
+  return String(p.status);
+}
+
+function renderSafe(s) {
+  const sel = document.getElementById("safemode");
+  if (s.mode !== safe.mode) sel.value = s.mode;      // only when the file changed: never under a choice being made
+  safe.mode = s.mode;
+  safe.file = s.file;
+  document.getElementById("safenote").textContent = SAFE[s.mode][1] +
+    (s.set ? "" : " (설정 파일이 없어 기본값이다.)") + " 엔진에 환경 변수 ENTAIL_SAFE가 있으면 그것이 먼저다.";
+  const list = document.getElementById("safepaths");
+  list.replaceChildren();
+  for (const p of s.paths) {
+    const li = el("li");
+    li.append(el("div", "who", (p.engine || "?") + " · " + String(p.model || "?").split("/").pop()),
+              el("div", "s-" + p.status, pathLine(p)));
+    li.title = "설정 열쇠 " + p.key + (p.pairs && p.pairs.length ? "\n어긋난 짝: " + p.pairs.join(", ") : "");
+    list.append(li);
+  }
+}
+
+async function loadSafe() {
+  try { renderSafe(await getJSON("/api/safe-mode")); } catch (e) { /* the next poll tries again */ }
+}
+
+async function changeSafe() {
+  const sel = document.getElementById("safemode");
+  const mode = sel.value;
+  if (mode === safe.mode) return;
+  const ok = window.confirm("안전모드를 '" + SAFE[mode][0] + "'(으)로 바꾼다.\n\n" + SAFE[mode][1] +
+    "\n\n다음에 시작하는 엔진부터 쓰인다. 지금 도는 엔진은 바뀌지 않는다. 엔진에 환경 변수 ENTAIL_SAFE가 있으면 그것이 먼저다." +
+    "\n\n바꾸는 파일: " + safe.file);
+  if (!ok) { sel.value = safe.mode; return; }
+  let r, d = {};
+  try {
+    r = await fetch("/api/safe-mode", {
+      method: "POST", cache: "no-store", body: JSON.stringify({ mode }),
+      headers: { "Content-Type": "application/json", "X-Entail-Token": safe.token },
+    });
+    d = await r.json();
+  } catch (e) { r = r || { ok: false, status: "?" }; }
+  if (!r.ok) {
+    sel.value = safe.mode;
+    document.getElementById("safenote").textContent = "바꾸지 못했다: " + (d.error || r.status);
+    return;
+  }
+  safe.token = d.token;
+  renderSafe(d);
+}
+
 function legend() {
   const box = document.getElementById("legend");
   for (const [state, [ko, en]] of Object.entries(STATES)) {
@@ -201,5 +278,7 @@ function legend() {
 }
 
 legend();
+document.getElementById("safemode").onchange = changeSafe;
 loadRuns();
-setInterval(loadRuns, 3000);
+loadSafe();
+setInterval(() => { loadRuns(); loadSafe(); }, 3000);

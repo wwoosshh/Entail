@@ -18,6 +18,14 @@ main { display: grid; grid-template-columns: 250px minmax(0, 1fr) 400px; gap: 12
 aside, #center { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
                  overflow: auto; }
 h2 { font-size: 14px; margin: 2px 0 10px; }
+h2.gap { margin-top: 18px; padding-top: 10px; border-top: 1px solid var(--line); }
+#safemode { width: 100%; font: inherit; padding: 4px; }
+.small { font-size: 12px; margin-top: 6px; }
+#safepaths { list-style: none; margin: 8px 0 0; padding: 0; font-size: 12px; }
+#safepaths li { padding: 6px 0; border-top: 1px solid var(--line); }
+#safepaths .who { color: var(--muted); }
+#safepaths .s-searching { color: var(--unknown); } #safepaths .s-found { color: var(--resolved); }
+#safepaths .s-outside { color: var(--broken); }
 #runlist { list-style: none; margin: 0; padding: 0; }
 #runlist li { padding: 7px 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
 #runlist li:hover { background: #f1f1ee; }

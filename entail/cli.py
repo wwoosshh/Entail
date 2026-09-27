@@ -12,7 +12,8 @@
                                          check one capability-table row with data (runs the engine on the GPU)
   entail serve [--dir DIR] [--port N] [--open]
                                          the platform: the project's runs as live nodes, where and why meaning
-                                         broke, from the record files (a local web server, read-only)
+                                         broke, from the record files (a local web server; its one write is
+                                         the safety mode of the next start)
   entail locate [RECORD ...] [--wrong] [--pid N] [--json]
                                          where meaning broke, from the record files (default: the newest one in
                                          entail_logs/); --wrong says the output was wrong (M7.1)

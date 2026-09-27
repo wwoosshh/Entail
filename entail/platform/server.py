@@ -7,12 +7,19 @@ It reads the record files of one log folder (entail_logs/ in the current folder 
   /api/node?run=R&node=N    one node's decisions (declared, chosen, rule, resolution, note), counts and timing
   /api/locate?run=R         where meaning broke (record.locate, LIBRARY_DESIGN.md 12)
   /api/events?run=R         server-sent events: the launch's graph again whenever lines are added
-It is read-only and bound to 127.0.0.1: it never writes, and it never runs inside an engine, so it adds nothing to an
-engine's cost. A request whose Host is not this server's own address is refused (a page on another site could
-otherwise reach it through a name that resolves to 127.0.0.1). The Python standard library only.
+  /api/safe-mode            the safety mode the next start uses (safe_mode.json) and the selective safe path's state
+  POST /api/safe-mode       the one write: {"mode": "off" | "auto" | "all"} into <folder>/safe_mode.json
+It is bound to 127.0.0.1 and never runs inside an engine, so it adds nothing to an engine's cost. It writes one file,
+the safety mode of the next start, and touches no running engine (LIBRARY_DESIGN.md 13.2). A request whose Host is not
+this server's own address is refused (a page on another site could otherwise reach it through a name that resolves to
+127.0.0.1). The write also needs this server's current token - printed when it starts, put in its own page, and a new
+one after each write - and an Origin that is this server, so that a page on another site cannot change it. The Python
+standard library only.
 """
+import hmac
 import json
 import os
+import secrets
 import threading
 import time
 from http import HTTPStatus
@@ -21,12 +28,15 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from . import graph
+from ..safe_mode import MODES, STORE
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 FILES = {"/": ("index.html", "text/html; charset=utf-8"), "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
          "/static/style.css": ("style.css", "text/css; charset=utf-8")}
 POLL_S = 0.5        # how often the event stream looks for new lines
 KEEPALIVE_S = 15.0  # a comment line so proxies and the browser keep the stream open
+MAX_BODY = 4096     # the one write's body is a few bytes
+TOKEN_SLOT = b"__ENTAIL_TOKEN__"   # where the page gets this server's token
 
 
 class Store:
@@ -92,10 +102,60 @@ class Store:
         return groups[newest]
 
 
+class SafeWrite:
+    """The platform's one write (LIBRARY_DESIGN.md 13.2, 13.6): the safety mode of the next start, in
+    <folder>/safe_mode.json, where safe_mode.mode() reads it when ENTAIL_SAFE is not set. A write needs the current
+    token; each write replaces it, so a token works once."""
+
+    def __init__(self, folder: str):
+        self.folder = folder
+        self.path = os.path.join(folder, "safe_mode.json")
+        self.lock = threading.Lock()
+        self.token = secrets.token_urlsafe(24)
+
+    def mode(self) -> str:
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                m = json.load(f).get("mode")
+            return m if m in MODES else "auto"
+        except (OSError, ValueError, AttributeError):
+            return "auto"
+
+    def state(self) -> dict:
+        """The mode the file says, and the selective safe path's configurations (safe_paths.json), newest first."""
+        paths = []
+        try:
+            with open(os.path.join(self.folder, STORE), encoding="utf-8") as f:
+                store = json.load(f)
+            for key, e in (store.items() if isinstance(store, dict) else ()):
+                if isinstance(e, dict):
+                    paths.append({"key": key, **{k: e.get(k) for k in ("engine", "model", "status", "pairs",
+                                                                       "candidates", "tried", "off", "updated")}})
+        except (OSError, ValueError):
+            pass
+        paths.sort(key=lambda e: -(e.get("updated") or 0))
+        return {"mode": self.mode(), "file": self.path, "set": os.path.exists(self.path), "paths": paths}
+
+    def write(self, token: str, mode: str) -> Optional[str]:
+        """Writes the mode when `token` is the current one; returns the next token, or None (not the token)."""
+        with self.lock:
+            if not hmac.compare_digest(token.encode("utf-8"), self.token.encode("utf-8")):
+                return None
+            os.makedirs(self.folder, exist_ok=True)
+            tmp = f"{self.path}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"mode": mode, "by": "entail serve", "t": round(time.time(), 3)}, f)
+            os.replace(tmp, self.path)
+            self.token = secrets.token_urlsafe(24)
+            return self.token
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "entail"
     store: Store = None          # set by make_server
+    safe: SafeWrite = None
     allowed_hosts: Tuple[str, ...] = ()
+    allowed_origins: Tuple[str, ...] = ()
 
     def log_message(self, fmt, *args):   # the console is the user's; requests are not worth a line each
         pass
@@ -124,11 +184,16 @@ class Handler(BaseHTTPRequestHandler):
             name, ctype = FILES[url.path]
             try:
                 with open(os.path.join(STATIC, name), "rb") as f:
-                    return self._send(HTTPStatus.OK, f.read(), ctype)
+                    body = f.read()
             except OSError:
                 return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+            if name == "index.html":     # the page carries the token for the one write (another site cannot read it)
+                body = body.replace(TOKEN_SLOT, self.safe.token.encode("ascii"))
+            return self._send(HTTPStatus.OK, body, ctype)
         if not url.path.startswith("/api/"):
             return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+        if url.path == "/api/safe-mode":
+            return self._json(self.safe.state())
         self.store.refresh()
         if url.path == "/api/runs":
             return self._json({"folder": self.store.folder, "runs": graph.summaries(self.store.groups())})
@@ -144,6 +209,37 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/events":
             return self._events(q.get("run"))
         return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+
+    def do_POST(self):   # noqa: N802 - the http.server interface
+        """The one write: POST /api/safe-mode {"mode": ...} with header X-Entail-Token."""
+        if not self._host_ok():
+            return self._send(HTTPStatus.FORBIDDEN, b"forbidden: not this server's address", "text/plain")
+        if urlparse(self.path).path != "/api/safe-mode":
+            return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+        if (self.headers.get("Origin") or "") not in self.allowed_origins:
+            return self._json({"error": "the request must come from this server's page (Origin)"},
+                              HTTPStatus.FORBIDDEN)
+        try:
+            size = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            size = -1
+        if size < 0 or size > MAX_BODY:
+            return self._json({"error": f"the body must be at most {MAX_BODY} bytes"},
+                              HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        try:
+            mode = json.loads(self.rfile.read(size).decode("utf-8")).get("mode")
+        except (ValueError, UnicodeDecodeError, AttributeError):
+            mode = None
+        if mode not in MODES:
+            return self._json({"error": f"mode must be one of {', '.join(MODES)}"}, HTTPStatus.BAD_REQUEST)
+        try:
+            token = self.safe.write(self.headers.get("X-Entail-Token") or "", mode)
+        except OSError as e:
+            return self._json({"error": f"could not write {self.safe.path}: {e}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        if token is None:
+            return self._json({"error": "not this server's current token: it changes after each write (reload the "
+                                        "page, or use the one the last write returned)"}, HTTPStatus.FORBIDDEN)
+        return self._json({**self.safe.state(), "token": token})
 
     def _events(self, run: Optional[str]):
         """Server-sent events: the launch's graph now, then again whenever lines are added; a comment line keeps
@@ -176,11 +272,13 @@ class Handler(BaseHTTPRequestHandler):
 def make_server(folder: str, port: int = 8765) -> ThreadingHTTPServer:
     """A server over `folder`, bound to 127.0.0.1 (port 0: any free port). Not started: call serve_forever()."""
     store = Store(folder)
-    handler = type("EntailHandler", (Handler,), {"store": store})
+    handler = type("EntailHandler", (Handler,), {"store": store, "safe": SafeWrite(folder)})
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     server.daemon_threads = True
     real = server.server_address[1]
     handler.allowed_hosts = (f"127.0.0.1:{real}", f"localhost:{real}")
+    handler.allowed_origins = (f"http://127.0.0.1:{real}", f"http://localhost:{real}")
+    server.safe = handler.safe
     store.refresh()
     return server
 
@@ -193,7 +291,10 @@ def serve(folder: str, port: int = 8765, open_browser: bool = False) -> int:
         print(f"[entail] could not listen on 127.0.0.1:{port}: {e}; choose another with --port")
         return 2
     url = f"http://127.0.0.1:{server.server_address[1]}/"
-    print(f"[entail] serving {folder} at {url} (Ctrl-C stops; read-only, this machine only)", flush=True)
+    print(f"[entail] serving {folder} at {url} (Ctrl-C stops; this machine only)", flush=True)
+    print(f"[entail] it reads the records and writes one file, the safety mode of the next start "
+          f"({server.safe.path}); a write needs this token, which works once (its page has its own): "
+          f"{server.safe.token}", flush=True)
     if open_browser:
         import webbrowser
 
