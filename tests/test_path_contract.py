@@ -78,6 +78,34 @@ def test_decode_is_held_to_a_fresh_prefill_of_its_own_tokens():
     assert v["differs"] and "changed a confident prediction" in v["why"][0], v
 
 
+def test_log_probabilities_that_are_not_finite_do_not_agree():
+    """DEFERRED 40: on vLLM 0.16 with NVFP4 and float16 (vllm#33560) every log-probability was NaN on both paths, and
+    NaN compared as no move, so all three pairs passed with margin 0 and move 0."""
+    nan = float("nan")
+
+    def poisoned(tokens):
+        r = run(tokens)
+        r["logprobs"] = [{k: nan for k in s} for s in r["logprobs"]]
+        return r
+
+    both = pc.verdict(pc.pair({"p": poisoned([5, 6, 7])}, {"p": poisoned([5, 6, 7])}))
+    assert both["differs"] and "not finite numbers (6 on the first path, 6 on the second)" in both["why"][-1], both
+    one = pc.verdict(pc.pair({"p": run([5, 6, 7])}, {"p": poisoned([5, 6, 7])}))
+    assert one["differs"] and "(0 on the first path, 6 on the second)" in one["why"][-1], one
+    gen = {"p": run([5, 6, 7])}
+    forced = {"p": {"steps": [dict(s) for s in gen["p"]["logprobs"]]}}
+    forced["p"]["steps"][1] = {"6": nan}
+    v = pc.verdict(pc.decode_vs_prefill(gen, forced))
+    assert v["differs"] and "not finite" in v["why"][-1], v
+    inf = pc.verdict(pc.pair({"p": run([5, 6, 7])}, {"p": dict(run([5, 6, 7]), logprobs=[{"5": float("inf")}] * 3)}))
+    assert inf["differs"], inf
+    assert not pc.verdict(pc.pair({"p": run([5, 6, 7])}, {"p": run([5, 6, 7])}))["differs"]
+    B = "start:test.paths.nan"
+    pc.reset(B)
+    _, ds = decided(lambda: pc.check(B, "test.engine", "decode_prefill", both, "test"))
+    assert ds[0].verdict is Verdict.BROKEN and "not finite" in ds[0].note, ds
+
+
 def test_check_records_pass_and_broken():
     B = "start:test.paths"
     pc.reset(B)

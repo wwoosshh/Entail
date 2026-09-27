@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+- The start-up path check counts a log-probability that is not a finite number as a disagreement (`paths_disagree`,
+  "log-probabilities are not finite numbers (n on the first path, m on the second)"). NaN compared as no move, so a
+  model whose every log-probability was NaN passed all three pairs (vllm#33560: vLLM 0.16, NVFP4 with float16
+  activations; the fourth pre-registered replay).
+- vLLM's KV extent check no longer holds a cross-attention cache group to the decoder's tokens: such a group
+  (`CrossAttentionManager` over a `CrossAttentionSpec`, vLLM 0.14 and 0.30) holds the encoder's states, sized by the
+  encoder input, and is counted as skipped. whisper-large-v3-turbo was said broken nine times ("kv cache group 1
+  holds 0 KV slots for 216 tokens") while its transcription was right. The decoder's own group is decided as before.
+
 ## 1.3.0
 
 Released 2026-09-27. Reference comparisons where a declaration lives only in code (a tokenizer run against the

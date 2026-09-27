@@ -11,7 +11,9 @@ batch size - changes confident predictions and moves probabilities a lot. The ru
   paths_disagree   along one of the path pairs, on some probe, a prediction the first path was confident of (top-1
                    ahead of top-2 by more than MARGIN in log-probability) changed, or the probability of a token both
                    paths kept moved by more than PDRIFT - compared only up to the first step where the two paths
-                   chose different tokens (after it their contexts differ).
+                   chose different tokens (after it their contexts differ) - or a log-probability on either path is
+                   not a finite number (NaN never equals anything, so two NaN paths do not agree; before this a
+                   model whose every log-probability was NaN passed all three pairs, vllm#33560 on vLLM 0.16).
 
 MARGIN and PDRIFT are the L2 study's (lowlevel/l2/RESULTS.md): set above the largest values healthy engines showed
 (a confident-flip margin of 0.62 and a probability move of 0.176 over vLLM 0.30 with eight models and transformers
@@ -68,9 +70,15 @@ def _dp(la: float, lb: float) -> float:
     return abs(math.exp(la) - math.exp(lb))
 
 
+def _nonfinite(steps) -> int:
+    """How many log-probabilities in a list of {id: logprob} steps are NaN or infinite (empty steps are skipped)."""
+    return sum(1 for d in steps or () if d for v in d.values() if not math.isfinite(v))
+
+
 def generated(a: dict, b: dict) -> dict:
     """Two greedy generations of the same request: the first step where the chosen token differs, how confident the
-    first was there, and the largest move of a kept token's probability before it."""
+    first was there, the largest move of a kept token's probability before it, and how many log-probabilities on
+    each path are not finite."""
     ta, tb = a["tokens"], b["tokens"]
     n = min(len(ta), len(tb))
     first = next((i for i in range(n) if ta[i] != tb[i]), None)
@@ -87,7 +95,8 @@ def generated(a: dict, b: dict) -> dict:
     margin = None
     if first is not None and first < len(a["logprobs"]) and a["logprobs"][first]:
         _, margin = _top2(a["logprobs"][first])
-    return {"first_diff": first, "base_margin_at_diff": margin, "drift": drift, "pdrift": pdrift, "steps": n}
+    return {"first_diff": first, "base_margin_at_diff": margin, "drift": drift, "pdrift": pdrift, "steps": n,
+            "nonfinite": [_nonfinite(a["logprobs"]), _nonfinite(b["logprobs"])]}
 
 
 def prompt(a: dict, b: dict) -> Optional[dict]:
@@ -113,7 +122,8 @@ def prompt(a: dict, b: dict) -> Optional[dict]:
         if ta != tb:
             flips.append({"pos": i, "base_margin": ma})
     return {"flips": flips, "max_flip_margin": max((f["base_margin"] for f in flips), default=0.0),
-            "drift": drift, "pdrift": pdrift, "positions": min(len(pa), len(pb)) - 1}
+            "drift": drift, "pdrift": pdrift, "positions": min(len(pa), len(pb)) - 1,
+            "nonfinite": [_nonfinite(pa[1:]), _nonfinite(pb[1:])]}
 
 
 def decode_vs_prefill(run: Dict[str, dict], forced: Dict[str, dict]) -> Dict[str, dict]:
@@ -129,7 +139,7 @@ def decode_vs_prefill(run: Dict[str, dict], forced: Dict[str, dict]) -> Dict[str
         pa = {"prompt_tokens": toks, "prompt_logprobs": [None] + list(a["logprobs"][:n])}
         pb = {"prompt_tokens": toks, "prompt_logprobs": [None] + list(f["steps"][:n])}
         out[pid] = {"generated": {"first_diff": None, "base_margin_at_diff": None, "drift": 0.0, "pdrift": 0.0,
-                                  "steps": len(a["tokens"])},
+                                  "steps": len(a["tokens"]), "nonfinite": [0, 0]},
                     "prompt": prompt(pb, pa)}
     return out
 
@@ -163,6 +173,10 @@ def verdict(cmp: Dict[str, dict], margin: float = None, pdrift: float = None) ->
                            f"confident prediction (margin up to {p['max_flip_margin']:.2f})")
         if p is not None and p["pdrift"] > pdrift:
             reasons.append(f"a token's probability moved by {p['pdrift']:.3f}")
+        bad = [x + y for x, y in zip(g.get("nonfinite") or (0, 0), (p or {}).get("nonfinite") or (0, 0))]
+        if any(bad):
+            reasons.append(f"log-probabilities are not finite numbers ({bad[0]} on the first path, {bad[1]} on the "
+                           f"second)")
         if reasons and found is None:
             found = {"probe": pid, "why": reasons}
     return {"differs": found is not None, "probe": found and found["probe"], "why": found and found["why"],

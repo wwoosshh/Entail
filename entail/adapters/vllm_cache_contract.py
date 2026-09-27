@@ -10,7 +10,10 @@
                Until M5.3 the prefix-cache and connector tokens were left out: a request whose prompt was a cache hit
                was refused as holding more than it needs (a repeated prompt on a server; the M5.1 runs had none).
   handles      none: a request whose blocks do not cover its tokens cannot be repaired here.
-kv_contract decides (kv_needed, with the block size as the allocation unit); windowed groups are counted as skipped.
+kv_contract decides (kv_needed, with the block size as the allocation unit); windowed groups and cross-attention
+groups are counted as skipped. A cross-attention group (an encoder-decoder model) holds the encoder's states, sized by
+the encoder input, not by the request's decoder tokens: until DEFERRED 41 whisper-large-v3-turbo was said broken
+nine times ("kv cache group 1 holds 0 KV slots for 216 tokens") while its transcription was right.
 """
 from .. import core, kv_contract
 from .base import Hook
@@ -36,8 +39,15 @@ def _windowed(single):
     return False
 
 
+def _encoder_sized(single):
+    """A cross-attention group: vLLM's CrossAttentionManager over a CrossAttentionSpec (0.14 and 0.30 alike)."""
+    return any(type(obj).__name__ in ("CrossAttentionManager", "CrossAttentionSpec")
+               for obj in (single, getattr(single, "kv_cache_spec", None)) if obj is not None)
+
+
 def read_choice(manager, request, num_new_tokens, kw):
-    """(tokens the request needs, [(group, slots held or None, block size or None, windowed)])."""
+    """(tokens the request needs, [(group, slots held or None, block size or None, not decided)]); a group is not
+    decided when it is windowed or holds the encoder's states (cross-attention)."""
     need = int(getattr(request, "num_computed_tokens", 0)) + int(num_new_tokens) \
         + sum(int(kw.get(k) or 0) for k in ("num_new_computed_tokens", "num_external_computed_tokens",
                                              "num_lookahead_tokens"))
@@ -47,7 +57,7 @@ def read_choice(manager, request, num_new_tokens, kw):
         single = singles[g] if g < len(singles) else None
         size = getattr(single, "block_size", None) or getattr(manager, "scheduler_block_size", None)
         groups.append((g, len(ids) * int(size) if size else None, int(size) if size else None,
-                       single is not None and _windowed(single)))
+                       single is not None and (_windowed(single) or _encoder_sized(single))))
     return need, groups
 
 
@@ -57,8 +67,8 @@ def handles():
 
 def _decide(manager, request, num_new_tokens, kw):
     need, groups = read_choice(manager, request, num_new_tokens, kw)
-    for g, held, size, windowed in groups:
-        if windowed or held is None:
+    for g, held, size, not_decided in groups:
+        if not_decided or held is None:
             kv_contract.skipped(BOUNDARY)
             continue
         kv_contract.check(BOUNDARY, CONSUMER, f"vllm kv cache group {g}, request {request.request_id}",

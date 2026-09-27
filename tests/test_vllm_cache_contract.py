@@ -75,6 +75,32 @@ def test_the_old_reading_is_over_holding_which_is_no_loss():
     assert kv_contract.stats(vc.BOUNDARY)["refused"] == 0 and kv_contract.stats(vc.BOUNDARY)["broken"] == 0
 
 
+def test_a_cross_attention_group_is_not_held_to_the_decoder_tokens():
+    """DEFERRED 41: an encoder-decoder model's cross-attention group holds the encoder's states, sized by the encoder
+    input; whisper-large-v3-turbo on vLLM 0.14 and 0.30 was said broken nine times (group 1: 0 slots for 216 tokens)
+    while its transcription was right. The group is counted as skipped; the decoder's own group is still decided."""
+    setup()
+    CrossAttentionManager = type("CrossAttentionManager", (), {})
+    cross = CrossAttentionManager()
+    cross.block_size, cross.kv_cache_spec = BLOCK, SimpleNamespace()
+    full = SimpleNamespace(block_size=BLOCK, kv_cache_spec=SimpleNamespace())
+    m = SimpleNamespace(coordinator=SimpleNamespace(single_type_managers=[full, cross]),
+                        get_block_ids=lambda request_id: [list(range(14)), []])
+    with redirect_stdout(io.StringIO()):
+        vc._decide(m, SimpleNamespace(request_id="w", num_computed_tokens=0), 216, {})
+    s = kv_contract.stats(vc.BOUNDARY)
+    assert s["refused"] == 0 and s["broken"] == 0 and s["skipped"] == 1, s
+    short = SimpleNamespace(coordinator=SimpleNamespace(single_type_managers=[full, cross]),
+                            get_block_ids=lambda request_id: [list(range(13)), []])
+    try:
+        with redirect_stdout(io.StringIO()):
+            vc._decide(short, SimpleNamespace(request_id="w2", num_computed_tokens=0), 216, {})
+    except core.RoleError as e:
+        assert "group 0" in str(e) and "holds 208 KV slots for 216 tokens" in str(e), e
+    else:
+        raise AssertionError("the decoder's own group that is short must still be refused")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
