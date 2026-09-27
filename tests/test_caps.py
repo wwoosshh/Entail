@@ -83,7 +83,7 @@ def test_every_refusal_and_its_wording():
     raises(lambda: caps.from_rows([row()], {"e.attention": ["b"]}), "prefer lists e.attention.b, which has no row")
     d = tempfile.mkdtemp()
     for data, text in (({"schema": 2, "vocab_version": 1, "rows": []}, "schema 2, this library reads 1"),
-                       ({"schema": 1, "vocab_version": 11, "rows": []}, "written for vocabulary v11")):
+                       ({"schema": 1, "vocab_version": 12, "rows": []}, "written for vocabulary v12")):
         p = os.path.join(d, "t.json")
         with open(p, "w", encoding="utf-8") as f:
             json.dump(data, f)

@@ -10,8 +10,8 @@ from entail.contracts import RULES, Contract, Resolution, Verdict, agrees, decid
 from entail.coverage import Coverage  # noqa: E402
 from entail.facts import (VOCABULARY, Assumed, Certainty, Epoch, Fact, Identity, KernelConfig, KernelReference,  # noqa: E402
                           LatentScale, Layout, ModelProps, Origin, Positions, Prediction, Quantized, Reduction,
-                          Parse, PathAgreement, Placeholder, Rotary, Source, Stops, Template, Tokenization, TokenType,
-                          Valid, Vocab)
+                          Parse, PathAgreement, Placeholder, Rotary, SafeMode, Source, Stops, Template, Tokenization,
+                          TokenType, Valid, Vocab)
 from entail.kv_contract import KvExtent  # noqa: E402
 
 # (declared, a different value the consumer might use) for every vocabulary name
@@ -43,6 +43,7 @@ SAMPLES = {
                     Placeholder(modality="image", offset=20, length=256, preceded_by=25)),
     "PathAgreement": (PathAgreement(paths="decode_prefill", probes=3, flip_margin=0.0, pdrift=0.0),
                       PathAgreement(paths="decode_prefill", probes=3, flip_margin=3.4, pdrift=0.3)),
+    "SafeMode": (SafeMode("cuda_graphs", False, "all"), SafeMode("cuda_graphs", True)),
     "Assumed": (Assumed((("batch", 4),)), Assumed((("batch", 0),))),
     "Origin": (Origin("temperature", "user"), Origin("temperature", "default")),
 }
