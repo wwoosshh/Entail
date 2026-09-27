@@ -1,7 +1,7 @@
-"""Tests for adapters/comfyui_repair.py, the engine-specific repair of ComfyUI's own defect (Comfy-Org/ComfyUI#16490;
-M6.2 moved it here from ownership.py): state stays with the object that set it. The loader below is the buffer
+"""Tests for entail_dlc_comfyui.repair, the repair of ComfyUI's own defect (Comfy-Org/ComfyUI#16490; in the core as
+adapters/comfyui_repair.py until entail 1.3, now the official DLC): state stays with the object that set it. The loader below is the buffer
 handling of ComfyUI v0.34.1's ModelPatcherDynamic (load + restore_loaded_backups), nothing else.
-Run: python tests/test_comfyui_repair.py"""
+Run from dlc/comfyui with entail importable: python tests/test_repair.py"""
 import io
 import os
 import sys
@@ -9,7 +9,7 @@ from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-from entail.adapters import comfyui_repair as ownership  # noqa: E402
+from entail_dlc_comfyui import repair as ownership  # noqa: E402
 
 
 def _schedule_class():
@@ -89,7 +89,7 @@ def test_guard_keeps_each_schedule_with_its_object():
         model_max, node_max = _node_then_plain(guarded=True)
     assert abs(model_max - 14.6) < 1e-4 and abs(node_max - 4518.8) < 1e-2
     assert "handed it back to its own object" in printed.getvalue()
-    assert "engine-specific repair, Comfy-Org/ComfyUI#16490" in printed.getvalue()
+    assert "dlc:comfyui.schedule" in printed.getvalue()   # said where the platform's DLC node takes it
 
 
 def test_guard_says_nothing_when_the_values_are_the_same():

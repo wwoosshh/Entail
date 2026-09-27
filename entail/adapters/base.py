@@ -10,8 +10,8 @@ that fails when an adapter file contains rules. If an engine version moves a hoo
 "hook not found" instead of turning itself off quietly.
 
 The LLM adapters are on this interface (M3.3, M4.2, M5.1; tests/test_adapter_rules.py checks it), and so are the
-image adapters (comfyui, diffusers_adapter) since M6.2. A repair of one engine's own defect is not an adapter: it
-says so at the top of its file (comfyui_repair.py, ENGINE-SPECIFIC).
+image adapters (comfyui, diffusers_adapter) since M6.2. A repair of one engine's own defect is not an adapter and is
+not in the core: it is an official DLC (product track P4; the ComfyUI #16490 repair is entail-dlc-comfyui).
 """
 from typing import Any, Callable, Dict, List, NamedTuple, Protocol
 

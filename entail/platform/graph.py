@@ -31,16 +31,35 @@ _NODE_OF: Dict[str, str] = {}
 
 
 def model() -> dict:
-    """The node model from data/nodes.json, its patterns compiled: {"flows": {...}, "nodes": [...], "by_id": {...}}."""
+    """The node model from data/nodes.json, its patterns compiled: {"flows": {...}, "nodes": [...], "by_id": {...}}.
+    The attached official DLCs' nodes (entail/dlc.py) go in before the catch-all, so their boundaries find them."""
     global _MODEL
     if _MODEL is None:
         with open(DATA, encoding="utf-8") as f:
             raw = json.load(f)
+        core_nodes = [n for n in raw["nodes"] if n["patterns"] != [""]]
+        catch_all = [n for n in raw["nodes"] if n["patterns"] == [""]]
+        try:
+            from .. import dlc
+
+            extra = dlc.nodes(core_ids={n["id"] for n in raw["nodes"]})
+        except Exception:  # noqa: BLE001 - a DLC that cannot be read never hides the core's nodes
+            extra = []
         nodes = []
-        for n in raw["nodes"]:
-            nodes.append(dict(n, compiled=[re.compile(p) for p in n["patterns"]]))
+        for n in core_nodes + extra + catch_all:
+            try:
+                nodes.append(dict(n, compiled=[re.compile(p) for p in n["patterns"]]))
+            except re.error:
+                continue            # a DLC node whose pattern does not compile is left out
         _MODEL = {"flows": raw["flows"], "nodes": nodes, "by_id": {n["id"]: n for n in nodes}}
     return _MODEL
+
+
+def reset_model() -> None:
+    """Read the node model again on the next call (tests; a DLC installed while the platform runs)."""
+    global _MODEL
+    _MODEL = None
+    _NODE_OF.clear()
 
 
 def node_of(boundary: str) -> str:

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "entail-dlc-comfyui"
+version = "0.1.0"
+description = "entail's official DLC for ComfyUI: the repair of ComfyUI's own sampling-schedule defect (Comfy-Org/ComfyUI#16490)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "wwoosshh" }]
+# entail-ai is the core this attaches to; ComfyUI is not a pip package, so it is not listed.
+dependencies = ["entail-ai>=1.3"]
+
+[project.urls]
+Homepage = "https://github.com/wwoosshh/entail"
+
+# entail finds its DLCs here (entail/dlc.py)
+[project.entry-points."entail.dlc"]
+comfyui = "entail_dlc_comfyui"
+
+[tool.setuptools]
+packages = ["entail_dlc_comfyui"]

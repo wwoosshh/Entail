@@ -18,7 +18,7 @@ make it use something else; the rules are the core's (load.prediction, load.late
                ModelSamplingDiscrete node makes. Only on ComfyUI's discrete schedule, for eps and v, and not once the
                sigmas were computed (sample_custom, or sigmas given). Nothing sets the latent scale here.
 Measured on ComfyUI 0.34.1 (issue_track/comfyui_field_test/): the file-declared v model (M7), a LoRA made for another
-base model. ComfyUI's own defect (Comfy-Org/ComfyUI#16490) is repaired in comfyui_repair.py, marked as the engine's.
+base model. ComfyUI's own defect (Comfy-Org/ComfyUI#16490) is repaired by the official DLC entail-dlc-comfyui.
 """
 import contextvars
 import functools

@@ -1,12 +1,13 @@
-"""ENGINE-SPECIFIC: a repair of ComfyUI's own defect, not a contract of entail (LIBRARY_DESIGN.md 10; ROADMAP M6.2).
+"""The repair of ComfyUI's own defect Comfy-Org/ComfyUI#16490 - the official DLC's content (entail product track P4;
+LIBRARY_DESIGN.md 13.7). Until entail 1.3 it lived in the core as entail/adapters/comfyui_repair.py, marked
+ENGINE-SPECIFIC; engine-specific repairs now live outside the core, and entail installs these entries through the
+entry point group `entail.dlc` (entail/dlc.py) when the ComfyUI modules are imported.
 
 ComfyUI 0.34.1's dynamic VRAM loader (ModelPatcherDynamic) backs a model's buffers up by attribute path at load and
 writes them back by path at the next load. A sampling node puts its own schedule object at 'model_sampling' for its
 run, so the node's schedule is written into the checkpoint's own object afterwards: later runs without the node come
 out as another image, then black, and a node used after a plain run is ignored (Comfy-Org/ComfyUI#16490; measured in
-issue_track/comfyui_field_test/VPRED_PROTOCOL.md M6). This is a defect of one engine, so it stays out of the core's
-verdicts (testbed/PROBLEMS.md fd-leak) and lives here, marked as the engine's; tests/test_adapter_rules.py lists it
-apart from the adapters, which hold no rules.
+the entail research workspace, issue_track/comfyui_field_test/VPRED_PROTOCOL.md M6).
 
 Two rules on the buffers of torch modules, the engine's repair:
   1. What an object's own setter registered is what it holds: the setters of comfy.model_sampling leave a copy
@@ -16,16 +17,17 @@ Two rules on the buffers of torch modules, the engine's repair:
      up path belonged to is remembered; before restore_loaded_backups writes by path, a backup is handed back to its
      owner instead of into another object now at that path (install_buffer_guard).
 Measured: with (2) both directions matched a fresh session pixel for pixel; with (1) alone 2-11/255 remained (M6).
-What it does is said in one line and written to the record file (load.say); it never breaks the run.
+What it does is said in one line and written to the record file (load.say, at dlc:comfyui.schedule, which the
+platform shows on this DLC's node); it never breaks the run.
 """
 import importlib
 import weakref
 
-from .. import load
+from entail import load
 
 engine = "comfyui"
 versions = "0.34.1"
-WHERE = "comfyui sampling schedule (engine-specific repair, Comfy-Org/ComfyUI#16490)"
+WHERE = "dlc:comfyui.schedule"   # the platform's node for this DLC (entail_dlc_comfyui.nodes)
 _ORIG = {}      # (class, attribute) -> original, for uninstall
 _SETTERS = []   # (class, name, original) from wrap_setters
 

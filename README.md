@@ -76,7 +76,7 @@ the engine executes. (ent·**AI**·**L**: an AI library.)
 | vLLM | 0.30.0 | attention backend, loader, weight layout after repacking, KV cache, OpenAI server, weights against the file, custom-op kernels and four engine functions against their definitions, the engine's own paths at start |
 | SGLang | 0.5.20 | attention backends, loader, KV cache, server, the GDN gate against its definition (the paths at start with `ENTAIL_PATHS=1`) |
 | diffusers | 0.40.0 | prediction type, VAE scale, LoRA reach |
-| ComfyUI | 0.34.1 | prediction type, VAE scale, LoRA reach, and one engine-specific repair (marked as such) |
+| ComfyUI | 0.34.1 | prediction type, VAE scale, LoRA reach; the repair of ComfyUI's own #16490 is the official DLC `entail-dlc-comfyui` (`dlc/comfyui`) |
 
 ## Why: a case measured end to end
 
@@ -478,7 +478,7 @@ For 1.0 every measurement of the development milestones was run again on the fin
 | `ENTAIL_RECORD` | a file | the JSON record goes to this file instead of `record-<date>.jsonl` |
 | `ENTAIL_RESPONSE_NOTE` | `1` | vLLM server: a response also carries what broke for its request (an `entail` field, or SSE comment lines ahead of a stream) |
 | `ENTAIL_ONLY` | e.g. `rope_alias,sglang_adapter` | install only these adapters |
-| `ENTAIL_SKIP` | e.g. `comfyui_repair:install_buffer_guard` | leave out these entries (a bare name leaves out the whole adapter), to measure the rest without them |
+| `ENTAIL_SKIP` | e.g. `comfyui:install_nodes` | leave out these entries (a bare name leaves out the whole adapter), to measure the rest without them |
 | `ENTAIL_VERBOSE` | `1` | print each adapter as it is installed |
 | `ENTAIL_QUIET` | `unknown` | keep non-blocking `unknown` decisions off the console; they stay in the log and the record, and the console says so once per process |
 | `ENTAIL_SOURCE` | `1` | also compare loaded weights with the checkpoint file (vLLM, a little I/O at start-up) |

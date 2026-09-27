@@ -38,7 +38,7 @@ entail은 값의 뜻을 타입처럼 분명하게 만든다. 뜻을 만드는 �
 | vLLM | 0.30.0 | 어텐션 백엔드, 적재기, 다시 배치한 가중치의 자리, KV 캐시, OpenAI 서버, 파일과 가중치 대조, 커스텀 연산의 커널과 엔진 함수 넷을 정의와 대조, 시작 때 엔진 자신의 경로 |
 | SGLang | 0.5.20 | 어텐션 백엔드, 적재기, KV 캐시, 서버, GDN 게이트를 정의와 대조(시작 때 경로 대조는 `ENTAIL_PATHS=1`일 때) |
 | diffusers | 0.40.0 | 예측 방식, VAE 배율, LoRA가 닿는 곳 |
-| ComfyUI | 0.34.1 | 예측 방식, VAE 배율, LoRA가 닿는 곳, 그리고 엔진 전용 수리 하나(그렇게 표시됨) |
+| ComfyUI | 0.34.1 | 예측 방식, VAE 배율, LoRA가 닿는 곳. ComfyUI 자신의 #16490 수리는 공식 DLC `entail-dlc-comfyui`(`dlc/comfyui`) |
 
 ## 왜 필요한가: 끝까지 돌려 잰 사례
 
@@ -249,7 +249,7 @@ logits = step()["logits"]                                                       
 | `ENTAIL_RECORD` | 파일 | JSON 기록을 `record-<날짜>.jsonl` 대신 이 파일에 적는다 |
 | `ENTAIL_RESPONSE_NOTE` | `1` | vLLM 서버: 요청에서 깨진 것을 응답에도 적는다(`entail` 필드, 스트림이면 데이터 앞의 SSE 주석 줄) |
 | `ENTAIL_ONLY` | 예: `rope_alias,sglang_adapter` | 적은 어댑터만 설치한다 |
-| `ENTAIL_SKIP` | 예: `comfyui_repair:install_buffer_guard` | 적은 항목만 빼고 설치한다(어댑터 이름만 적으면 그 어댑터 전체를 뺀다). 나머지가 그것 없이 무엇을 하는지 잴 때 쓴다 |
+| `ENTAIL_SKIP` | 예: `comfyui:install_nodes` | 적은 항목만 빼고 설치한다(어댑터 이름만 적으면 그 어댑터 전체를 뺀다). 나머지가 그것 없이 무엇을 하는지 잴 때 쓴다 |
 | `ENTAIL_VERBOSE` | `1` | 어댑터가 설치될 때마다 알린다 |
 | `ENTAIL_QUIET` | `unknown` | 멈추지 않는 `unknown` 판정을 화면에 찍지 않는다. 로그와 기록에는 남고, 프로세스마다 한 번 그렇다고 알린다 |
 | `ENTAIL_SOURCE` | `1` | 적재한 가중치를 체크포인트 파일과도 대조한다(vLLM, 시작 때 약간의 입출력) |

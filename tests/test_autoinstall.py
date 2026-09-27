@@ -58,16 +58,43 @@ def test_the_research_switches_add_nothing():
 
 
 def test_skip_leaves_out_one_entry_or_a_whole_module():
-    t = _load(ENTAIL_SKIP="comfyui_repair:install_buffer_guard").TARGETS
-    assert "comfy.model_patcher" not in t
-    assert t["comfy.model_base"] == ["entail.adapters.comfyui_repair:install_schedule_check"], t
+    t = _load(ENTAIL_SKIP="comfyui:install_nodes").TARGETS
+    assert "nodes" not in t
+    assert t["comfy.sample"] == ["entail.adapters.comfyui:install_sampling"], t
     assert t["comfy.sd"] == ["entail.adapters.comfyui"], t  # a bare entry is the module's install()
     t = _load(ENTAIL_SKIP="comfyui:install").TARGETS
     assert "comfy.sd" not in t and "comfy.sample" in t, t
     t = _load(ENTAIL_SKIP="comfyui").TARGETS
     left = [a for adapters in t.values() for a in adapters]
     assert not any(a.partition(":")[0].endswith(".comfyui") for a in left), t
-    assert "entail.adapters.comfyui_repair:install_buffer_guard" in left, "another module is not left out with it"
+    assert "entail.adapters.vllm_serve:install_parsers" in left, "another module is not left out with it"
+
+
+def test_no_engine_specific_repair_is_in_the_core_table():
+    """The ComfyUI repair is an official DLC since P4 (dlc/comfyui): its entries come from the DLC, not the core."""
+    flat = [a for adapters in _load().TARGETS.values() for a in adapters]
+    assert not any("comfyui_repair" in a for a in flat), flat
+
+
+def test_the_hook_watches_imports_once_when_its_file_is_imported_twice():
+    """The .pth imports the hook as entail.adapters.autoinstall.sitecustomize; a folder on PYTHONPATH can bring the
+    same file again as sitecustomize (P4, ComfyUI with entail 0.3.0's .pth and a development checkout): one finder."""
+    import sys
+
+    first, second = _load(), _load()
+    keep_meta, keep_run = list(sys.meta_path), os.environ.get("ENTAIL_RUN_ID")
+    try:
+        first.activate()
+        second.activate()
+        second.activate()
+        finders = [f for f in sys.meta_path if type(f).__name__ == "_PatchAfterImport"]
+        assert len(finders) == 1 and isinstance(finders[0], first._PatchAfterImport), finders
+    finally:
+        sys.meta_path[:] = keep_meta
+        if keep_run is None:
+            os.environ.pop("ENTAIL_RUN_ID", None)
+        else:
+            os.environ["ENTAIL_RUN_ID"] = keep_run
 
 
 if __name__ == "__main__":

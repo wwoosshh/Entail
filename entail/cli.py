@@ -79,6 +79,16 @@ def doctor(_args):
                    or os.path.isfile(os.path.join(os.getcwd(), top + ".py")))
         for a in adapters:
             print(f"  {a:48} after {module}{'' if present else '   (engine not installed here)'}")
+    from . import dlc
+
+    found = dlc.found() if os.environ.get("ENTAIL_DLC", "on") != "off" else []
+    print(f"official DLCs (entry point group {dlc.GROUP}; ENTAIL_DLC=off leaves them out):" + ("" if found else " none"))
+    for info in found:
+        state = "attached" if info["attached"] else f"not attached: {info['why']}"
+        print(f"  {info.get('name') or info['entry_point']} {info.get('version', '?')}  ({info.get('dist')})  {state}")
+        for module, entries in (info.get("targets") or {}).items():
+            for e in entries:
+                print(f"    {e:46} after {module}")
     return 0
 
 

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+Toward entail 2.0, a local platform that manages the stability of an AI project (ROADMAP product track P0-P6).
+
+**Added**
+- `entail serve`: a local web server (127.0.0.1 only, the standard library) that shows a project's runs from the
+  record files as live nodes - the node that first broke and why (P2). Record lines are version 2: `v`, `t`, `run`
+  (P1); version-1 lines still read.
+- Two safety modes (P3). The selective safe path (`ENTAIL_SAFE=auto`, the default): when the engine's own paths
+  disagree at start, the next starts of that configuration turn the optimizations the disagreement points at off,
+  one per start, until the paths agree (that one is the cause and stays off) or none is left (said once as broken).
+  The explicit safe mode (`ENTAIL_SAFE=all`): every optimization the engine declares does not change results is
+  turned off, and entail says whether a fault that stays is outside them or one that went away was inside them.
+  vLLM 0.30 (CUDA graphs, prefix cache, speculative decoding, custom kernels - `custom_ops` and the IR ops' kernel
+  priority) and SGLang 0.5.20 (CUDA graphs, radix cache, speculative decoding). The platform's one write sets the
+  mode for the next start (`POST /api/safe-mode`: a token that changes after each write, Origin and Host checked).
+- Official DLCs (P4): packages outside the core that attach through the entry point group `entail.dlc`
+  (`entail/dlc.py`). The core checks the DLC's core range, installs its entries itself - a failure is recorded and the
+  program goes on - and shows its nodes on the platform; `entail doctor` lists them; `ENTAIL_DLC=off` leaves them out.
+
+**Changed**
+- The repair of ComfyUI's own defect (Comfy-Org/ComfyUI#16490) left the core: it is the official DLC
+  `entail-dlc-comfyui` (`dlc/comfyui` in this repository). Without it, entail no longer repairs that defect.
+
 **Fixed**
 - The start-up path check counts a log-probability that is not a finite number as a disagreement (`paths_disagree`,
   "log-probabilities are not finite numbers (n on the first path, m on the second)"). NaN compared as no move, so a

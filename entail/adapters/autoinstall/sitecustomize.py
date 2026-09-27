@@ -88,11 +88,8 @@ TARGETS = {
     "comfy.sd": ["entail.adapters.comfyui"],
     "comfy.sample": ["entail.adapters.comfyui:install_sampling"],
     "nodes": ["entail.adapters.comfyui:install_nodes"],
-    # ENGINE-SPECIFIC repair of ComfyUI's own defect (Comfy-Org/ComfyUI#16490): a sampling schedule stays with its own
-    # object - recorded where it is set, the loader that moved it guarded, checked at the first model call.
-    "comfy.model_sampling": ["entail.adapters.comfyui_repair:install_schedule_record"],
-    "comfy.model_patcher": ["entail.adapters.comfyui_repair:install_buffer_guard"],
-    "comfy.model_base": ["entail.adapters.comfyui_repair:install_schedule_check"],
+    # (The repair of ComfyUI's own defect, Comfy-Org/ComfyUI#16490, left the core in product track P4: it is the
+    # official DLC entail-dlc-comfyui, whose entries come in below with the other DLCs'.)
     # diffusers (M6.2): single files, local folders and a VAE put in later, and LoRAs.
     "diffusers.loaders.single_file": ["entail.adapters.diffusers_adapter"],
     "diffusers.pipelines.pipeline_utils": ["entail.adapters.diffusers_adapter:install_pipeline"],
@@ -103,13 +100,33 @@ if os.environ.get("ENTAIL_SOURCE"):
     TARGETS["vllm.model_executor.model_loader.utils"].append("entail.adapters.vllm_source")
 # Fault injection, the layout ledger and the bookkeeping probe used to measure entail are research tools, not part
 # of the library: they live in the development workspace, with a hook of their own that adds them to this table.
+# Official DLCs (product track P4; LIBRARY_DESIGN.md 13.7): packages outside the core add entries to this table through
+# the entry point group entail.dlc (entail/dlc.py). They are looked up only when entail is on, ENTAIL_DLC=off leaves
+# them out, and ENTAIL_ONLY and ENTAIL_SKIP below apply to their entries too (by module: repair:install_buffer_guard).
+DLC_OF = {}   # entry -> the DLC it belongs to: the core installs those itself (dlc.install)
+
+
+def add_dlcs():
+    try:
+        from entail import dlc
+        for module, entries in dlc.targets().items():
+            for entry, name in entries:
+                if entry not in TARGETS.setdefault(module, []):
+                    TARGETS[module].append(entry)
+                DLC_OF[entry] = name
+    except Exception as e:  # noqa: BLE001 - a DLC that cannot be read never stops the host program
+        print(f"[entail] could not look up DLCs: {type(e).__name__}: {e}", flush=True)
+
+
+if os.environ.get("ENTAIL", "off") in ("load", "debug"):
+    add_dlcs()
 # ENTAIL_ONLY=rope_alias,sglang_adapter installs just those adapters (to measure one of them on its own).
 if os.environ.get("ENTAIL_ONLY"):
     _only = {s.strip() for s in os.environ["ENTAIL_ONLY"].split(",") if s.strip()}
     TARGETS = {mod: [a for a in adapters if a.partition(":")[0].rsplit(".", 1)[-1] in _only]
                for mod, adapters in TARGETS.items()}
     TARGETS = {mod: adapters for mod, adapters in TARGETS.items() if adapters}
-# ENTAIL_SKIP=comfyui_repair:install_buffer_guard leaves out single entries (to measure what the others do without them);
+# ENTAIL_SKIP=comfyui:install_nodes leaves out single entries (to measure what the others do without them);
 # a bare module name leaves out all of its entries.
 if os.environ.get("ENTAIL_SKIP"):
     _skip = {s.strip() for s in os.environ["ENTAIL_SKIP"].split(",") if s.strip()}
@@ -125,6 +142,15 @@ _done = set()
 
 
 def _install(adapter):
+    if adapter in DLC_OF:          # a DLC's entry: the core installs it, and records a failure (entail/dlc.py)
+        try:
+            from entail import dlc
+            dlc.install(DLC_OF[adapter], adapter)
+            if os.environ.get("ENTAIL_VERBOSE"):
+                _say(f"[entail] installed {adapter} (DLC {DLC_OF[adapter]}) in pid {os.getpid()}")
+        except Exception as e:  # noqa: BLE001 - debug mode raises in dlc.install; the host program still goes on here
+            _say(f"[entail] could not install {adapter}: {type(e).__name__}: {e}")
+        return
     try:
         name, _, func = adapter.partition(":")
         mod = __import__(name, fromlist=["install"])
@@ -194,7 +220,13 @@ def activate():
         os.environ.setdefault("ENTAIL_RUN_ID", f"{os.getpid()}-{int(time.time())}")
     except Exception:  # noqa: BLE001 - a log folder that cannot be named does not stop the checks
         pass
-    if not any(isinstance(f, _PatchAfterImport) for f in sys.meta_path):
+    mine = any(isinstance(f, _PatchAfterImport) for f in sys.meta_path)
+    other = any(type(f).__name__ == "_PatchAfterImport" and not isinstance(f, _PatchAfterImport) for f in sys.meta_path)
+    if other and not mine:
+        # another copy of this file is active here: the .pth imports it as entail.adapters.autoinstall.sitecustomize,
+        # and a folder on PYTHONPATH can bring it again as sitecustomize; one of them watches the imports
+        return
+    if not mine:
         sys.meta_path.insert(0, _PatchAfterImport())
     install_now()
 

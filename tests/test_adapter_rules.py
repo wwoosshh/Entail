@@ -13,9 +13,9 @@ rules, and is therefore refused here:
   - raising RoleError itself: stopping is load.enforce's, on a blocking decision.
   - a module-level table (a dict, list, set or tuple literal of more than three entries): tables are data files.
   - reading the mismatch policy (core.policy): the policy is applied by the core's decide.
-Every file in adapters/ is either on this interface, listed in LEGACY with the stage that moves it, or listed in
-ENGINE_SPECIFIC: a repair of one engine's own defect, which the design keeps out of the core and marks as the engine's
-(M6.2: ComfyUI #16490).
+Every file in adapters/ is either on this interface or listed in LEGACY with the stage that moves it. A repair of one
+engine's own defect is not in the core at all since product track P4: it is an official DLC (the ComfyUI #16490 repair
+is entail-dlc-comfyui, dlc/comfyui), so ENGINE_SPECIFIC is empty and no adapter file may say ENGINE-SPECIFIC.
 """
 import ast
 import os
@@ -32,9 +32,7 @@ V2 = ("transformers_adapter", "transformers_config", "sglang_adapter", "vllm_att
 # Not yet on the v2 interface: where they move, and why they have not yet. Empty since M9.3, when the research tools
 # (fault injection, the layout ledger, a probe) left the package.
 LEGACY = {}
-ENGINE_SPECIFIC = {   # repairs of one engine's own defect: not contracts of entail, kept out of the core (M6.2)
-    "comfyui_repair": "ComfyUI's dynamic VRAM loader writes one object's schedule into another (Comfy-Org/ComfyUI#16490)",
-}
+ENGINE_SPECIFIC = {}   # repairs of one engine's own defect are official DLCs since P4 (M6.2 kept them here, marked)
 NOT_ADAPTERS = ("__init__", "base")
 ALLOWED = {"load": None, "kv_contract": None, "epochs": None, "identity_contract": None, "tile_contract": None,
            "vocab_contract": None, "tokenizer_contract": None, "kernel_reference_contract": None, "stops_contract": None,
@@ -116,11 +114,13 @@ def test_every_adapter_file_is_classified():
     assert set(V2) <= files and set(LEGACY) <= files and set(ENGINE_SPECIFIC) <= files
 
 
-def test_an_engine_specific_repair_says_so_first():
-    """A repair of one engine's own defect is marked where a reader starts: the first word of its docstring."""
-    for name in ENGINE_SPECIFIC:
-        doc = ast.get_docstring(ast.parse(open(os.path.join(ADAPTERS, name + ".py"), encoding="utf-8").read()))
-        assert doc and doc.startswith("ENGINE-SPECIFIC"), name
+def test_no_engine_specific_repair_is_left_in_the_core():
+    """Engine-specific repairs are official DLCs (P4): no file in adapters/ is one."""
+    assert ENGINE_SPECIFIC == {}
+    for f in sorted(os.listdir(ADAPTERS)):
+        if f.endswith(".py"):
+            doc = ast.get_docstring(ast.parse(open(os.path.join(ADAPTERS, f), encoding="utf-8").read())) or ""
+            assert not doc.startswith("ENGINE-SPECIFIC"), f
 
 
 def test_v2_adapters_hold_no_rules():
