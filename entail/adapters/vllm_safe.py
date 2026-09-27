@@ -59,6 +59,26 @@ def _ir(args, path):
     return path, list(_get(args, path) or [])
 
 
+def _has(args, path):
+    """Whether this vLLM's engine arguments have the option (a dict on the way can take any key)."""
+    if path.startswith("ir_op_priority."):
+        return _has_attr(args, path) or _has_attr(args, "kernel_config." + path)
+    return _has_attr(args, path)
+
+
+def _has_attr(obj, path):
+    *head, last = path.split(".")
+    for name in head:
+        if isinstance(obj, dict):
+            return True
+        if not hasattr(obj, name):
+            return False
+        obj = getattr(obj, name)
+        if obj is None:
+            return False
+    return isinstance(obj, dict) or hasattr(obj, last)
+
+
 def _on(args, option, safe):
     if option.startswith("ir_op_priority."):   # off when the definition comes first; vLLM appends its own after
         return _ir(args, option)[1][:1] != safe[:1]
@@ -78,20 +98,29 @@ def _turn(args, option, safe):
         _set(args, option, list(safe) if isinstance(safe, list) else safe)
 
 
-def read_choice(args):
-    """(configuration key, {feature: on}) for these engine arguments."""
+def _version():
     try:
         import vllm
 
-        version = getattr(vllm, "__version__", "?")
+        return getattr(vllm, "__version__", "?")
     except ImportError:
-        version = "?"
-    key = safe_mode.config_key(engine, {"version": version, "model": str(getattr(args, "model", "")),
+        return "?"
+
+
+def read_choice(args):
+    """(configuration key, {feature: on}) for these engine arguments; a feature this vLLM has no option for is not
+    in it (read_options says which)."""
+    key = safe_mode.config_key(engine, {"version": _version(), "model": str(getattr(args, "model", "")),
                                         "dtype": str(getattr(args, "dtype", "")),
                                         "quantization": str(getattr(args, "quantization", None)),
                                         "tp": getattr(args, "tensor_parallel_size", 1)})
-    return key, {f: any(_on(args, option, safe) for option, safe in options)
-                 for f, options in safe_mode.features(engine).items()}
+    have, _ = read_options(args)
+    return key, {f: any(_on(args, option, safe) for option, safe in options) for f, options in have.items()}
+
+
+def read_options(args):
+    """({feature: [the table's options this vLLM has]}, {feature: [the ones it lacks]})."""
+    return safe_mode.missing(engine, lambda option: _has(args, option))
 
 
 def handles(args=None):
@@ -100,9 +129,12 @@ def handles(args=None):
 
 def _decide(args):
     key, enabled = read_choice(args)
+    have, lack = read_options(args)
     items = safe_mode.plan(engine, key, enabled)
     where = f"vLLM engine arguments for {getattr(args, 'model', 'the model')}"
-    decisions = safe_mode.decisions(engine, BOUNDARY, CONSUMER, items, where)
+    decisions = safe_mode.decisions(engine, BOUNDARY, CONSUMER, items, where, options=have)
+    if safe_mode.mode() == "all":
+        decisions = decisions + safe_mode.cannot_turn(engine, BOUNDARY, CONSUMER, lack, have, _version())
     if decisions:
         load.enforce(decisions, once_for=args)
         load.resolve(decisions, handles(args))

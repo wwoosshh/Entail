@@ -22,20 +22,29 @@ def hooks():
     return [Hook("sglang.srt.server_args.ServerArgs.__post_init__", "start")]
 
 
-def read_choice(args):
-    """(configuration key, {feature: on}) for these server arguments."""
+def _version():
     try:
         import sglang
 
-        version = getattr(sglang, "__version__", "?")
+        return getattr(sglang, "__version__", "?")
     except ImportError:
-        version = "?"
-    key = safe_mode.config_key(engine, {"version": version, "model": str(getattr(args, "model_path", "")),
+        return "?"
+
+
+def read_options(args):
+    """({feature: [the table's options these arguments have]}, {feature: [the ones they lack]})."""
+    return safe_mode.missing(engine, lambda option: hasattr(args, option))
+
+
+def read_choice(args):
+    """(configuration key, {feature: on}) for these server arguments; a feature this SGLang has no option for is
+    not in it."""
+    key = safe_mode.config_key(engine, {"version": _version(), "model": str(getattr(args, "model_path", "")),
                                         "dtype": str(getattr(args, "dtype", "")),
                                         "quantization": str(getattr(args, "quantization", None)),
                                         "tp": getattr(args, "tp_size", 1)})
-    return key, {f: any(getattr(args, option, None) != safe for option, safe in options)
-                 for f, options in safe_mode.features(engine).items()}
+    have, _ = read_options(args)
+    return key, {f: any(getattr(args, option, None) != safe for option, safe in options) for f, options in have.items()}
 
 
 def handles(args=None):
@@ -44,9 +53,12 @@ def handles(args=None):
 
 def _decide(args):
     key, enabled = read_choice(args)
+    have, lack = read_options(args)
     items = safe_mode.plan(engine, key, enabled)
     where = f"SGLang server arguments for {getattr(args, 'model_path', 'the model')}"
-    decisions = safe_mode.decisions(engine, BOUNDARY, CONSUMER, items, where)
+    decisions = safe_mode.decisions(engine, BOUNDARY, CONSUMER, items, where, options=have)
+    if safe_mode.mode() == "all":
+        decisions = decisions + safe_mode.cannot_turn(engine, BOUNDARY, CONSUMER, lack, have, _version())
     if decisions:
         load.enforce(decisions, once_for=args)
         load.resolve(decisions, handles(args))

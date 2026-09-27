@@ -123,13 +123,15 @@ def plan(engine: str, key: str, enabled: Dict[str, bool]) -> List[Tuple[str, str
     return []
 
 
-def decisions(engine: str, boundary: str, consumer: str, items: Sequence[Tuple[str, str]], where: str) -> list:
+def decisions(engine: str, boundary: str, consumer: str, items: Sequence[Tuple[str, str]], where: str,
+              options: Optional[Dict[str, List[Tuple[str, object]]]] = None) -> list:
     """One resolved decision per optimization turned off, for the adapter's handle `safe_mode` (target: the options
-    and the values that turn it off, [(option, value), ...])."""
+    and the values that turn it off, [(option, value), ...]). `options`: the ones this engine version has, when the
+    adapter found some of the table's missing (the table is made for the versions its evidence names)."""
     from .contracts import RULES, Contract, Decision, Verdict
     from .facts import Certainty, Fact, SafeMode, Source
 
-    names = features(engine)
+    names = options if options is not None else features(engine)
     contract = Contract(boundary, consumer, ("SafeMode",), ("SafeMode",))
     out = []
     for feature, why in items:
@@ -145,6 +147,33 @@ def decisions(engine: str, boundary: str, consumer: str, items: Sequence[Tuple[s
                             resolution="; ".join(f"{option} = {safe!r}" for option, safe in options),
                             handle="safe_mode", target=tuple(options), note=note))
     return out
+
+
+def missing(engine: str, has) -> Tuple[Dict[str, List[Tuple[str, object]]], Dict[str, List[str]]]:
+    """Split the table's options by whether this engine version has them (`has(option)`): ({feature: [the options it
+    has]} for the features whose first option it has, {feature: [the options it lacks]}). A feature whose first option
+    is missing cannot be turned off here; a missing 'also' option is left out (an older version may choose that
+    kernel through the first option alone)."""
+    have, lack = {}, {}
+    for feature, opts in features(engine).items():
+        gone = [o for o, _ in opts if not has(o)]
+        if gone:
+            lack[feature] = gone
+        if has(opts[0][0]):
+            have[feature] = [(o, s) for o, s in opts if has(o)]
+    return have, lack
+
+
+def cannot_turn(engine: str, boundary: str, consumer: str, lack: Dict[str, List[str]], have, version: str) -> list:
+    """Unknown decisions for the features this engine version gives no option to turn off (said by the explicit safe
+    mode, which then cannot tell whether a fault is inside them)."""
+    from . import load
+
+    return [load.cannot_check(boundary, consumer, "SafeMode",
+                              f"{engine} {version} has no option {gone[0]!r}: {feature} cannot be turned off, so the "
+                              f"explicit safe mode cannot tell whether a fault is inside it (data/safe_mode.json names "
+                              f"the versions its options come from)")
+            for feature, gone in lack.items() if feature not in have]
 
 
 def started(engine: str, key: str, enabled: Dict[str, bool], off: Sequence[str], model: str = "") -> None:

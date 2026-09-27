@@ -192,6 +192,26 @@ def test_a_kernel_choice_is_on_until_every_option_of_it_is_off():
         assert quiet(vllm_safe._decide, args) == []           # nothing left to turn off
 
 
+def test_an_option_this_engine_version_lacks_is_not_made_up():
+    with Env("all") as e:
+        args = _vllm_args()
+        del args.ir_op_priority, args.kernel_config          # an older vLLM: no IR op priority
+        ds = quiet(vllm_safe._decide, args)
+        assert [d.verdict for d in ds] == [Verdict.RESOLVED] * 4, ds       # custom ops alone turn it off there
+        assert ds[3].resolution == "compilation_config.custom_ops = ['none']" and not hasattr(args, "ir_op_priority")
+        args = _vllm_args()
+        del args.speculative_config                           # a version whose option has another name
+        ds = quiet(vllm_safe._decide, args)
+        assert [d.verdict for d in ds] == [Verdict.RESOLVED] * 3 + [Verdict.UNKNOWN], ds
+        assert "cannot be turned off" in ds[3].note and "speculative_decoding" in ds[3].note
+        assert not hasattr(args, "speculative_config")        # not made up on the arguments
+        assert any(r.get("verdict") == "unknown" and r.get("boundary") == "start:vllm.safe_mode" for r in e.records())
+    with Env():                                               # auto: a feature it cannot turn is never a candidate
+        args = _vllm_args()
+        del args.speculative_config
+        assert "speculative_decoding" not in vllm_safe.read_choice(args)[1]
+
+
 def test_the_sglang_adapter_turns_the_options_off():
     with Env("all"):
         args = SimpleNamespace(model_path="/m/q", dtype="auto", quantization=None, tp_size=1,
