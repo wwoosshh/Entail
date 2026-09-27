@@ -1,0 +1,43 @@
+{
+  "_about": "The platform's node model (LIBRARY_DESIGN.md 13.3, ROADMAP product track P1). A node is one stage of a project's workflow; every boundary a decision names belongs to the first node, in this list's order, whose pattern matches the boundary's name (regular expressions, searched from the start). 'flow' is the workflow the node belongs to and 'step' its place in that flow's order, which the graph draws left to right. The last node takes every boundary no other node matches.",
+  "version": 1,
+  "flows": {
+    "llm": {"ko": "LLM", "en": "LLM"},
+    "image": {"ko": "이미지 생성", "en": "Image generation"},
+    "user": {"ko": "사용자 코드", "en": "User code"}
+  },
+  "nodes": [
+    {"id": "rotary", "flow": "llm", "step": 4, "ko": "어텐션·회전", "en": "Attention and rotary",
+     "patterns": ["^load:[^.]+\\.config\\.rope", "^load:[^.]+\\.(attention|paged_attention|rotary_pairing)"]},
+    {"id": "config", "flow": "llm", "step": 1, "ko": "모델 파일과 설정", "en": "Model files and config",
+     "patterns": ["^load:(transformers|vllm|sglang)\\.(config|model_config|generation_config)"]},
+    {"id": "tokenizer", "flow": "llm", "step": 2, "ko": "토크나이저", "en": "Tokenizer",
+     "patterns": ["^load:[^.]+\\.tokenizer", "^load:[^.]+\\.input_processor"]},
+    {"id": "weights", "flow": "llm", "step": 3, "ko": "가중치 적재", "en": "Weight loading",
+     "patterns": ["^load:(transformers|vllm|sglang)\\.(loader|weights|linear|quant_method)"]},
+    {"id": "adapter", "flow": "llm", "step": 5, "ko": "어댑터(LoRA)", "en": "Adapters (LoRA)",
+     "patterns": ["^load:(transformers|vllm|sglang)\\.(adapter_config|lora)"]},
+    {"id": "self_check", "flow": "llm", "step": 6, "ko": "엔진 자기 점검", "en": "Engine self-check",
+     "patterns": ["^start:"]},
+    {"id": "response", "flow": "llm", "step": 10, "ko": "응답(파서, logprobs)", "en": "Response (parsers, logprobs)",
+     "patterns": ["^request:[^.]+\\.(parser|logprobs)$", "^load:[^.]+\\.tool_parser"]},
+    {"id": "request", "flow": "llm", "step": 7, "ko": "요청(템플릿, 설정, 멀티모달)", "en": "Request (template, settings, multimodal)",
+     "patterns": ["^request:[^.]+\\.(chat_template|template_settings|request_fields|reasoning_history|parser_settings|multimodal|scoring)"]},
+    {"id": "cache", "flow": "llm", "step": 8, "ko": "스케줄러와 KV 캐시", "en": "Scheduler and KV cache",
+     "patterns": ["^container:", "^request:[^.]+\\.generate\\.beam_reorder"]},
+    {"id": "kernel", "flow": "llm", "step": 9, "ko": "커널", "en": "Kernels",
+     "patterns": ["^kernel:", "^load:[^.]+\\.(fp8_block_kernel_config|fused_moe_kernel_config)"]},
+    {"id": "checkpoint", "flow": "image", "step": 1, "ko": "체크포인트", "en": "Checkpoint",
+     "patterns": ["^load:(comfyui|diffusers)\\.(checkpoint|single_file|pipeline)"]},
+    {"id": "prediction", "flow": "image", "step": 2, "ko": "예측 방식과 샘플러", "en": "Prediction type and sampler",
+     "patterns": ["^load:(comfyui|diffusers)\\.(prediction|schedule|sampler)"]},
+    {"id": "vae", "flow": "image", "step": 3, "ko": "VAE(잠재 배율)", "en": "VAE (latent scale)",
+     "patterns": ["^load:(comfyui|diffusers)\\.latent_scale"]},
+    {"id": "image_lora", "flow": "image", "step": 4, "ko": "LoRA", "en": "LoRA",
+     "patterns": ["^load:(comfyui|diffusers)\\.lora"]},
+    {"id": "user", "flow": "user", "step": 1, "ko": "사용자 코드의 경계", "en": "Boundaries in user code",
+     "patterns": ["^boundary:"]},
+    {"id": "other", "flow": "user", "step": 9, "ko": "기타", "en": "Other",
+     "patterns": [""]}
+  ]
+}

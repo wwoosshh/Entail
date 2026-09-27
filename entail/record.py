@@ -118,15 +118,31 @@ def close_files() -> None:
 atexit.register(close_files)
 
 
+RECORD_VERSION = 2   # 1: pid and one kind of content per line; 2 adds v, t (epoch seconds) and run (LIBRARY_DESIGN 13.4)
+
+
+def run_id() -> str:
+    """The launch this process belongs to: ENTAIL_RUN_ID, set where entail is turned on (sitecustomize.activate) and
+    inherited by the processes an engine starts; named here, the same way, when entail was turned on in code."""
+    run = os.environ.get("ENTAIL_RUN_ID")
+    if not run:
+        run = os.environ["ENTAIL_RUN_ID"] = f"{os.getpid()}-{int(time.time())}"
+    return run
+
+
 def write_json(obj) -> None:
-    """One JSON line: to the file ENTAIL_RECORD names, else to record-<date>.jsonl in the log folder, if any."""
+    """One JSON line: to the file ENTAIL_RECORD names, else to record-<date>.jsonl in the log folder, if any. Every
+    line carries the record version, the time it was written and the launch (v, t, run; the platform groups a
+    launch's processes by run and orders by t)."""
     path = os.environ.get("ENTAIL_RECORD")
     if not path:
         folder = log_dir()
         if folder is None:
             return
         path = os.path.join(folder, f"record-{time.strftime('%Y-%m-%d')}.jsonl")
-    _append(path, json.dumps(obj, ensure_ascii=False) + "\n")
+    line = {"v": RECORD_VERSION, "t": round(time.time(), 3), "run": run_id()}
+    line.update(obj)
+    _append(path, json.dumps(line, ensure_ascii=False) + "\n")
 
 
 def say(text: str, console: bool = True) -> None:
