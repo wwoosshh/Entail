@@ -209,6 +209,32 @@ def test_the_one_write_is_the_safety_mode_and_needs_the_page_token_and_origin():
         srv.server_close()
 
 
+def test_a_record_file_it_cannot_read_is_said_not_skipped():
+    """P6: a broken link or an unreadable file under the record name is named in /api/runs (the E2 poller's broken
+    links looked like "no records yet")."""
+    folder, _ = _folder()
+    os.makedirs(os.path.join(folder, "record-2026-09-29.jsonl"))       # a name the store reads, and cannot open
+    srv, port = _start(folder)
+    try:
+        runs = json.loads(_get(port, "/api/runs")[2])
+        assert runs["folder_found"] is True and runs["runs"], runs
+        assert [u["file"] for u in runs["unreadable"]] == ["record-2026-09-29.jsonl"], runs["unreadable"]
+        page = _get(port, "/static/app.js")[2]
+        assert b"unreadable" in page and b"folder_found" in page
+    finally:
+        srv.stopping = True
+        srv.shutdown()
+        srv.server_close()
+    srv, port = _start(os.path.join(folder, "not-there"))
+    try:
+        runs = json.loads(_get(port, "/api/runs")[2])
+        assert runs["folder_found"] is False and runs["runs"] == [] and runs["unreadable"] == [], runs
+    finally:
+        srv.stopping = True
+        srv.shutdown()
+        srv.server_close()
+
+
 def test_a_line_still_being_written_waits_for_its_newline():
     folder, path = _folder()
     store = server.Store(folder)

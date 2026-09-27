@@ -9,8 +9,8 @@ on PyPI is still 1.3.0.
 **Measured for this release** (one RTX 4070 Ti; the research workspace's `testbed/results/p6/SUMMARY.md`)
 - 102 healthy runs (38 models on transformers, vLLM and SGLang): exactly the decisions of 1.3.0's frozen code - no
   run broken, the same six real tokenizer differences reported, no unbacked repair, outputs the same in 97 of 98.
-- Requests are 0.8-1.2% slower with entail on (vLLM 0.30, Qwen3-4B, CUDA graphs), and no slower while `entail serve`
-  reads the records.
+- Requests are at most about 1% slower with entail on (vLLM 0.30, Qwen3-4B, CUDA graphs; 1.000-1.011 over ten rounds
+  interleaved with 1.3.0, which measured the same), and no slower while `entail serve` reads the records.
 - Load: the median share is 9.0%, above the 5% target - mostly vLLM's start-up path check (`ENTAIL_NO_PATHS=1`).
 - The page points at the first broken node and why in 12 of 12 planted-fault workflows; it read back the 114
   launches of the healthy runs without an error.

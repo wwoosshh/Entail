@@ -43,8 +43,8 @@ the engine executes. (ent·**AI**·**L**: an AI library.)
 > **Status: 2.0.0 on this branch (the version on PyPI is 1.3.0), measured on one machine.** 2.0 adds the
 > platform - `entail serve`, two safety modes, official DLCs and custom nodes ([The platform](#the-platform-20)) -
 > around the same checks: on the 102 healthy runs it made exactly the decisions 1.3.0's frozen code made (no run
-> broken, the same six real tokenizer differences reported), requests cost 0.8-1.2% more with entail on, with or
-> without `entail serve` reading the records, and a wheel installed with no index brings in nothing but entail.
+> broken, the same six real tokenizer differences reported), requests cost at most about 1% more with entail on (1.000-1.011 over ten
+> interleaved rounds, the same as 1.3.0), with or without `entail serve` reading the records, and a wheel installed with no index brings in nothing but entail.
 > Everything below was measured on the engines and versions under [Tested with](#tested-with), on one RTX 4070 Ti. The evaluation is summarised under
 > [How it was measured](#how-it-was-measured), and what it found missing under [Known gaps](#known-gaps).
 > **What it is today:** a light pre-deployment check. It reads what model files declare, holds the engine's own
@@ -167,6 +167,11 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
 entail 2.0 is a local platform that manages the stability of an AI project: the checks above, a page that shows
 where meaning held and where it broke, two safety modes, and checks you attach and detach by node - official DLCs for
 an engine, custom nodes for your own code. Everything stays on your machine; the core still has no dependencies.
+
+> **Trust:** a DLC or a custom node is Python code you install, running in your program with your program's rights.
+> entail keeps it from breaking a run (a failure, a slow or a stuck validator is recorded and left out) and from
+> changing entail's own rules; it does not sandbox it. Install only what you trust, and list what may attach
+> (`ENTAIL_DLC`, `ENTAIL_NODES`).
 
 ### See your runs: `entail serve`
 

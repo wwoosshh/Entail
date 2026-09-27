@@ -31,6 +31,7 @@ h2.gap { margin-top: 18px; padding-top: 10px; border-top: 1px solid var(--line);
 #runlist li:hover { background: #f1f1ee; }
 #runlist li.sel { border-color: var(--ink); }
 #runlist .when { font-size: 12px; color: var(--muted); }
+#runlist li.warn { color: var(--broken); font-size: 12px; cursor: default; word-break: break-all; }
 .banner { padding: 10px 12px; border-radius: 6px; background: #f1f1ee; margin-bottom: 12px; }
 .banner.broken { background: #fdecea; color: var(--broken); }
 .banner.intact { background: #edf7ee; color: var(--pass); }

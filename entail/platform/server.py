@@ -45,7 +45,8 @@ TOKEN_SLOT = b"__ENTAIL_TOKEN__"   # where the page gets this server's token
 
 class Store:
     """The record lines of a folder, read incrementally: each file from where the last read stopped, whole lines
-    only (a line still being written waits for its newline)."""
+    only (a line still being written waits for its newline). A record file it cannot read (a broken link, no
+    permission) is kept in `unreadable` with the reason, and said by the API and the page, never skipped quietly."""
 
     def __init__(self, folder: str):
         self.folder = folder
@@ -54,25 +55,32 @@ class Store:
         self.lines: List[Tuple[str, dict]] = []
         self.version = 0
         self._groups = None
+        self.unreadable: Dict[str, str] = {}
 
     def refresh(self) -> int:
         """Read what was added since the last call; returns the store's version (it grows when lines came in)."""
         with self.lock:
             added = False
             for path in graph.record_files(self.folder):
+                if not os.path.isfile(path):              # a broken link (it follows it), or not a file at all
+                    self.unreadable[path] = "not a readable file (a broken link, or not a file)"
+                    continue
                 try:
                     size = os.path.getsize(path)
-                except OSError:
+                    start = self.offsets.get(path, 0)
+                    if size < start:                      # the file was replaced: read it again from the start
+                        self.lines = [(p, o) for p, o in self.lines if p != path]
+                        start = 0
+                    if size == start:
+                        self.unreadable.pop(path, None)
+                        continue
+                    with open(path, "rb") as f:
+                        f.seek(start)
+                        data = f.read(size - start)
+                    self.unreadable.pop(path, None)
+                except OSError as e:
+                    self.unreadable[path] = f"{type(e).__name__}: {e.strerror or e}"
                     continue
-                start = self.offsets.get(path, 0)
-                if size < start:                      # the file was replaced: read it again from the start
-                    self.lines = [(p, o) for p, o in self.lines if p != path]
-                    start = 0
-                if size == start:
-                    continue
-                with open(path, "rb") as f:
-                    f.seek(start)
-                    data = f.read(size - start)
                 end = data.rfind(b"\n")
                 if end < 0:
                     continue
@@ -224,7 +232,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(self.safe.nodes_state())
         self.store.refresh()
         if url.path == "/api/runs":
-            return self._json({"folder": self.store.folder, "runs": graph.summaries(self.store.groups())})
+            return self._json({"folder": self.store.folder, "folder_found": os.path.isdir(self.store.folder),
+                               "unreadable": [{"file": os.path.basename(p), "why": w}
+                                              for p, w in sorted(self.store.unreadable.items())],
+                               "runs": graph.summaries(self.store.groups())})
         lines = self.store.run(q.get("run"))
         if lines is None:
             return self._json({"error": "no such launch", "run": q.get("run")}, HTTPStatus.NOT_FOUND)

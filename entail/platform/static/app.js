@@ -53,6 +53,13 @@ async function loadRuns() {
   document.getElementById("folder").textContent = data.folder;
   const list = document.getElementById("runlist");
   list.replaceChildren();
+  // what could not be read is said, never left to look like "no records yet" (P6)
+  if (data.folder_found === false) {
+    list.append(el("li", "warn", "기록 폴더가 없다: " + data.folder + " (entail serve --dir로 엔진이 쓰는 폴더를 준다)"));
+  }
+  for (const u of (data.unreadable || [])) {
+    list.append(el("li", "warn", "읽지 못한 기록 파일: " + u.file + " (" + u.why + ")"));
+  }
   if (!data.runs.length) {
     list.append(el("li", "hint", "아직 기록이 없다. ENTAIL=load로 프로그램을 돌리면 여기에 나온다."));
     return;
