@@ -40,7 +40,7 @@ run goes on (it stops only if you ask it to); said to be "unknown" when nobody d
 default stand in silently. The name is the logical sense of *entail*: what a checkpoint declares must entail what
 the engine executes. (ent·**AI**·**L**: an AI library.)
 
-> **Status: 2.0.0 on this branch (the version on PyPI is 1.3.0), measured on one machine.** 2.0 adds the
+> **Status: 2.0.0, measured on one machine.** 2.0 adds the
 > platform - `entail serve`, two safety modes, official DLCs and custom nodes ([The platform](#the-platform-20)) -
 > around the same checks: on the 102 healthy runs it made exactly the decisions 1.3.0's frozen code made (no run
 > broken, the same six real tokenizer differences reported), requests cost at most about 1% more with entail on (1.000-1.011 over ten
@@ -223,7 +223,12 @@ and installed by the core the way it installs its own adapters (a failure is rec
 The first is `entail-dlc-comfyui` (`dlc/comfyui`), the repair of ComfyUI's own defect #16490, which lived in the core
 until 1.3. With it, M6's measurement gave 12 of 12 images pixel-equal to the core's repair of 1.3; without it the
 leak is back; in two normal workflows it changed no image and said nothing. `ENTAIL_DLC=off` leaves every DLC out,
-`ENTAIL_DLC=name,name` attaches only those (the rest are not even imported).
+`ENTAIL_DLC=name,name` attaches only those (the rest are not even imported). The DLC is not on PyPI; it installs
+from this repository:
+
+```bash
+pip install "git+https://github.com/wwoosshh/entail@v2.0.0#subdirectory=dlc/comfyui"
+```
 
 ### Custom nodes
 
@@ -251,7 +256,11 @@ turn the node off). A check costs about 5 µs. A validator that raises, is slow 
 never returns (`hard=True` stops waiting at the budget) is recorded and left out; it never breaks your program.
 Packages of validators attach through the entry point group `entail.nodes`; `entail-nodes-basics`
 (`workshop/basics`) has `json_object`, `max_chars`, `within_context` and `same_size`. Three small apps are in
-`examples/custom_nodes`.
+`examples/custom_nodes`. The package is not on PyPI either:
+
+```bash
+pip install "git+https://github.com/wwoosshh/entail@v2.0.0#subdirectory=workshop/basics"
+```
 
 entail does not sandbox a DLC or a validator: it is code in your program's process, with its rights. It keeps them
 from breaking the run and from changing the core's rules; which code runs is your choice of what to install and list.

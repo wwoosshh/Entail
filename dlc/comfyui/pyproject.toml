@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [{ name = "wwoosshh" }]
 # entail-ai is the core this attaches to; ComfyUI is not a pip package, so it is not listed.
-dependencies = ["entail-ai>=1.3"]
+dependencies = ["entail-ai>=2.0"]
 
 [project.urls]
 Homepage = "https://github.com/wwoosshh/entail"

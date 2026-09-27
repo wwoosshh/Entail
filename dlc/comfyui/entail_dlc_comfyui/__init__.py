@@ -8,7 +8,7 @@ leaves it out.
 """
 name = "comfyui"
 version = "0.1.0"
-requires = ">=1.3,<3"                  # the entail core versions it works with
+requires = ">=2.0,<3"                  # the entail core versions it works with
 engines = {"comfyui": "0.34.1"}        # where the defect and the repair were measured
 targets = {
     "comfy.model_sampling": ["entail_dlc_comfyui.repair:install_schedule_record"],

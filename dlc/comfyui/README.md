@@ -9,8 +9,10 @@ Until entail 1.3 this repair lived in the core (`entail/adapters/comfyui_repair.
 engine-specific repair: engine-specific checks and repairs are DLCs, separate packages that attach through the entry
 point group `entail.dlc`.
 
+It is not on PyPI; it installs from entail's repository, with entail 2.0 or later as the core it attaches to:
+
 ```bash
-pip install entail-dlc-comfyui
+pip install "git+https://github.com/wwoosshh/entail@v2.0.0#subdirectory=dlc/comfyui"
 ```
 
 With `ENTAIL=load`, entail finds it and installs the repair when ComfyUI's modules are imported. `entail doctor` lists

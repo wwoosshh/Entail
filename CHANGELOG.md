@@ -1,10 +1,10 @@
 # Changelog
 
-## 2.0.0 (not released)
+## 2.0.0
 
-entail 2.0: a local platform that manages the stability of an AI project (ROADMAP product track P0-P6) - the checks
-of 1.3.0 with two fixes, and around them `entail serve`, two safety modes, official DLCs and custom nodes. The version
-on PyPI is still 1.3.0.
+Released 2026-09-28. entail 2.0: a local platform that manages the stability of an AI project (ROADMAP product track
+P0-P6) - the checks of 1.3.0 with two fixes, and around them `entail serve`, two safety modes, official DLCs and
+custom nodes. The DLC and the workshop package are not on PyPI; they install from this repository (below).
 
 **Measured for this release** (one RTX 4070 Ti; the research workspace's `testbed/results/p6/SUMMARY.md`)
 - 102 healthy runs (38 models on transformers, vLLM and SGLang): exactly the decisions of 1.3.0's frozen code - no
@@ -39,10 +39,12 @@ on PyPI is still 1.3.0.
   slow (50 ms by default) or returns something else never breaks the program. Workshop packages of validators
   attach through the entry point group `entail.nodes` (`ENTAIL_NODES=off`, or a list); `workshop/basics`
   (`entail-nodes-basics`) is the first, and `examples/custom_nodes` has three small apps.
+  `pip install "git+https://github.com/wwoosshh/entail@v2.0.0#subdirectory=workshop/basics"`
 
 **Changed**
 - The repair of ComfyUI's own defect (Comfy-Org/ComfyUI#16490) left the core: it is the official DLC
   `entail-dlc-comfyui` (`dlc/comfyui` in this repository). Without it, entail no longer repairs that defect.
+  `pip install "git+https://github.com/wwoosshh/entail@v2.0.0#subdirectory=dlc/comfyui"`
 
 **Fixed**
 - The start-up path check counts a log-probability that is not a finite number as a disagreement (`paths_disagree`,

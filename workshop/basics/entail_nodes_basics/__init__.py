@@ -14,7 +14,7 @@ from entail import nodes
 
 name = "basics"
 version = "0.1.0"
-requires = ">=1.3,<3"
+requires = ">=2.0,<3"
 
 
 def json_object(value, keys=()):
