@@ -1,8 +1,11 @@
 """Adapter v2 for SGLang's server arguments: where the two safety modes turn an optimization off (LIBRARY_DESIGN.md
 13.6; ROADMAP product track P3).
 
-  hook         sglang.srt.server_args.ServerArgs.__post_init__: the arguments the Engine and the server are built
-               from, before SGLang derives anything from them.
+  hook         sglang.srt.server_args.ServerArgs.resolve_once (0.5.20): the arguments the Engine and the server are
+               built from, just before SGLang resolves them - resolution seals the record, and a child process gets
+               it resolved already. ServerArgs is a msgspec Struct there: its __post_init__ is empty and is looked up
+               when the class is made, so replacing it later is never called (found live, P3). Versions without
+               resolve_once (a dataclass whose __post_init__ resolves) are hooked at __post_init__.
   read_choice  the configuration's key, and which optimizations of data/safe_mode.json these arguments leave on
   handles      safe_mode: set the options that turn one off
 safe_mode decides what to turn off. The selective safe path needs the engine's path check, which on SGLang runs only
@@ -19,7 +22,7 @@ _ORIG = {}
 
 
 def hooks():
-    return [Hook("sglang.srt.server_args.ServerArgs.__post_init__", "start")]
+    return [Hook("sglang.srt.server_args.ServerArgs.resolve_once", "start")]
 
 
 def _version():
@@ -66,31 +69,47 @@ def _decide(args):
     return decisions
 
 
+def _unresolved(args) -> bool:
+    return not getattr(args, "_resolution_finished", False) and not getattr(args, "_resolution_failed", False)
+
+
 def install():
     try:
         from sglang.srt.server_args import ServerArgs
     except ImportError:
         return 0
-    if "post_init" in _ORIG:
+    if _ORIG:
         return 0
-    orig = _ORIG["post_init"] = ServerArgs.__post_init__
+    if hasattr(ServerArgs, "resolve_once"):
+        orig = _ORIG["resolve_once"] = ServerArgs.resolve_once
 
-    def __post_init__(self):
+        def resolve_once(self, *args, **kwargs):
+            if core.mode() in ("load", "debug") and _unresolved(self):
+                load.safely(BOUNDARY, CONSUMER, "SafeMode", lambda: _decide(self))
+            return orig(self, *args, **kwargs)
+
+        ServerArgs.resolve_once = resolve_once
+        return 1
+    orig = _ORIG["__post_init__"] = ServerArgs.__post_init__
+
+    def __post_init__(self, *args, **kwargs):
         if core.mode() in ("load", "debug"):
             load.safely(BOUNDARY, CONSUMER, "SafeMode", lambda: _decide(self))
-        return orig(self)
+        return orig(self, *args, **kwargs)
 
     ServerArgs.__post_init__ = __post_init__
     return 1
 
 
 def uninstall():
-    if "post_init" in _ORIG:
-        from sglang.srt.server_args import ServerArgs
+    if not _ORIG:
+        return 0
+    from sglang.srt.server_args import ServerArgs
 
-        ServerArgs.__post_init__ = _ORIG.pop("post_init")
-        return 1
-    return 0
+    for name, fn in list(_ORIG.items()):
+        setattr(ServerArgs, name, fn)
+        _ORIG.pop(name)
+    return 1
 
 
 def stats():

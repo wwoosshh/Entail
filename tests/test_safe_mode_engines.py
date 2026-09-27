@@ -72,6 +72,15 @@ def test_sglang_has_every_option():
     have, lack = sglang_safe.read_options(stand_in)
     assert not lack, f"SGLang {sglang.__version__} lacks {lack}: data/safe_mode.json needs this version's options"
     assert set(have) == set(safe_mode.features("sglang")), have
+    # the hook is a method SGLang calls: replacing a msgspec Struct's __post_init__ after the class is made does
+    # nothing, so this version must have resolve_once (or be a dataclass, whose __post_init__ is looked up per call)
+    assert hasattr(ServerArgs, "resolve_once") or dataclasses.is_dataclass(ServerArgs), "no hook this adapter can use"
+    try:
+        assert sglang_safe.install() == 1
+        hooked = "resolve_once" if hasattr(ServerArgs, "resolve_once") else "__post_init__"
+        assert getattr(ServerArgs, hooked).__name__ == hooked and hooked in sglang_safe._ORIG
+    finally:
+        sglang_safe.uninstall()
 
 
 if __name__ == "__main__":
