@@ -55,6 +55,12 @@ def test_the_node_table_is_whole():
 def test_every_known_boundary_goes_to_its_node():
     wrong = {b: (graph.node_of(b), want) for b, want in KNOWN.items() if graph.node_of(b) != want}
     assert not wrong, wrong
+    # no name is taken by two nodes' patterns (P1 evaluation: an overlap resolved by order hides a pattern that is
+    # too wide); the catch-all "other" aside
+    both = {b: hits for b in KNOWN
+            for hits in [[n["id"] for n in graph.model()["nodes"] if n["id"] != "other"
+                          and any(p.match(b) for p in n["compiled"])]] if len(hits) > 1}
+    assert not both, both
     assert graph.engine_of("load:vllm.attention") == "vllm" and graph.engine_of("kernel:triton") is None
 
 

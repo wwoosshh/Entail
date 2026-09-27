@@ -10,7 +10,7 @@
     {"id": "rotary", "flow": "llm", "step": 4, "ko": "어텐션·회전", "en": "Attention and rotary",
      "patterns": ["^load:[^.]+\\.config\\.rope", "^load:[^.]+\\.(attention|paged_attention|rotary_pairing)"]},
     {"id": "config", "flow": "llm", "step": 1, "ko": "모델 파일과 설정", "en": "Model files and config",
-     "patterns": ["^load:(transformers|vllm|sglang)\\.(config|model_config|generation_config)"]},
+     "patterns": ["^load:(transformers|vllm|sglang)\\.(config(?!\\.rope)|model_config|generation_config)"]},
     {"id": "tokenizer", "flow": "llm", "step": 2, "ko": "토크나이저", "en": "Tokenizer",
      "patterns": ["^load:[^.]+\\.tokenizer", "^load:[^.]+\\.input_processor"]},
     {"id": "weights", "flow": "llm", "step": 3, "ko": "가중치 적재", "en": "Weight loading",
