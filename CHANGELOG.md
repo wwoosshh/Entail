@@ -1,8 +1,20 @@
 # Changelog
 
-## Unreleased
+## 2.0.0 (not released)
 
-Toward entail 2.0, a local platform that manages the stability of an AI project (ROADMAP product track P0-P6).
+entail 2.0: a local platform that manages the stability of an AI project (ROADMAP product track P0-P6) - the checks
+of 1.3.0 with two fixes, and around them `entail serve`, two safety modes, official DLCs and custom nodes. The version
+on PyPI is still 1.3.0.
+
+**Measured for this release** (one RTX 4070 Ti; the research workspace's `testbed/results/p6/SUMMARY.md`)
+- 102 healthy runs (38 models on transformers, vLLM and SGLang): exactly the decisions of 1.3.0's frozen code - no
+  run broken, the same six real tokenizer differences reported, no unbacked repair, outputs the same in 97 of 98.
+- Requests are 0.8-1.2% slower with entail on (vLLM 0.30, Qwen3-4B, CUDA graphs), and no slower while `entail serve`
+  reads the records.
+- Load: the median share is 9.0%, above the 5% target - mostly vLLM's start-up path check (`ENTAIL_NO_PATHS=1`).
+- The page points at the first broken node and why in 12 of 12 planted-fault workflows; it read back the 114
+  launches of the healthy runs without an error.
+- A wheel installed with no index brings in nothing but entail; `entail serve` answers with its page.
 
 **Added**
 - `entail serve`: a local web server (127.0.0.1 only, the standard library) that shows a project's runs from the
