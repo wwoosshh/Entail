@@ -40,8 +40,12 @@ run goes on (it stops only if you ask it to); said to be "unknown" when nobody d
 default stand in silently. The name is the logical sense of *entail*: what a checkpoint declares must entail what
 the engine executes. (ent·**AI**·**L**: an AI library.)
 
-> **Status: 1.3.0, measured on one machine.** Everything below was measured on the engines and
-> versions under [Tested with](#tested-with), on one RTX 4070 Ti. The evaluation is summarised under
+> **Status: 2.0.0 on this branch (the version on PyPI is 1.3.0), measured on one machine.** 2.0 adds the
+> platform - `entail serve`, two safety modes, official DLCs and custom nodes ([The platform](#the-platform-20)) -
+> around the same checks: on the 102 healthy runs it made exactly the decisions 1.3.0's frozen code made (no run
+> broken, the same six real tokenizer differences reported), requests cost 0.8-1.2% more with entail on, with or
+> without `entail serve` reading the records, and a wheel installed with no index brings in nothing but entail.
+> Everything below was measured on the engines and versions under [Tested with](#tested-with), on one RTX 4070 Ti. The evaluation is summarised under
 > [How it was measured](#how-it-was-measured), and what it found missing under [Known gaps](#known-gaps).
 > **What it is today:** a light pre-deployment check. It reads what model files declare, holds the engine's own
 > kernels, paths and parsers against references where a declaration lives only in code, repairs the classes it
@@ -157,6 +161,95 @@ vLLM and SGLang run the model in processes they start themselves. `pip install` 
 `entail-autoinstall.pth`, into site-packages; Python reads it at every start-up. Its single line checks the
 environment and does nothing unless `ENTAIL` is set. `entail hook status|install|uninstall` shows or manages it
 (an editable install does not place it — run `entail hook install`).
+
+## The platform (2.0)
+
+entail 2.0 is a local platform that manages the stability of an AI project: the checks above, a page that shows
+where meaning held and where it broke, two safety modes, and checks you attach and detach by node - official DLCs for
+an engine, custom nodes for your own code. Everything stays on your machine; the core still has no dependencies.
+
+### See your runs: `entail serve`
+
+```bash
+ENTAIL=load python your_app.py        # (or vllm serve ..., ComfyUI ...) writes entail_logs/ as before
+entail serve --open                   # http://127.0.0.1:8765/ - this machine only
+```
+
+The page shows each launch as a workflow of nodes (model files and config, tokenizer, weights, attention and
+rotary, the engine's self-check, request, cache, kernels, response; checkpoint, prediction, VAE and LoRA for
+images; your own code), each in its state - passed, resolved, broken, stopped, or not decided (`unknown`,
+`unchecked`, shown apart from a break). A banner names the node that first broke; a node shows what was declared,
+what the consumer chose, the rule, the repair and why. New record lines update the page live. The server reads the
+record files from a process of its own: it adds nothing to the engine's cost.
+
+- On planted faults (M7.3's eleven and a healthy run) the page named the same place the program located in process
+  in 12 of 12 - 9 from the records alone, 3 through the diagnosis mode's `located` lines.
+- It is bound to 127.0.0.1 and refuses a request whose Host is not its own. It writes two files of the log folder
+  and nothing else (the safety mode of the next start, and which custom nodes are off); a write needs the token it
+  prints at start (and puts in its own page; a new one after each write) and an Origin that is itself.
+
+### Two safety modes
+
+`ENTAIL_SAFE` (or the page's selector, which writes `entail_logs/safe_mode.json` for the next start):
+
+- **auto** (default) - *the selective safe path.* At start the engine's own paths are held against each other (vLLM:
+  decode against a fresh prefill, alone against batched, cold against a prefix-cache hit). When they disagree, the
+  next starts of that configuration turn the optimizations the disagreement points at off, one per start, until the
+  paths agree - that one is the cause and stays off - or none is left (said once as broken). Nothing stops: the run
+  that found it goes on as it was.
+- **all** - *the explicit safe mode.* Every optimization the engine declares does not change results is off (vLLM:
+  CUDA graphs and torch.compile, the prefix cache, speculative decoding, custom kernels - custom ops and the IR ops'
+  kernel priority; SGLang: CUDA graphs, the radix cache, speculative decoding). If a fault stays, entail says the
+  cause is outside them; if it went away, that it was inside them.
+- **off** - neither.
+
+Measured on vLLM 0.30: the two configurations whose paths disagreed (Qwen3.5-4B-NVFP4 and Nemotron-3-Nano-4B with
+n-gram speculative decoding) agreed again at the second start, speculative decoding named the cause (throughput
+0.775x on Nemotron, 1.318x on Qwen3.5-NVFP4, where speculation had been a loss in eager mode). Planted faults: the
+first try called a fault in vLLM's RMSNorm kernel "outside" (that kernel is chosen by the IR ops' priority, which the
+table did not yet turn); with the table fixed, 3 of 3 were told apart correctly, and in a pre-registered replication
+on another model, 3 of the 3 the path check could see (one planted fault was too small for it). The self-check at start costs 1.9-7.7 s on those models (9-26% of the
+load); `ENTAIL_NO_PATHS=1` turns it off.
+
+### Official DLCs
+
+Engine-specific checks and repairs are packages outside the core, found through the entry point group `entail.dlc`
+and installed by the core the way it installs its own adapters (a failure is recorded, and the program goes on).
+The first is `entail-dlc-comfyui` (`dlc/comfyui`), the repair of ComfyUI's own defect #16490, which lived in the core
+until 1.3. With it, M6's measurement gave 12 of 12 images pixel-equal to the core's repair of 1.3; without it the
+leak is back; in two normal workflows it changed no image and said nothing. `ENTAIL_DLC=off` leaves every DLC out,
+`ENTAIL_DLC=name,name` attaches only those (the rest are not even imported).
+
+### Custom nodes
+
+Put a check of your own on a point of your program:
+
+```python
+import json
+from entail import nodes
+
+@nodes.validator("json_object")
+def json_object(value, keys=()):
+    try:
+        obj = json.loads(value)
+    except ValueError as e:
+        return nodes.broken(f"not JSON ({e})")
+    missing = [k for k in keys if k not in obj]
+    return nodes.broken(f"missing keys {missing}") if missing else nodes.ok()
+
+@nodes.watch("app.answer", json_object, keys=("title", "body"))   # checks what ask() returns
+def ask(question): ...
+```
+
+What a validator finds is one of entail's decisions (recorded, shown as the node "app.answer" on the page, which can
+turn the node off). A check costs about 5 µs. A validator that raises, is slow (50 ms by default; `budget_ms=`) or
+never returns (`hard=True` stops waiting at the budget) is recorded and left out; it never breaks your program.
+Packages of validators attach through the entry point group `entail.nodes`; `entail-nodes-basics`
+(`workshop/basics`) has `json_object`, `max_chars`, `within_context` and `same_size`. Three small apps are in
+`examples/custom_nodes`.
+
+entail does not sandbox a DLC or a validator: it is code in your program's process, with its rights. It keeps them
+from breaking the run and from changing the core's rules; which code runs is your choice of what to install and list.
 
 ## What it does
 
@@ -484,6 +577,9 @@ For 1.0 every measurement of the development milestones was run again on the fin
 | `ENTAIL_SOURCE` | `1` | also compare loaded weights with the checkpoint file (vLLM, a little I/O at start-up) |
 | `ENTAIL_NO_PATHS` | `1` | vLLM: leave out the start-up comparison of the engine's own paths (most of entail's load cost there) |
 | `ENTAIL_PATHS` | `1` | SGLang: run the start-up comparison of the engine's own paths (off by default: its probes would be SGLang's first prefills) |
+| `ENTAIL_SAFE` | `auto` (default), `all`, `off` | the safety modes: `auto` narrows a disagreement of the engine's own paths to one optimization over the next starts; `all` turns every optimization the engine declares result-neutral off; unset, `entail_logs/safe_mode.json` (the page's selector) decides |
+| `ENTAIL_DLC` | `off`, or names | official DLCs: all installed ones attach unless `off`; a list attaches only those (the rest are not imported) |
+| `ENTAIL_NODES` | `off`, or names | custom nodes: `off` runs none; a list names the workshop packages that may attach. One node is turned off from the page (`entail_logs/nodes.json`) |
 | `ENTAIL_MANIFESTS` | folders, separated by `:` (`;` on Windows) | where to look for manifests (`<sha256>.json`) of model files that do not declare what they mean. A file is hashed only when a manifest could be for it, and its hash is kept in `entail_hashes.json` in the first folder |
 
 ## Tested with
