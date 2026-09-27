@@ -39,9 +39,11 @@ def table() -> dict:
     return _TABLE
 
 
-def features(engine: str) -> Dict[str, Tuple[str, object]]:
-    """feature -> (the engine option that turns it off, the value that does), for one engine."""
-    return {f: (spec["option"], spec["safe"]) for f, spec in table()["engines"].get(engine, {}).items()}
+def features(engine: str) -> Dict[str, List[Tuple[str, object]]]:
+    """feature -> [(an engine option that turns it off, the value that does), ...], for one engine: the table's
+    option first, then its 'also' (the feature is off only when every one of them is)."""
+    return {f: [(spec["option"], spec["safe"])] + [(a["option"], a["safe"]) for a in spec.get("also", [])]
+            for f, spec in table()["engines"].get(engine, {}).items()}
 
 
 def mode() -> str:
@@ -119,8 +121,8 @@ def plan(engine: str, key: str, enabled: Dict[str, bool]) -> List[Tuple[str, str
 
 
 def decisions(engine: str, boundary: str, consumer: str, items: Sequence[Tuple[str, str]], where: str) -> list:
-    """One resolved decision per optimization turned off, for the adapter's handle `safe_mode` (target: the option
-    and the value that turns it off)."""
+    """One resolved decision per optimization turned off, for the adapter's handle `safe_mode` (target: the options
+    and the values that turn it off, [(option, value), ...])."""
     from .contracts import RULES, Contract, Decision, Verdict
     from .facts import Certainty, Fact, SafeMode, Source
 
@@ -128,7 +130,7 @@ def decisions(engine: str, boundary: str, consumer: str, items: Sequence[Tuple[s
     contract = Contract(boundary, consumer, ("SafeMode",), ("SafeMode",))
     out = []
     for feature, why in items:
-        option, safe = names[feature]
+        options = names[feature]
         source = Source("user", "ENTAIL_SAFE=all") if why == "all" else \
             Source("probe", f"{STORE}: the engine's paths disagreed with {feature} on")
         declared = Fact("SafeMode", SafeMode(feature, False, why), source, Certainty.DECLARED)
@@ -136,8 +138,9 @@ def decisions(engine: str, boundary: str, consumer: str, items: Sequence[Tuple[s
         note = ("the explicit safe mode: a fault that stays with every such optimization off is outside them"
                 if why == "all" else "the selective safe path: this configuration's paths disagreed with it on")
         out.append(Decision(contract, "SafeMode", Verdict.RESOLVED, RULES["safe_mode" if why == "all" else "safe_path"],
-                            declared=declared, chosen=chosen, resolution=f"{option} = {safe!r}", handle="safe_mode",
-                            target=(option, safe), note=note))
+                            declared=declared, chosen=chosen,
+                            resolution="; ".join(f"{option} = {safe!r}" for option, safe in options),
+                            handle="safe_mode", target=tuple(options), note=note))
     return out
 
 

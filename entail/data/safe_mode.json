@@ -1,6 +1,6 @@
 {
-  "_about": "The two safety modes' table (LIBRARY_DESIGN.md 13.6; ROADMAP product track P3). 'engines': per engine, the optimizations it declares do not change results, the engine option that turns each off and the value that does, with where the engine says so. 'candidates': which optimizations a disagreement between two of the engine's own paths points at (path_contract's pairs), in the order the selective safe path tries them - one per start.",
-  "version": 1,
+  "_about": "The two safety modes' table (LIBRARY_DESIGN.md 13.6; ROADMAP product track P3). 'engines': per engine, the optimizations it declares do not change results, the engine option that turns each off and the value that does ('also': more options that must be off too for the optimization to be off), with where the engine says so. 'candidates': which optimizations a disagreement between two of the engine's own paths points at (path_contract's pairs), in the order the selective safe path tries them - one per start.",
+  "version": 2,
   "candidates": {
     "decode_prefill": ["speculative_decoding", "cuda_graphs"],
     "alone_batched": ["cuda_graphs", "custom_kernels"],
@@ -15,7 +15,12 @@
       "speculative_decoding": {"option": "speculative_config", "safe": null,
         "evidence": "vLLM 0.30 engine/arg_utils.py EngineArgs.speculative_config (None: no draft tokens; rejection sampling keeps the target model's distribution)"},
       "custom_kernels": {"option": "compilation_config.custom_ops", "safe": ["none"],
-        "evidence": "vLLM 0.30 config/compilation.py CompilationConfig.custom_ops: 'none' to disable all custom ops, each op then runs its forward_native definition"}
+        "also": [
+          {"option": "ir_op_priority.rms_norm", "safe": ["native"]},
+          {"option": "ir_op_priority.fused_add_rms_norm", "safe": ["native"]},
+          {"option": "ir_op_priority.gelu_and_mul_sparse", "safe": ["native"]}
+        ],
+        "evidence": "vLLM 0.30 config/compilation.py CompilationConfig.custom_ops: 'none' to disable all custom ops, each op then runs its forward_native definition. The IR ops choose their kernel apart from that: config/kernel.py IrOpPriorityConfig (rms_norm, fused_add_rms_norm, gelu_and_mul_sparse); platforms/cuda.py get_default_ir_op_priority puts vllm_c (triton for gelu_and_mul_sparse) before native when not compiling; model_executor/layers/layernorm.py RMSNorm.forward_cuda calls forward_native, which calls the IR op, so custom_ops alone leaves RMSNorm on its kernel; a user's priority comes first and the platform's is appended (KernelConfig.set_platform_defaults); 'native' is the op's definition (ir/op.py register_op). Found by the S9 measurement (P3), 2026-09-28."}
     },
     "sglang": {
       "cuda_graphs": {"option": "disable_cuda_graph", "safe": true,

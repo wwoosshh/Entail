@@ -118,10 +118,15 @@ def test_nothing_to_turn_off_is_said_once_and_changes_nothing():
         assert safe_mode.load_store()["k3"]["status"] == "outside" and safe_mode.plan("vllm", "k3", ALL_ON) == []
 
 
+def _ir():
+    return SimpleNamespace(rms_norm=[], fused_add_rms_norm=[], gelu_and_mul_sparse=[])
+
+
 def _vllm_args():
     return SimpleNamespace(model="/m/qwen", dtype="auto", quantization=None, tensor_parallel_size=1,
                            enforce_eager=False, enable_prefix_caching=None, speculative_config={"method": "ngram"},
-                           compilation_config=SimpleNamespace(custom_ops=[]))
+                           compilation_config=SimpleNamespace(custom_ops=[]), ir_op_priority=_ir(),
+                           kernel_config=SimpleNamespace(ir_op_priority=_ir()))
 
 
 def test_the_vllm_adapter_turns_the_options_off():
@@ -131,8 +136,12 @@ def test_the_vllm_adapter_turns_the_options_off():
         assert [d.verdict for d in ds] == [Verdict.RESOLVED] * 4 and ds[0].rule == RULES["safe_mode"]
         assert args.enforce_eager is True and args.enable_prefix_caching is False
         assert args.speculative_config is None and args.compilation_config.custom_ops == ["none"]
+        # vLLM 0.30 chooses RMSNorm's kernel by the IR op priority, not by custom_ops: both are turned
+        assert args.ir_op_priority.rms_norm == ["native"] and args.ir_op_priority.gelu_and_mul_sparse == ["native"]
+        assert args.kernel_config.ir_op_priority.rms_norm == []           # the user did not set it there
         rows = [r for r in e.records() if r.get("boundary") == "start:vllm.safe_mode"]
         assert len(rows) == 4 and rows[0]["resolution"].startswith("enforce_eager") and rows[0]["v"] == 2
+        assert "ir_op_priority.fused_add_rms_norm = ['native']" in rows[3]["resolution"], rows[3]
         assert graph.node_of("start:vllm.safe_mode") == "self_check"
         assert safe_mode.LAST["vllm"]["off"] == ["cuda_graphs", "prefix_cache", "speculative_decoding",
                                                  "custom_kernels"]
@@ -145,6 +154,22 @@ def test_the_vllm_adapter_turns_the_options_off():
         ds = quiet(vllm_safe._decide, args)
         assert len(ds) == 1 and ds[0].rule == RULES["safe_path"] and args.speculative_config is None
         assert args.enforce_eager is False and args.compilation_config.custom_ops == []   # the rest untouched
+
+
+def test_a_kernel_choice_is_on_until_every_option_of_it_is_off():
+    with Env("all"):
+        args = _vllm_args()
+        args.compilation_config.custom_ops = ["none"]        # custom ops off, the IR ops still on their kernels
+        assert vllm_safe.read_choice(args)[1]["custom_kernels"] is True
+        args.kernel_config.ir_op_priority.rms_norm = ["vllm_c"]   # the user chose it in the kernel config
+        ds = quiet(vllm_safe._decide, args)
+        assert [d.chosen.value.feature for d in ds] == ["cuda_graphs", "prefix_cache", "speculative_decoding",
+                                                        "custom_kernels"]
+        # the definition goes first where the user put the priority (vLLM refuses one given in both places)
+        assert args.kernel_config.ir_op_priority.rms_norm == ["native", "vllm_c"]
+        assert args.ir_op_priority.rms_norm == [] and args.ir_op_priority.fused_add_rms_norm == ["native"]
+        assert vllm_safe.read_choice(args)[1]["custom_kernels"] is False
+        assert quiet(vllm_safe._decide, args) == []           # nothing left to turn off
 
 
 def test_the_sglang_adapter_turns_the_options_off():

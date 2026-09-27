@@ -4,7 +4,7 @@
   hook         sglang.srt.server_args.ServerArgs.__post_init__: the arguments the Engine and the server are built
                from, before SGLang derives anything from them.
   read_choice  the configuration's key, and which optimizations of data/safe_mode.json these arguments leave on
-  handles      safe_mode: set the option that turns one off
+  handles      safe_mode: set the options that turn one off
 safe_mode decides what to turn off. The selective safe path needs the engine's path check, which on SGLang runs only
 with ENTAIL_PATHS=1 (sglang_paths); the explicit safe mode (ENTAIL_SAFE=all) needs nothing else.
 """
@@ -34,11 +34,12 @@ def read_choice(args):
                                         "dtype": str(getattr(args, "dtype", "")),
                                         "quantization": str(getattr(args, "quantization", None)),
                                         "tp": getattr(args, "tp_size", 1)})
-    return key, {f: getattr(args, option, None) != safe for f, (option, safe) in safe_mode.features(engine).items()}
+    return key, {f: any(getattr(args, option, None) != safe for option, safe in options)
+                 for f, options in safe_mode.features(engine).items()}
 
 
 def handles(args=None):
-    return {"safe_mode": lambda target: setattr(args, target[0], target[1])}
+    return {"safe_mode": lambda target: [setattr(args, option, safe) for option, safe in target]}
 
 
 def _decide(args):

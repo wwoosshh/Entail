@@ -5,7 +5,8 @@ ROADMAP product track P3).
                server (AsyncEngineArgs) both turn into the engine's configuration, before any of it is built.
   read_choice  the configuration's key, and which optimizations of data/safe_mode.json these arguments leave on
                (an option whose value is not the value that turns it off)
-  handles      safe_mode: set the option that turns one off (a dotted path: compilation_config.custom_ops)
+  handles      safe_mode: set the options that turn one off (dotted paths: compilation_config.custom_ops;
+               ir_op_priority.<op> puts the op's definition first, in the kernel config when the user set it there)
 safe_mode decides what to turn off (ENTAIL_SAFE; the selective safe path's store); vllm_paths tells it what the
 engine's paths came to.
 """
@@ -48,12 +49,33 @@ def _set(obj, path, value):
         setattr(obj, last, value)
 
 
-def _on(current, safe):
+def _ir(args, path):
+    """(where an IR op's priority list is, the list): the kernel config's when the user set it there (vLLM refuses a
+    priority given in both places), else the engine arguments' own."""
+    op = path.split(".", 1)[1]
+    inner = _get(args, f"kernel_config.ir_op_priority.{op}")
+    if inner:
+        return f"kernel_config.ir_op_priority.{op}", list(inner)
+    return path, list(_get(args, path) or [])
+
+
+def _on(args, option, safe):
+    if option.startswith("ir_op_priority."):   # off when the definition comes first; vLLM appends its own after
+        return _ir(args, option)[1][:1] != safe[:1]
+    current = _get(args, option)
     if safe is False:          # enable_prefix_caching: None is the engine's default, which is on
         return current is not False
     if isinstance(safe, list):
         return list(current or []) != safe
     return current != safe
+
+
+def _turn(args, option, safe):
+    if option.startswith("ir_op_priority."):
+        where, current = _ir(args, option)
+        _set(args, where, list(safe) + [p for p in current if p not in safe])
+    else:
+        _set(args, option, list(safe) if isinstance(safe, list) else safe)
 
 
 def read_choice(args):
@@ -68,12 +90,12 @@ def read_choice(args):
                                         "dtype": str(getattr(args, "dtype", "")),
                                         "quantization": str(getattr(args, "quantization", None)),
                                         "tp": getattr(args, "tensor_parallel_size", 1)})
-    return key, {f: _on(_get(args, option), safe) for f, (option, safe) in safe_mode.features(engine).items()}
+    return key, {f: any(_on(args, option, safe) for option, safe in options)
+                 for f, options in safe_mode.features(engine).items()}
 
 
 def handles(args=None):
-    return {"safe_mode": lambda target: _set(args, target[0], list(target[1]) if isinstance(target[1], list)
-                                             else target[1])}
+    return {"safe_mode": lambda target: [_turn(args, option, safe) for option, safe in target]}
 
 
 def _decide(args):
