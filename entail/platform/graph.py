@@ -23,6 +23,9 @@ from .. import record
 DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "nodes.json")
 STATES = ("none", "pass", "resolved", "unchecked", "unknown", "broken", "refused")   # better to worse
 RANK = {s: i for i, s in enumerate(STATES)}
+# A launch's own state: a node whose checks were all skipped (a request boundary in a run that sent no chat request)
+# does not make a launch whose other nodes passed look unchecked; it counts only when nothing else was decided
+RUN_RANK = {"none": 0, "unchecked": 1, "pass": 2, "resolved": 3, "unknown": 4, "broken": 5, "refused": 6}
 _MODEL = None
 _NODE_OF: Dict[str, str] = {}
 
@@ -188,7 +191,8 @@ def graph(lines: List[dict]) -> dict:
     stamps = [t for t in times if isinstance(t, (int, float))]
     worst = "none"
     for n in nodes:
-        worst = _worse(n["state"], worst)
+        if RUN_RANK[n["state"]] > RUN_RANK[worst]:
+            worst = n["state"]
     # what the program itself said, in process, about where the fault lies (diagnose: it knew whether the output was
     # wrong, and which layers it compared), the latest such line
     said_located = [o["located"] for o in lines if isinstance(o.get("located"), dict)]

@@ -141,6 +141,17 @@ def test_an_image_launch_draws_the_image_flow():
     assert {n["id"]: n["state"] for n in g["nodes"]}["prediction"] == "resolved"
 
 
+def test_a_healthy_launch_with_a_skipped_node_reads_as_passed():
+    """P2 live check (vLLM, Qwen3-0.6B): an offline run sends no chat request, so the request boundary's checks are
+    all skipped; the node says so, but the launch reads as passed, not unchecked."""
+    lines = [{"run": "r", "pid": 1, "boundary": "load:vllm.attention", "verdict": "pass"},
+             {"run": "r", "pid": 1, "boundaries": {"request:vllm.chat_template": {"checks": 0, "skipped": 1}}}]
+    g = graph.graph(lines)
+    assert {n["id"]: n["state"] for n in g["nodes"]}["request"] == "unchecked" and g["state"] == "pass", g["state"]
+    only = graph.graph(lines[1:])
+    assert only["state"] == "unchecked"
+
+
 def test_what_the_program_located_in_process_is_kept():
     """diagnose writes a "located" line when the program knew the output was wrong (inside a layer, M7.3); the graph
     hands the latest one on, so the page can say what the records alone cannot."""
