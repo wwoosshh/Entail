@@ -22,7 +22,9 @@ different subset of (Llama 3, April 2024: config.json named one end, the model e
 Rotary.pairing; v9 (M18) Tokenization, KernelReference, Parse and Placeholder; v10 (M19 L3.3c) PathAgreement: what
 one request comes to along two of the engine's own paths that mean the same (decode against a fresh prefill, alone
 against batched, cold against a prefix-cache hit); v11 (product track P3) SafeMode: an optimization declared not to
-change results, and whether a safety mode turned it off. Each version only adds optional fields or whole classes, so an
+change results, and whether a safety mode turned it off; v12 (product track P5) Check: a property a developer declares a
+value must have at a point of their own project, decided by a custom node's validator. Each version only adds optional
+fields or whole classes, so an
 older fact is a newer fact with
 them open, and a fact written with an older version is still read (READABLE_VERSIONS); it may not state a field its
 version did not have (ADDED_IN).
@@ -34,8 +36,8 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Optional, Tuple
 
-VOCAB_VERSION = 11
-READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11})   # a later version only adds optional fields or classes; fields in ADDED_IN
+VOCAB_VERSION = 12
+READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12})   # a later version only adds optional fields or classes; fields in ADDED_IN
 ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("Template", "tool_call_format"): 3,
             ("Rotary", "low_freq_factor"): 4, ("Rotary", "high_freq_factor"): 4,
             ("Rotary", "beta_fast"): 6, ("Rotary", "beta_slow"): 6, ("Rotary", "attention_factor"): 6,
@@ -599,6 +601,25 @@ class SafeMode:
         _closed("SafeMode", "why", self.why, SAFE_REASONS)
 
 
+@dataclass(frozen=True)
+class Check:
+    """A custom node's check (v12, product track P5; LIBRARY_DESIGN.md 13.7): a property a developer declares a value
+    must have at a point of their own project, and what its validator found - a high-level check, outside the classes
+    the core decides itself. `check` names the validator ("json_object"), `holds` whether the value has the property
+    (None: the validator could not tell), `detail` the validator's own words for what was expected or seen."""
+    check: str
+    holds: Optional[bool] = None
+    detail: Optional[str] = None
+
+    def __post_init__(self):
+        if not isinstance(self.check, str) or not self.check:
+            raise ValueError(f"Check.check: expected the validator's name, got {self.check!r}")
+        if self.holds is not None and not isinstance(self.holds, bool):
+            raise ValueError(f"Check.holds: expected True, False or None, got {self.holds!r}")
+        if self.detail is not None and not isinstance(self.detail, str):
+            raise ValueError(f"Check.detail: expected a string or None, got {self.detail!r}")
+
+
 # --- not in the vocabulary ------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -642,14 +663,14 @@ VOCABULARY = {
     "Template": "PROPERTY", "Coverage": "MAPPING", "TokenType": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME",
     "Identity": "TIME", "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE", "KernelConfig": "LAYOUT",
     "Vocab": "MAPPING", "Stops": "MAPPING", "Tokenization": "MAPPING", "KernelReference": "PROPERTY",
-    "Parse": "MAPPING", "Placeholder": "FRAME", "PathAgreement": "PROPERTY", "SafeMode": "SPECIALIZATION",
+    "Parse": "MAPPING", "Placeholder": "FRAME", "PathAgreement": "PROPERTY", "SafeMode": "SPECIALIZATION", "Check": "PROPERTY",
 }
 _HERE = {"Layout": Layout, "Quantized": Quantized, "Rotary": Rotary, "Positions": Positions, "Valid": Valid,
          "ModelProps": ModelProps, "Prediction": Prediction, "LatentScale": LatentScale, "Template": Template,
          "TokenType": TokenType, "Reduction": Reduction, "Epoch": Epoch, "Identity": Identity, "Assumed": Assumed,
          "Origin": Origin, "KernelConfig": KernelConfig, "Vocab": Vocab, "Stops": Stops, "Tokenization": Tokenization,
          "KernelReference": KernelReference, "Parse": Parse, "Placeholder": Placeholder,
-         "PathAgreement": PathAgreement, "SafeMode": SafeMode}
+         "PathAgreement": PathAgreement, "SafeMode": SafeMode, "Check": Check}
 
 
 def vocabulary_class(name):

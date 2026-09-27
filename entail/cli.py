@@ -89,6 +89,15 @@ def doctor(_args):
         for module, entries in (info.get("targets") or {}).items():
             for e in entries:
                 print(f"    {e:46} after {module}")
+    from . import nodes
+
+    shops = nodes.packages() if os.environ.get("ENTAIL_NODES", "on") != "off" else []
+    print(f"workshop packages (entry point group {nodes.GROUP}; ENTAIL_NODES=off leaves them out):"
+          + ("" if shops else " none"))
+    for info in shops:
+        state = "attached" if info["attached"] else f"not attached: {info['why']}"
+        print(f"  {info.get('name') or info['entry_point']} {info.get('version', '?')}  ({info.get('dist')})  {state}"
+              + (f"  validators: {', '.join(info['validators'])}" if info.get("validators") else ""))
     return 0
 
 

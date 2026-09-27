@@ -20,6 +20,14 @@ Toward entail 2.0, a local platform that manages the stability of an AI project 
   (`entail/dlc.py`). The core checks the DLC's core range, installs its entries itself - a failure is recorded and the
   program goes on - and shows its nodes on the platform; `entail doctor` lists them; `ENTAIL_DLC=off` leaves them out.
 
+- Custom nodes (P5, `entail.nodes`): a developer's own high-level checks at points of their program - a validator
+  is a plain function (`nodes.ok()`, `nodes.broken(why)`, `nodes.unknown(why)`), placed with `nodes.check(...)` or
+  `@nodes.watch(...)`. What it finds is a core decision (fact `Check`, vocabulary v12) at `node:<node>/<validator>`,
+  shown as the node's own on the platform, which can turn a node off (`POST /api/nodes`). A validator that fails, is
+  slow (50 ms by default) or returns something else never breaks the program. Workshop packages of validators
+  attach through the entry point group `entail.nodes` (`ENTAIL_NODES=off`, or a list); `workshop/basics`
+  (`entail-nodes-basics`) is the first, and `examples/custom_nodes` has three small apps.
+
 **Changed**
 - The repair of ComfyUI's own defect (Comfy-Org/ComfyUI#16490) left the core: it is the official DLC
   `entail-dlc-comfyui` (`dlc/comfyui` in this repository). Without it, entail no longer repairs that defect.

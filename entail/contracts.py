@@ -127,6 +127,9 @@ RULES = {
                  "(the selective safe path, ENTAIL_SAFE=auto; one candidate per start until the paths agree)",
     "safe_path_outside": "every candidate optimization was turned off and the engine's paths still disagree: the "
                          "cause is outside them, so they are turned back on",
+    # custom nodes (product track P5): a developer's own high-level check at a point of their project
+    "node_check": "a custom node's validator: the value at this point of the program does not have the property the "
+                  "developer declared for it (the validator's words are in the note)",
     "kernel_layout_variant": "the kernel writes other values when a tensor it is handed is strided in its innermost "
                              "dimension than when the same values are laid out contiguously there: it reads the "
                              "tensor as if it were contiguous",

@@ -63,17 +63,31 @@ def reset_model() -> None:
 
 
 def node_of(boundary: str) -> str:
-    """The id of the node a boundary belongs to: the first node whose pattern matches it ("other" at the end takes
-    the rest)."""
+    """The id of the node a boundary belongs to: a custom node's own ("node:rag.answer/json_object" ->
+    "node:rag.answer", entail/nodes.py), else the first node whose pattern matches it ("other" at the end takes the
+    rest)."""
     found = _NODE_OF.get(boundary)
     if found is None:
-        found = next(n["id"] for n in model()["nodes"] if any(p.match(boundary) for p in n["compiled"]))
+        if boundary.startswith("node:"):
+            found = "node:" + boundary[5:].split("/", 1)[0]
+        else:
+            found = next(n["id"] for n in model()["nodes"] if any(p.match(boundary) for p in n["compiled"]))
         _NODE_OF[boundary] = found
     return found
 
 
+def _custom_spec(nid: str, i: int) -> dict:
+    """A custom node's place in the user-code flow: after the core's user-code node, in name order."""
+    name = nid[5:]
+    return {"id": nid, "flow": "user", "step": 1 + (i + 1) / 1000.0, "ko": name, "en": name, "custom": True,
+            "patterns": [], "compiled": []}
+
+
 def engine_of(boundary: str) -> Optional[str]:
-    """The engine a boundary's name speaks of ("load:vllm.attention" -> "vllm"), or None ("kernel:triton")."""
+    """The engine a boundary's name speaks of ("load:vllm.attention" -> "vllm"), or None ("kernel:triton"; a custom
+    node's "node:app.answer/json_object", which names a point of the program, not an engine)."""
+    if boundary.startswith("node:"):
+        return None
     rest = boundary.split(":", 1)[1] if ":" in boundary else ""
     return rest.split(".", 1)[0] if "." in rest else None
 
@@ -178,6 +192,9 @@ def graph(lines: List[dict]) -> dict:
         elif obj.get("said"):
             node(str(obj["said"]))["said"] += 1
     located = record.locate(rows, passes, layers, None, sorted(skipped))
+    # custom nodes (P5) come from the records: each gets a node in the user-code flow
+    custom = [_custom_spec(nid, i) for i, nid in enumerate(sorted(n for n in per_node if n.startswith("node:")))]
+    m = dict(m, nodes=list(m["nodes"]) + custom, by_id={**m["by_id"], **{c["id"]: c for c in custom}})
     # which flows a launch has: those of its nodes with data, not counting shared nodes (a Triton kernel names no
     # engine, so it must not bring the LLM flow into an image launch); a shared node joins the flows present, at the
     # end of those that are not its own, and brings its own flow only when nothing else is there
@@ -206,7 +223,7 @@ def graph(lines: List[dict]) -> dict:
             n = per_node.get(nid) or {"id": nid, "state": "none", "boundaries": set(), "verdicts": {}, "checks": 0,
                                        "passed": 0, "skipped": 0, "timed_calls": 0, "ms": 0.0, "said": 0}
             nodes.append(dict(n, boundaries=sorted(n["boundaries"]), ms=round(n["ms"], 3), flow=fl["id"],
-                              step=spec["step"], ko=spec["ko"], en=spec["en"]))
+                              step=spec["step"], ko=spec["ko"], en=spec["en"], custom=bool(spec.get("custom"))))
     stamps = [t for t in times if isinstance(t, (int, float))]
     worst = "none"
     for n in nodes:
@@ -247,9 +264,9 @@ def node_detail(lines: List[dict], node_id: str) -> dict:
         agg["checks"] += int(c.get("checks") or 0)
         agg["passed"] += sum((c.get("passed") or {}).values())
         agg["skipped"] += int(c.get("skipped") or 0) + int(c.get("deferred") or 0)
-    spec = model()["by_id"].get(node_id, {})
+    spec = model()["by_id"].get(node_id) or (_custom_spec(node_id, 0) if node_id.startswith("node:") else {})
     return {"id": node_id, "ko": spec.get("ko"), "en": spec.get("en"), "decisions": decisions,
-            "counts": per_boundary, "timing": timing, "said": said}
+            "counts": per_boundary, "timing": timing, "said": said, "custom": bool(spec.get("custom"))}
 
 
 def summaries(groups: Dict[str, List[dict]]) -> List[dict]:

@@ -41,6 +41,10 @@ h2.gap { margin-top: 18px; padding-top: 10px; border-top: 1px solid var(--line);
 .node { min-width: 150px; max-width: 170px; border: 2px solid var(--none); border-radius: 8px; padding: 8px;
         background: var(--panel); cursor: pointer; }
 .node.sel { box-shadow: 0 0 0 3px #1f232833; }
+.node.custom { background: #fbfaf5; }
+.node.off { opacity: 0.55; border-style: dashed; }
+.node .switch { margin-top: 6px; font: inherit; font-size: 11px; padding: 1px 8px; border-radius: 10px;
+                border: 1px solid var(--line); background: var(--panel); cursor: pointer; }
 .node .name { font-weight: 600; }
 .node .counts { font-size: 11px; color: var(--muted); margin-top: 4px; }
 .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px; color: #fff;

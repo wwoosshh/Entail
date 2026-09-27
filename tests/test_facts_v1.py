@@ -84,8 +84,8 @@ def test_the_envelope_checks_itself():
     assert f.kind == "PROPERTY" and f.vocab_version == VOCAB_VERSION and str(src).startswith("file: ")
     Fact("Prediction", None, src, Certainty.UNKNOWN)
     raises(lambda: Fact("Colour", Prediction("v"), src, Certainty.DECLARED), "unknown fact name 'Colour'")
-    raises(lambda: Fact("Prediction", Prediction("v"), src, Certainty.DECLARED, vocab_version=12),
-           "fact Prediction was written with vocabulary v12; this library reads v1, v2, v3")
+    raises(lambda: Fact("Prediction", Prediction("v"), src, Certainty.DECLARED, vocab_version=13),
+           "fact Prediction was written with vocabulary v13; this library reads v1, v2, v3")
     assert Fact("Prediction", Prediction("v"), src, Certainty.DECLARED, vocab_version=1).vocab_version == 1
     raises(lambda: Fact("Prediction", Prediction("v"), src, "declared"), "Fact.certainty: expected a Certainty")
     raises(lambda: Fact("Prediction", None, src, Certainty.DECLARED),

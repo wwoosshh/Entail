@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "entail-nodes-basics"
+version = "0.1.0"
+description = "A workshop package for entail's custom nodes: JSON objects, text length, context budget, image size"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "wwoosshh" }]
+dependencies = ["entail-ai>=1.3"]
+
+[project.urls]
+Homepage = "https://github.com/wwoosshh/entail"
+
+# entail finds workshop packages here (entail/nodes.py)
+[project.entry-points."entail.nodes"]
+basics = "entail_nodes_basics"
+
+[tool.setuptools]
+packages = ["entail_nodes_basics"]

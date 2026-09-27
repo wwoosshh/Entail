@@ -20,6 +20,7 @@ const FEATURES = {
   custom_kernels: "커스텀 커널", attention_kernels: "어텐션 커널",
 };
 let safe = { token: (document.querySelector('meta[name="entail-token"]') || {}).content || "", mode: null, file: "" };
+let customOff = new Set();      // custom nodes turned off (nodes.json; entail/nodes.py)
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -117,8 +118,10 @@ function renderGraph(g) {
       const n = g.nodes.find(x => x.id === id);
       if (!n) return;
       if (i > 0) row.append(el("span", "arrow", "→"));
-      const card = el("div", "node st-" + n.state + (current.node === id ? " sel" : ""));
-      card.append(el("div", "name", n.ko), el("div", "en", n.en), badge(n.state));
+      const off = n.custom && customOff.has(n.ko);
+      const card = el("div", "node st-" + n.state + (current.node === id ? " sel" : "") + (n.custom ? " custom" : "") +
+                      (off ? " off" : ""));
+      card.append(el("div", "name", n.ko), el("div", "en", n.custom ? "커스텀 노드 · custom node" : n.en), badge(n.state));
       const decided = Object.values(n.verdicts).reduce((a, b) => a + b, 0);
       const parts = ["판정 " + decided];
       if (n.checks) parts.push("검사 " + n.checks);
@@ -128,6 +131,14 @@ function renderGraph(g) {
       card.append(el("div", "counts", parts.join(" · ")));
       card.title = n.boundaries.join("\n") || "이 실행에서 판정한 경계가 없다";
       card.onclick = () => selectNode(id);
+      if (n.custom) {
+        const sw = el("button", "switch", off ? "켜기" : "끄기");
+        sw.type = "button";
+        sw.title = off ? "이 노드의 검사를 다시 켠다" : "이 노드의 검사를 끈다";
+        sw.onclick = (ev) => { ev.stopPropagation(); switchNode(n.ko, off); };
+        card.append(sw);
+        if (off) card.append(el("div", "counts", "꺼 둠: 검사하지 않는다"));
+      }
       row.append(card);
     });
     box.append(row);
@@ -239,6 +250,34 @@ function renderSafe(s) {
   }
 }
 
+async function loadNodes() {
+  try {
+    const d = await getJSON("/api/nodes");
+    const next = new Set(d.off);
+    const changed = next.size !== customOff.size || [...next].some(n => !customOff.has(n));
+    customOff = next;
+    if (changed && current.graph) renderGraph(current.graph);
+  } catch (e) { /* the next poll tries again */ }
+}
+
+async function switchNode(name, on) {
+  const ok = window.confirm("커스텀 노드 '" + name + "'의 검사를 " + (on ? "다시 켠다." : "끈다.") +
+    "\n\n돌고 있는 프로그램은 1초 안에 따른다. 바꾸는 파일: 기록 폴더의 nodes.json");
+  if (!ok) return;
+  let r, d = {};
+  try {
+    r = await fetch("/api/nodes", {
+      method: "POST", cache: "no-store", body: JSON.stringify({ node: name, on }),
+      headers: { "Content-Type": "application/json", "X-Entail-Token": safe.token },
+    });
+    d = await r.json();
+  } catch (e) { r = r || { ok: false, status: "?" }; }
+  if (!r.ok) { window.alert("바꾸지 못했다: " + (d.error || r.status)); return; }
+  safe.token = d.token;
+  customOff = new Set(d.off);
+  if (current.graph) renderGraph(current.graph);
+}
+
 async function loadSafe() {
   try { renderSafe(await getJSON("/api/safe-mode")); } catch (e) { /* the next poll tries again */ }
 }
@@ -281,4 +320,5 @@ legend();
 document.getElementById("safemode").onchange = changeSafe;
 loadRuns();
 loadSafe();
-setInterval(() => { loadRuns(); loadSafe(); }, 3000);
+loadNodes();
+setInterval(() => { loadRuns(); loadSafe(); loadNodes(); }, 3000);
