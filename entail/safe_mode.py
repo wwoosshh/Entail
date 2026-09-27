@@ -13,8 +13,10 @@ researcher's words, 2026-09-27: "일종의 윈도우의 안전모드부팅과 �
 The mode comes from ENTAIL_SAFE, else from safe_mode.json in the log folder ({"mode": ...}; the platform writes it),
 else "auto". What a mode turned off is a decision like any other (resolved, fact SafeMode, at start:<engine>.safe_mode)
 and what it found is said there too, so the platform shows both on the engine's self-check node. The selective safe
-path keeps its state per configuration in safe_paths.json in the log folder. Adapters read which of the options their
-engine was given and turn them with their handle; the rules are here.
+path keeps its state per configuration in safe_paths.json in the log folder; safe_last.json keeps what each
+configuration's paths came to at its last start with nothing turned off, so that the explicit safe mode can say a
+fault that went away was inside the optimizations (one that stays is outside them whatever came before). Adapters
+read which of the options their engine was given and turn them with their handle; the rules are here.
 """
 import hashlib
 import json
@@ -27,6 +29,7 @@ from . import record
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "safe_mode.json")
 MODES = ("off", "auto", "all")
 STORE = "safe_paths.json"
+LAST_ON = "safe_last.json"   # per configuration: its paths at the last start with nothing turned off
 _TABLE = None
 LAST: Dict[str, dict] = {}   # engine -> what this process's start asked for and turned off (the path check reads it)
 
@@ -70,13 +73,13 @@ def config_key(engine: str, parts: dict) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def _store_path() -> Optional[str]:
+def _store_path(name: str = STORE) -> Optional[str]:
     folder = record.log_dir()
-    return os.path.join(folder, STORE) if folder else None
+    return os.path.join(folder, name) if folder else None
 
 
-def load_store() -> dict:
-    path = _store_path()
+def load_store(name: str = STORE) -> dict:
+    path = _store_path(name)
     if not path:
         return {}
     try:
@@ -87,8 +90,8 @@ def load_store() -> dict:
         return {}
 
 
-def save_store(store: dict) -> None:
-    path = _store_path()
+def save_store(store: dict, name: str = STORE) -> None:
+    path = _store_path(name)
     if not path:
         return
     try:
@@ -167,10 +170,20 @@ def after_self_check(engine: str, disagreeing: Sequence[str], boundary: str, con
     ctx = LAST.get(engine)
     if not ctx:
         return []
+    seen = load_store(LAST_ON)
+    before = seen.get(ctx["key"])
+    if not ctx["off"]:          # the optimizations as the user gave them: what the paths came to
+        seen[ctx["key"]] = {"engine": engine, "model": ctx["model"], "disagree": list(disagreeing),
+                            "updated": time.time()}
+        save_store(seen, LAST_ON)
     if ctx["mode"] == "all":
         if disagreeing:
             load.say(boundary, f"every optimization {engine} declares does not change results is off, and its paths "
                                f"still disagree ({', '.join(disagreeing)}): the cause is outside them")
+        elif ctx["off"] and before and before.get("disagree"):
+            load.say(boundary, f"with every optimization {engine} declares does not change results off "
+                               f"({', '.join(ctx['off'])}), the paths agree; at this configuration's last start with "
+                               f"them on they disagreed ({', '.join(before['disagree'])}): the cause is inside them")
         return []
     if ctx["mode"] != "auto":
         return []

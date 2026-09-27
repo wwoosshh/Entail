@@ -111,6 +111,26 @@ def test_the_selective_path_gives_up_when_every_candidate_was_tried():
         assert quiet(safe_mode.after_self_check, "vllm", ["decode_prefill"], "start:vllm.safe_mode", "c", "w") == []
 
 
+def test_the_explicit_mode_says_inside_when_the_fault_went_away_and_outside_when_it_stayed():
+    with Env("off") as e:
+        safe_mode.started("vllm", "k4", ALL_ON, [])                     # the optimizations on: the paths disagree
+        assert quiet(safe_mode.after_self_check, "vllm", ["decode_prefill"], "start:vllm.safe_mode", "c", "w") == []
+        assert safe_mode.load_store(safe_mode.LAST_ON)["k4"]["disagree"] == ["decode_prefill"]
+        assert safe_mode.load_store() == {}                            # off: no search
+        os.environ["ENTAIL_SAFE"] = "all"
+        safe_mode.started("vllm", "k4", ALL_ON, ["cuda_graphs", "prefix_cache"])
+        quiet(safe_mode.after_self_check, "vllm", [], "start:vllm.safe_mode", "c", "w")
+        said = [r["text"] for r in e.records() if r.get("said") == "start:vllm.safe_mode"]
+        assert len(said) == 1 and "the cause is inside them" in said[0], said
+        assert safe_mode.load_store(safe_mode.LAST_ON)["k4"]["disagree"] == ["decode_prefill"]   # kept for later
+        safe_mode.started("vllm", "k5", ALL_ON, ["cuda_graphs"])        # nothing known before: nothing to say
+        quiet(safe_mode.after_self_check, "vllm", [], "start:vllm.safe_mode", "c", "w")
+        safe_mode.started("vllm", "k5", ALL_ON, ["cuda_graphs"])
+        quiet(safe_mode.after_self_check, "vllm", ["alone_batched"], "start:vllm.safe_mode", "c", "w")
+        said = [r["text"] for r in e.records() if r.get("said") == "start:vllm.safe_mode"]
+        assert len(said) == 2 and "the cause is outside them" in said[1], said
+
+
 def test_nothing_to_turn_off_is_said_once_and_changes_nothing():
     with Env():
         safe_mode.started("vllm", "k3", {"prefix_cache": True}, [])
