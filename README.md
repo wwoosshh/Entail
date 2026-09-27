@@ -7,7 +7,8 @@
 RoPE base and scaling, soft-capping, sliding windows, chat templates, prediction types: when one of these
 declarations does not reach the engine, the output is wrong without a warning. entail reads what the files already
 declare, checks it where it is used, repairs it before the first token when it can, and logs exactly what broke
-when it cannot. Zero configuration; about 1% of load time.
+when it cannot. Zero configuration; about 1% of request time, and on vLLM about 1.7 s more at load (13-15% of a
+small model's load, most of it a start-up check of the engine's own paths that `ENTAIL_NO_PATHS=1` turns off).
 
 - **64 of 180.** Of the 300 most-downloaded LLMs on Hugging Face, 180 take vLLM's launch-time `rope_scaling`
   override (the usual way to turn on long context). It silently changes the RoPE base of 64 of them. With entail
@@ -17,9 +18,12 @@ when it cannot. Zero configuration; about 1% of load time.
   on); Qwen3-4B-Instruct-2507 goes 183 → 175 under YaRN. No warning in either case.
 - **Evals miss some of it.** A backend that drops Gemma 2's soft-capping changed 198 of 500 answers while GSM8K
   moved by 3 (p = 0.66). entail routes to a backend that honours it, at load.
-- **No false alarm in 102 runs.** 38 popular models on transformers, vLLM and SGLang: every output identical to the
-  run without entail, load cost median 0.7-0.9%. (1.0.0 got 17 of its first 81 runs wrong; the five causes are
-  fixed and in the [changelog](CHANGELOG.md).)
+- **102 healthy runs, no run broken.** 38 popular models on transformers, vLLM and SGLang: outputs identical to the
+  run without entail in 97 of 98 comparisons (the other is the engine's own nondeterminism), and no check added in
+  1.3.0 raised an alarm. Six runs report a real tokenizer difference (transformers 5 drops a leading space for two
+  Llama-2-era tokenizers); one false alarm is known outside that set (encoder-decoder models on vLLM, see
+  [Known gaps](#known-gaps)). (1.0.0 got 17 of its first 81 runs wrong; those causes are fixed and in the
+  [changelog](CHANGELOG.md).)
 
 Check your own model in three lines:
 
@@ -36,15 +40,20 @@ run goes on (it stops only if you ask it to); said to be "unknown" when nobody d
 default stand in silently. The name is the logical sense of *entail*: what a checkpoint declares must entail what
 the engine executes. (ent·**AI**·**L**: an AI library.)
 
-> **Status: 1.2.0, measured on one machine.** Everything below was measured on the engines and
+> **Status: 1.3.0, measured on one machine.** Everything below was measured on the engines and
 > versions under [Tested with](#tested-with), on one RTX 4070 Ti. The evaluation is summarised under
-> [How it was measured](#how-it-was-measured), and what it found missing under [Known gaps](#known-gaps). 1.1.0
-> adds five facts the 1.0 evaluation showed it did not read (a stale cache identity, a padding token type, a kernel
-> tile against a quantization block, a tokenizer's vocabulary, and where a generation ends), each measured on the
-> real bug it comes from. 1.2.0 adds the sites the first pre-registered replay found unread (a LoRA adapter's
-> settings file, a request's setting names at the reasoning parser, the prefix-cache key and the beam reorder,
-> Triton kernel launches, rotary pairing), each written from the real bug and measured on it, and reports a second
-> pre-registered replay with the vocabulary frozen at this version.
+> [How it was measured](#how-it-was-measured), and what it found missing under [Known gaps](#known-gaps).
+> **What it is today:** a light pre-deployment check. It reads what model files declare, holds the engine's own
+> kernels, paths and parsers against references where a declaration lives only in code, repairs the classes it
+> knows, and says where meaning broke. **What it is not yet:** protection against bugs nobody has seen. In four
+> pre-registered replays of real engine bugs, each run with the code frozen, it detected 0 of 7, 0 of 8, 0 of 5 and
+> 0 of 6 of the reproduced bugs in its class; most sat where no check of entail's reaches (a processor's settings, a
+> scheduler step, a weight loader, a KV connector, a kernel called from C++).
+> 1.1.0 added five facts the 1.0 evaluation showed it did not read; 1.2.0 the sites the first replay found unread;
+> 1.3.0 adds reference comparisons (a tokenizer run against the declared one, a custom op's kernel against its own
+> definition, a parser's stream against its whole-text parse, a placeholder's origin, a completion's logprobs),
+> definitions for five engine functions, checks that reach an engine's warm-up (before a CUDA graph captures a
+> kernel), and the engine's own paths held against each other at start.
 > entail does not look for defects inside a model, a compiler, a kernel or the hardware: when every boundary it
 > checked held and the output is still wrong, it says so and narrows where to look.
 
@@ -64,8 +73,8 @@ the engine executes. (ent·**AI**·**L**: an AI library.)
 | engine | measured on | what its adapters check |
 |---|---|---|
 | transformers | 5.12.1, 5.16.1, 5.17.0 | attention backend, tied head, config keys, RoPE names, KV cache, chat template |
-| vLLM | 0.30.0 | attention backend, loader, weight layout after repacking, KV cache, OpenAI server, weights against the file |
-| SGLang | 0.5.20 | attention backends, loader, KV cache, server |
+| vLLM | 0.30.0 | attention backend, loader, weight layout after repacking, KV cache, OpenAI server, weights against the file, custom-op kernels and four engine functions against their definitions, the engine's own paths at start |
+| SGLang | 0.5.20 | attention backends, loader, KV cache, server, the GDN gate against its definition (the paths at start with `ENTAIL_PATHS=1`) |
 | diffusers | 0.40.0 | prediction type, VAE scale, LoRA reach |
 | ComfyUI | 0.34.1 | prediction type, VAE scale, LoRA reach, and one engine-specific repair (marked as such) |
 
@@ -173,7 +182,7 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
 | a tensor strided in its innermost dimension handed to a Triton kernel that reads it as if it were contiguous: SGLang's `fused_gdn_gating` was given the two halves of a split view (stride 2) and computed its gates from interleaved values (sglang#21843) | every `@triton.jit` kernel launched eagerly in the process, once per kernel and stride pattern (a kernel's first eight strided patterns), engine-independent: a strided innermost dimension against the kernel's own arguments. A kernel told the stride under any name passes; one that names strides but was not told this one is `unknown`, said once; one with no stride-like parameter and no equal integer is reported (`broken`, it cannot know) | SGLang 0.5.20, sglang#21843's tensors: the kernel takes row strides, so entail says `unknown` at the kernel's boundary for each tensor and the run goes on. 19 vLLM 0.30 kernels and 5 SGLang kernels in ordinary runs: pass. Retrospective, a report only |
 | a rotary embedding applied with the wrong pairing of dimensions: GLM models pair `2i` with `2i+1` (interleaved) where Llama pairs `i` with `i + d/2` (split), and vLLM's Triton MRoPE kernel paired split-wise whatever the layer said until 0.27, so GLM-OCR produced garbage (vllm#42016; also #49290, and a draft model that did not inherit its target's pairing, #53063) | the pairing a config key or the architecture's reference implementation declares (a table with configuration- and modeling-file lines) against the `is_neox_style` of the rotary modules vLLM built for the language model, set to the declared one where they differ (the repair is exercised in unit tests only); a kernel path that ignores the layer (vLLM's MRoPE kernel before 0.27, when the module dispatches to it) is reported. A DSA indexer, which pairs by its own key, and a language model whose modules pair both ways are left alone | vLLM 0.30.0: GLM-OCR's two text rotary modules pair interleaved as declared and its vision tower's 26 pair split by their own reference: pass, nothing touched, output identical with entail on and off; Qwen3-0.6B and Qwen3-4B (split): pass. vLLM 0.22.0 (before the kernel fix), the report's own images: GLM-OCR emits garbage and entail reports `broken` at the load boundary, naming the kernel path; no repair exists there, so the output stays wrong while the run goes on. Retrospective; the first real run compared the vision tower against the text declaration and was corrected before this row was written |
 | a tokenizer built from the right file by the wrong class, so the ids it produces are not the ids the folder's tokenizer.json gives: transformers 5.10.2 built deepseek-coder's tokenizer as `LlamaTokenizer` (transformers#46489), 5.8.0 built Granite's as `GPT2Tokenizer` and lost its pre-tokenizer (#45812), 5.4.0 converted Kimi-K2.5's tiktoken tokenizer and gave 18 of its 23 declared added tokens other ids (`</think>` got `<\|media_end\|>`'s; #45356), 5.12.1 replaced DeepSeek-R1-Distill's declared class (#46710); every one passed the vocabulary-size check | reported at the tokenizer's load: the declared tokenizer is run on ten fixed probe texts and its declared added tokens are looked up, and the ids must be the same (no repair: the decision names the class and the first text that differs, so the declared tokenizer can be loaded directly). A difference the folder's own declared flag explains (`legacy: false` next to a legacy-export tokenizer.json, on text after a special token) is said as the sources disagreeing, with both id lists | Retrospective (the rule was written from these four bugs; not a detection rate): at their reported versions all four are `broken` at the tokenizer boundary (9, 4 and 9 of the 10 probe texts; 18 of 23 added tokens); on 5.17.0 three pass and Kimi-K2.5 is `unknown` (tiktoken: its 23 added tokens match, the texts are not compared). 38 popular folders on 5.17.0 (11 distinct tokenizers; 23 share Qwen2's): 36 pass, 2 `broken`, both the one Llama-2-era tokenizer in the set (TinyLlama-1.1B-Chat and a tiny test folder): transformers 5 rebuilds such a tokenizer.json as Metaspace and never doubles the `▁` before text that starts with whitespace, whatever `legacy` says, so `"   leading spaces"` gets other ids than the file and than sentencepiece give. The 300-folder static corpus on 5.17.0: 201 pass, 9 `broken`, 5 `unknown`, 85 with no tokenizer to compare; the 9 are six of that Llama-2 shape (CodeLlama-7b-hf, EuroLLM-22B-Instruct, MiniCPM-SALA, ...) and three folders that declare `LlamaTokenizerFast` over a byte-level BPE tokenizer.json - **DeepSeek-R1-0528-Qwen3-8B**, deepseek-coder-7b-instruct-v1.5 and an MLX export - which 5.17.0 builds as a Llama pipeline: `"How are you doing?"` becomes `How are y oud o ing ?` and decodes to `Howareyoudoing?` (the #46710 class, live on 5.17.0 for these folders; draft report in the research workspace, not posted). Cost: the first process on a folder +241 ms at the median (+894 ms at most: the reference is built), later processes +2 ms at the median, +36 ms at the 90th percentile |
-| a custom op's kernel that computes other values than the op's own native definition: vLLM's Triton MRoPE kernel before 0.27.0 paired rotary dimensions split-wise for a model that pairs them interleaved (GLM-OCR, vllm#42016), and the layer carried both a `forward_native` that was right and a `forward_cuda` that was not | reported at the first real call of each op (per class, configuration and input pattern; vLLM's own profile and warm-up runs are skipped): the kernel and the definition are run on a 64-row slice of the same input, cut before the kernel touched it, and every value must agree within the definition's own rounding noise at that value plus a few units in the last place (no repair: switching an op to its native path is a repair still to be measured). Ops that hold the engine's state, ops under tensor parallelism or torch.compile, and ops not reached from the model's modules are said `unknown` once | vLLM 0.22.0, GLM-OCR: `broken` at `MRotaryEmbedding`, max difference 10.5 at an output scale of 10.9 (allowed 0.588), with no architecture table; vLLM 0.30.0: pass. 8 popular models on vLLM 0.30.0 with `enforce_eager`: 35 decisions, 34 pass and one `unknown` (ops held by helpers that are not modules), every value within a tenth of its allowance; only 13 of the 34 compare an independent kernel (rotary, activations), the other 21 hold the definition against itself and say so (in eager mode vLLM's RMSNorm path is its definition; the fused kernels live under torch.compile, not compared). Retrospective: the rule was written from this bug; the allowance's factors are headroom, to be set from data |
+| a custom op's kernel that computes other values than the op's own native definition: vLLM's Triton MRoPE kernel before 0.27.0 paired rotary dimensions split-wise for a model that pairs them interleaved (GLM-OCR, vllm#42016), and the layer carried both a `forward_native` that was right and a `forward_cuda` that was not | decided on the engine's warm-up calls (made-up token values with the engine's own shapes, once per size class) and otherwise at the first real call of each op (per class, configuration and input pattern): the kernel and the definition are run on a 64-row slice of the same input, cut before the kernel touched it, and every value must agree within the definition's own rounding noise at that value plus a few units in the last place. A mismatch is repaired by sending every module of that configuration to its native definition, when no CUDA graph has captured the kernel at a size not yet verified; otherwise it is reported. Ops that hold the engine's state, ops under tensor parallelism or torch.compile, and ops not reached from the model's modules are said `unknown` once | vLLM 0.22.0, GLM-OCR: the kernel differs at `MRotaryEmbedding` (max difference 10.5 at an output scale of 10.9, allowed 0.588), with no architecture table; in eager mode it is resolved and the output then equals the native mode's; vLLM 0.30.0: pass. 8 popular models on vLLM 0.30.0 with `enforce_eager`: 35 decisions, 34 pass and one `unknown` (ops held by helpers that are not modules), every value within a tenth of its allowance; only 13 of the 34 compare an independent kernel (rotary, activations), the other 21 hold the definition against itself and say so (in eager mode vLLM's RMSNorm path is its definition; the fused kernels live under torch.compile, not compared). Retrospective: the rule was written from this bug; the allowance's factors are headroom, to be set from data |
 | a chat parser whose streamed message is not what its parse of the same complete text gives, or whose tool calls carry arguments the request's tool schema does not have: vLLM's kimi_k2 parser skipped the schema's type coercion while streaming (`"3"` against `3`, vllm#49316), the qwen3 parser gave different content around tool calls on the two paths (#49412), the deepseek_v4 parser unwrapped one tool's arguments with another tool's schema (#47986) | reported when the stream finishes: the deltas are accumulated and a fresh parser of the same class parses the whole text; the two must agree exactly (a difference on an output that did not finish by itself is `unknown`), and each tool call must name a declared tool, carry its required parameters and, under a tool that forbids additional properties, no other key (no repair: the client already has the stream) | vLLM 0.30.0's own parsers driven as the server drives them: `broken` on 4 of 4, 2 of 3 (the third differs in surrounding whitespace only, which is noted, not broken) and 1 of 1 texts of the three reports, nothing on 6 well-formed texts; a live vLLM server with every adapter on (Qwen3-0.6B, qwen3 reasoning parser, hermes tool parser, 18 streamed and whole requests: plain, thinking on and off, tool calls, `tool_choice: none`, n=2, cut by length): nothing broken. Retrospective: the rule was written from these bugs |
 | a multimodal placeholder bound where the model's declared markup puts none: a literal `<\|image_pad\|>` typed in the user's message tokenises to the placeholder id, vLLM binds the image to that first run, and the template's own `<\|vision_start\|><\|image_pad\|><\|vision_end\|>` slot keeps one raw pad token, so the model answers about the wrong span (Qwen2.5-VL, vllm#57740) | reported when the processor has placed the placeholders: the token before each image run must be the `vision_start_token_id` the model's config declares (a model that declares no markup decides nothing; no repair: the prompt is the user's) | vLLM 0.30.0, Qwen2.5-VL-3B-Instruct, the report's two message orders: the attack order `broken` ("the image placeholder bound at tokens 20..275 is preceded by id 220, not by the declared start of the markup"), the control order pass; vLLM's own profiling prompts are not decided. Retrospective |
 | a chat completion whose logprobs cover other text than its content: SGLang with `separate_reasoning` returned `logprobs.content` over the whole raw output, `<think>` span and markers included, while `message.content` held the parsed answer, so the two cannot be aligned (sglang#25055) | reported when the response is built: the logprob tokens must decode to the message's content (surrounding whitespace aside) | SGLang 0.5.20, Qwen3-0.6B with the qwen3 reasoning parser, `logprobs: true, separate_reasoning: true`: `broken` ("the 155 logprob tokens cover the reasoning span (545 characters and its markers) as well as the content (12 characters)"). Retrospective |
@@ -204,8 +213,10 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
   once, and a difference that the folder's own declared flag explains (a legacy-mode tokenizer.json next to
   `legacy: false`, on text after a special token) is the sources disagreeing, said with both id lists
 - on vLLM, every custom op that dispatches to a kernel against the op's own native definition, once per op class,
-  configuration and input pattern on a 64-row slice of its first real input (vLLM's own profile and warm-up runs
-  are skipped; the definition is run in the input dtype and in float32 and the op's tensors are put back; every
+  configuration and input pattern, on vLLM's own warm-up calls used as probes (made-up token values, the engine's
+  shapes, once per size class) or else on a 64-row slice of its first real input; a mismatch is sent to the
+  definition when no CUDA graph holds the kernel (the definition is run in the input dtype and in float32 and the
+  op's tensors are put back; every
   value of the kernel's output must be within the definition's own rounding noise at that value plus a few units in
   the last place); ops that override their forward or hold the engine's state, every op under tensor parallelism
   or torch.compile, ops not reached from the model's modules, calls during CUDA-graph capture and definitions that
@@ -227,8 +238,18 @@ environment and does nothing unless `ENTAIL` is set. `entail hook status|install
   declare (`entail check`)
 - every Triton kernel launch in the process, engine-independent, once per kernel and tensor layout: a tensor
   strided in its innermost dimension against the kernel's own parameter names (a kernel with no stride parameter
-  cannot know: reported; one that takes strides but was not told this one: `unknown`, said once). Warm-up launches
-  are not looked at, and a kernel is looked at for its first eight layouts only
+  cannot know: reported; one that takes strides but was not told this one: `unknown`, said once). Such a launch is
+  also run twice on copies, as given and with that tensor laid out again; if the kernel writes other values, that
+  layout pattern is launched on relaid copies from then on (repaired). Compile-only warm-ups are not looked at, and
+  a kernel is looked at for its first eight layouts only
+- five engine functions that carry no definition of their own, against entail's: vLLM's `fused_experts`,
+  `w8a8_triton_block_scaled_mm`, `prepare_pos_seq_lens` and `BlockTables.compute_slot_mappings` (positions and KV
+  slots compared exactly), SGLang's `fused_gdn_gating`; a mismatch is sent to the definition
+- at start, the engine's own paths on three fixed probe requests: decode against a fresh prefill of the same
+  tokens, a request alone against the same requests batched, a cold run against one that reads the prefix cache (a
+  confident prediction that changes, or a probability that moves by more than 0.25, is reported). On vLLM by
+  default (`ENTAIL_NO_PATHS=1` turns it off); on SGLang only with `ENTAIL_PATHS=1`, because SGLang has run no
+  prefill yet and a probe could be the request that meets an engine defect first
 - the pairing convention of a model's rotary embedding (split, `i` with `i + d/2`; or interleaved, `2i` with
   `2i+1`), declared by a config key or by the architecture's reference implementation, against the layers vLLM
   built for its language model, and against a kernel path that pairs split-wise whatever the layer says (vLLM's
@@ -344,11 +365,34 @@ For 1.0 every measurement of the development milestones was run again on the fin
   logprobs). Class share among the 86 rated reports: 31 (36%). The raters were agents run from the research
   session, as in the first replay. Protocol section 7, screening, ratings and cases: `testbed/results/m17/replay2/`
   in the research workspace.
+- **Healthy runs, for 1.3.0** (the same 38 models on the same three engines, 102 valid runs, code frozen at
+  `2aa975b`): entail broke no run, no check added since 1.2.0 said `broken` or `refused`, and outputs were identical
+  in 97 of 98 comparisons without a repair. Six runs say `broken` at the tokenizer boundary, all from two
+  Llama-2-era folders on every engine: a real difference, not a false alarm (transformers 5 builds these tokenizers
+  so that text starting with a space loses one space, where the folder's tokenizer.json, the model's sentencepiece
+  file and transformers 4.57 agree; transformers#47700 describes it). Before the freeze one run broke with entail on
+  (SGLang, Phi-3.5-mini-instruct): the start-up probes were the engine's first prefills and met an engine defect
+  (flashinfer's state merge does not take head_dim 96; any prompt of 128 tokens or more stops the scheduler, with
+  entail off as well). SGLang's path check is opt-in since.
+- **Third and fourth replays (pre-registered, code frozen at `07fceac` and at this version's `2aa975b`):** the third
+  screened the next 150 issues of the same order (10 passed, 8 reproduced), the fourth a new population of 437
+  issues from the six months before the first (150 screened, 10 passed, 9 reproduced). Two blind raters, a third
+  settling their disagreements, put 5 and 6 of the reproduced in entail's class (kappa 0.735 and 0.826 over seven
+  categories, 0.776 and 0.916 for in-class versus not); they also rated whether a defect sits in the data and the
+  computation itself or around them. entail detected **0 of 5** and **0 of 6** (0 of 2 and 0 of 5 in the data and
+  computation), raised no false alarm in the third and one in the fourth (Known gaps). Class share among the rated
+  reports: 36 of 96 (37.5%) and 25 of 91 (27.5%). Over the four replays: 0 of 26. Protocol sections 8 and 9,
+  screening, ratings and cases: `testbed/results/m18/replay3/` and `testbed/results/m19/replay4/`.
 - **31 test problems** (16 reproduction cases, 8 field cases, 7 simulated market incidents): each defect was
   repaired; where no repair exists, it was reported at the boundary and fact where it happened while the run
   went on, or stopped with `ENTAIL_ON_BROKEN=stop`. No fixed version was flagged. (The two ComfyUI cases were
   measured before 1.0 and not run again.)
-- **Cost:** at load, 0.3-2.6% of the load time. Always on, vLLM's CUDA-graph path 1.008x, 1.003x and 1.006x at
+- **Cost, for 1.3.0:** request throughput on vLLM's default path (torch.compile and CUDA graphs, Qwen3-4B) with
+  everything on against entail not installed: 1.0007x, 1.0028x and 1.0110x at batch 1, 8 and 32 (two identical
+  states differ by up to 0.6%; at batch 32 each of the four rounds was 0.5-2.0% slower with entail on). At load,
+  from an installed copy, vLLM +1.6-1.7 s for 0.6-3B models (13-15% of their load), mostly the start-up path check
+  (`ENTAIL_NO_PATHS=1` turns it off); the hook alone -0.03 to +0.25 s.
+- **Cost, for 1.0:** at load, 0.3-2.6% of the load time. Always on, vLLM's CUDA-graph path 1.008x, 1.003x and 1.006x at
   batch 1, 8 and 32 with every adapter on (control runs without entail: 0.997-1.004x; measured before the
   per-request boundaries were added: 0.999-1.000x), transformers' dynamic KV cache 1.017-1.022x of an eager decode. About 60 us per request on
   vLLM's server. The diagnosis mode 1.74x (eager) and 1.85x (sdpa). With `ENTAIL` unset, 0.2-0.3 ms per Python start
@@ -373,9 +417,26 @@ For 1.0 every measurement of the development milestones was run again on the fin
   not read at all (the Marlin MoE row). That is a retrospective, not a detection rate; the second pre-registered
   replay above, with this vocabulary frozen, detected 0 of 8. What it left unread: a kernel's scale layout, a
   linear-attention kernel's input layout, a tool parser's slots, a multimodal placeholder's origin, and what a
-  response's logprobs cover. The ids a built tokenizer produces (three of the eight) are read after 1.2.0 by the
-  tokenizer check above (unreleased), which is written from those bugs and is not a detection rate. A multimodal model's vision tower is not compared for its rotary pairing
-  (its reference pairs on its own terms); only the language model is.
+  response's logprobs cover. The ids a built tokenizer produces (three of the eight) are read since 1.3.0 by the
+  tokenizer check above, which is written from those bugs and is not a detection rate. The third and fourth
+  pre-registered replays (code frozen at `07fceac` and at 1.3.0's `2aa975b`) detected 0 of 5 and 0 of 6, and the
+  checks added last for 1.3.0 (warm-up probes, the Triton launch run twice, the start-up path check, the exact index
+  definitions) reached none of the fourth replay's defect sites. What they left unread: a multimodal processor's merged settings,
+  a reasoning parser's unfinished output (said `unknown` at the site, by rule), the rotary layout inside
+  transformers' Qwen2.5-Omni DiT (the pairing rule is vLLM-side), a tokenizer whose pre-tokenization differs only on
+  characters none of the ten probe texts holds (combining marks), a KV connector's recompute path, a scheduler step
+  that does not use its declared timestep spacing, checkpoint weights a tied-weights mapping left unloaded, a LoRA
+  adapter's module paths, a C++ kernel's input scale (Marlin), a GGUF tokenizer's declared type and cross-attention
+  metadata captured in a CUDA graph. A multimodal model's vision tower is not compared for its rotary pairing (its
+  reference pairs on its own terms); only the language model is.
+- **The start-up path check counts non-finite log-probabilities as agreement:** a model whose every log-probability
+  was NaN (vLLM 0.16, NVFP4 with float16 activations, vllm#33560) passed all three pairs.
+- **A false alarm on encoder-decoder models on vLLM:** whisper-large-v3-turbo gets nine `broken` lines at the KV cache
+  boundary (cache group 1 holds 0 slots for its tokens) although its output is right; the rule does not know that a
+  cross-attention cache group follows the encoder, not the decoder's tokens. The run goes on.
+- **Where the comparisons do not reach:** on vLLM's default path (torch.compile) custom ops are compiled and not
+  compared with their definitions (the comparison runs in eager mode), and kernels called from C++ (Marlin) are not
+  reached at all. SGLang's start-up path check runs only with `ENTAIL_PATHS=1`.
 - **Models loaded by hub id** are read from the snapshot the engine downloaded into the local cache (fixed in this
   version: huggingface_hub refused such snapshots as incomplete, so every hub-id load said "could not be checked"
   for Vocab and Stops; GLM-OCR by hub id on vLLM 0.30 now passes both). A model the cache does not hold at all
@@ -391,7 +452,9 @@ For 1.0 every measurement of the development milestones was run again on the fin
   `partial_rotary_factor` (Laguna) and `attn_factor`, a name no engine reads.
 - The padding token type on vLLM's scoring path is reported, not repaired: vLLM 0.30 keeps token types as the
   index of the first 1, which cannot hold a pad type after the document. Tokenizers built outside transformers'
-  `PreTrainedTokenizerBase.from_pretrained` (Mistral's own files, tiktoken, GGUF) are not checked at run time.
+  `PreTrainedTokenizerBase.from_pretrained` (Mistral's own files, tiktoken) are not checked at run time; one built
+  from a GGUF file is `unknown` at the tokenizer boundary, because the GGUF file's own tokenizer declaration is not
+  read (transformers#41494: a Gemma GGUF built as another tokenizer type is not caught).
 - The stop-set check reads the tokenizer's end from tokenizer_config.json (and tokenizer.json) without building a
   tokenizer; a tokenizer whose files name its `eos_token` nowhere as an id is not seen there. A model saved after
   the repair (`save_pretrained`) writes the repaired list into its generation_config.json.
@@ -419,6 +482,8 @@ For 1.0 every measurement of the development milestones was run again on the fin
 | `ENTAIL_VERBOSE` | `1` | print each adapter as it is installed |
 | `ENTAIL_QUIET` | `unknown` | keep non-blocking `unknown` decisions off the console; they stay in the log and the record, and the console says so once per process |
 | `ENTAIL_SOURCE` | `1` | also compare loaded weights with the checkpoint file (vLLM, a little I/O at start-up) |
+| `ENTAIL_NO_PATHS` | `1` | vLLM: leave out the start-up comparison of the engine's own paths (most of entail's load cost there) |
+| `ENTAIL_PATHS` | `1` | SGLang: run the start-up comparison of the engine's own paths (off by default: its probes would be SGLang's first prefills) |
 | `ENTAIL_MANIFESTS` | folders, separated by `:` (`;` on Windows) | where to look for manifests (`<sha256>.json`) of model files that do not declare what they mean. A file is hashed only when a manifest could be for it, and its hash is kept in `entail_hashes.json` in the first folder |
 
 ## Tested with

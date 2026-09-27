@@ -1,8 +1,43 @@
 # Changelog
 
-## Unreleased
+## 1.3.0
+
+Released 2026-09-27. Reference comparisons where a declaration lives only in code (a tokenizer run against the
+declared one, a custom op's kernel against its own definition, a parser's stream against its whole-text parse, a
+multimodal placeholder's origin, a completion's logprobs), definitions for five engine functions that carry none,
+checks that reach an engine's warm-up and capture (warm-up probes, a Triton launch's layout run twice), and the
+engine's own paths held against each other at start. In two further pre-registered replays of real engine bugs, the
+code frozen at `07fceac` and at this version's `2aa975b`, it detected 0 of 5 and 0 of 6 in-class bugs (0 of 26 over
+four replays). Read it as a
+light pre-deployment check that repairs the classes it knows and says where meaning broke, not as protection against
+unseen bugs; see **Measured for this release** and **Known issues**.
 
 **Added**
+- Warm-up probes (M19 L3.3a): the calls an engine makes before serving (vLLM's profile run and warm-ups, SGLang's
+  capture warm-ups, recognised as a run of calls with one repeated row before the first real decision) decide the
+  kernel-against-definition comparison, on made-up token values with the engine's own shapes, dtypes and strides,
+  once per power-of-two size class and at the engine's own row count (512 rows at most). A repair can therefore be in
+  place before a CUDA graph captures the kernel: it is offered when no graph captured the kernel at a size class not
+  yet verified, and a repair now applies to every module of the same configuration, not only the one compared.
+- A Triton launch run twice (M19 L3.3b; `kernel_layout_variant`): the first launch of a pattern whose innermost
+  stride the kernel is not told runs on copies, as given and relaid (innermost dimension contiguous, outer strides
+  kept; wholly contiguous for a kernel that takes no stride), the relaid copy twice for the kernel's own noise. A
+  difference is resolved by launching that pattern on relaid copies from then on and copying back only the tensors
+  the kernel wrote. Not run twice: launches under capture, a written tensor overlapping another argument, tensors
+  past the budget, layouts that cannot be kept, comparisons where every value is zero.
+- `PathAgreement` (vocabulary v10) and `path_contract.py` with the adapters `vllm_paths` and `sglang_paths` (M19
+  L3.3c): right after vLLM's `LLM` or SGLang's `Engine` is built, three fixed probe texts go through the public
+  generate API and three pairs of the engine's own paths are compared - decode against a fresh prefill of the same
+  tokens, a request alone against the same requests batched, a cold run against one that reads the prefix cache.
+  Rule `paths_disagree` (`broken`): a confident prediction (margin over 1.0) that changes, or a kept token's
+  probability that moves by more than 0.25, thresholds set from healthy engines. The cache is cleared afterwards.
+  `ENTAIL_NO_PATHS=1` turns it off.
+- Exact definitions for index bookkeeping (M19 L3.3d): vLLM 0.30's `prepare_pos_seq_lens` (positions and sequence
+  lengths) and `BlockTables.compute_slot_mappings` (the KV slot of every token) held against entail's definitions
+  element by element (`compare_exact`), on fresh output buffers so the engine's persistent buffers are written only
+  by the real call. Definitions can now declare the arguments they write, compare whole, use fresh buffers, compare
+  exactly, and wrap class methods. The two were chosen because every model of a 14-model census ran them.
+
 - Definitions for engine functions that carry none (M19 L3): `entail/definitions.py` writes, in plain PyTorch, what
   vLLM 0.30's `fused_experts` (unquantized or INT8 W8A8: weight scales applied by their own shape, activations
   quantized as the config says), vLLM 0.30's `w8a8_triton_block_scaled_mm` and SGLang 0.5.20's `fused_gdn_gating`
@@ -144,6 +179,42 @@
 - vLLM's dummy runs are marked in the second GPU runner's graph capture and memory profiling too (`capture_model`,
   `profile_cudagraph_memory`, which run outside `_dummy_run`): their warm-up calls had used up TRIES before the first
   real request.
+- SGLang's start-up path check runs only when asked for (`ENTAIL_PATHS=1`; otherwise the start boundary says once
+  why it did not compare). SGLang runs no prefill while it starts, so the probe requests were the engine's first
+  prefills, and a defect on that path stopped the engine before the caller's first request: SGLang 0.5.20 picks
+  flashinfer for Phi-3.5-mini-instruct (head_dim 96), whose state merge does not take that head size, and any prompt
+  of 128 tokens or more stops the scheduler, with entail off as well. vLLM's path check stays on.
+- A kernel comparison records its worst value-to-allowance ratio with a floor for an all-zero allowance (it was
+  written as 0 when the float32 allowance underflowed).
+
+**Measured for this release** (one RTX 4070 Ti; the research workspace's `testbed/results/m19/l4/SUMMARY.md`)
+- Healthy runs: 38 popular models on transformers 5.17, vLLM 0.30 and SGLang 0.5.20, 102 valid runs: entail broke no
+  run; no check added since 1.2.0 said `broken` or `refused`; outputs identical in 97 of 98 comparisons without a
+  repair (the one difference is an engine's own nondeterminism). Six runs say `broken` at the tokenizer boundary,
+  all from two Llama-2-era folders (TinyLlama-1.1B-Chat and a tiny test folder) on every engine: a real difference -
+  transformers 5 builds these tokenizers so that text starting with a space loses one space, where the folder's
+  tokenizer.json, the model's sentencepiece file and transformers 4.57 agree (transformers#47700 describes it).
+- Request throughput with everything on against entail not installed, vLLM's default path (torch.compile and CUDA
+  graphs), Qwen3-4B: 1.0007x, 1.0028x and 1.0110x at batch 1, 8 and 32 (two identical states differ by up to 0.6%).
+- Load: from an installed copy, +1.6 to +1.7 s on vLLM for 0.6-3B models (13-15% of their load), mostly the start-up
+  path check (`ENTAIL_NO_PATHS=1` turns it off); the hook alone -0.03 to +0.25 s.
+- Detection on unseen bugs (pre-registered, code frozen): the third replay (frozen at 1.2.0's successor `07fceac`)
+  detected 0 of the 5 reproduced in-class bugs; the fourth (frozen at this version's code, a new population of 437
+  issues from the six months before) detected 0 of the 6, 0 of the 5 low-level ones, and raised one false alarm
+  (below). Over four replays: 0 of 26.
+
+**Known issues**
+- The start-up path check counts non-finite log-probabilities as agreement: a model whose every log-probability was
+  NaN (vLLM 0.16, NVFP4 with float16 activations) passed all three pairs.
+- False alarm on encoder-decoder models on vLLM: whisper-large-v3-turbo gets nine `broken` lines at the KV cache
+  boundary (`container:vllm.allocate_slots`, cache group 1 holds 0 slots for its tokens) although its output is
+  right - the rule does not know that a cross-attention cache group follows the encoder, not the decoder's tokens.
+  The run goes on (the default policy reports).
+- A tokenizer built from a GGUF file is `unknown` at the tokenizer boundary (the GGUF file's own tokenizer
+  declaration is not read), so a GGUF tokenizer built as another type than the file declares is not caught
+  (transformers#41494).
+- On vLLM's default path (torch.compile) custom ops are compiled and not compared with their definitions; the
+  comparison runs in eager mode. Kernels called from C++ (Marlin) are not reached.
 
 ## 1.2.0
 
