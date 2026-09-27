@@ -233,3 +233,29 @@ def activate():
 
 if os.environ.get("ENTAIL", "off") in ("load", "debug"):
     activate()
+
+
+def _run_the_hidden_sitecustomize():
+    """Put on PYTHONPATH, this file is imported as `sitecustomize` and hides the one Python would have run instead
+    (Ubuntu's /usr/lib/python3.X/sitecustomize.py installs apport's exception hook; environments and users have their
+    own). Run that one too, as it would have run. Nothing to do when the .pth brought this file in (it is not
+    `sitecustomize` then), or when there is no other."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    for entry in sys.path:
+        folder = os.path.realpath(entry or os.getcwd())
+        if folder == here:
+            continue
+        path = os.path.join(folder, "sitecustomize.py")
+        if os.path.isfile(path) and os.path.realpath(path) != os.path.realpath(__file__):
+            try:
+                spec = importlib.util.spec_from_file_location("_hidden_sitecustomize", path)
+                spec.loader.exec_module(importlib.util.module_from_spec(spec))
+            except Exception as e:  # noqa: BLE001 - its failure would not have stopped Python either
+                print(f"[entail] the sitecustomize this hook hides ({path}) failed: {type(e).__name__}: {e}",
+                      flush=True)
+            return path
+    return None
+
+
+if __name__ == "sitecustomize":
+    _run_the_hidden_sitecustomize()

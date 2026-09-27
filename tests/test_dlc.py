@@ -125,13 +125,35 @@ def test_a_dlc_is_found_attached_and_gives_its_entries_and_nodes():
 def test_a_dlc_outside_its_core_range_or_with_foreign_facts_is_not_attached_and_says_why():
     with Env() as e:
         _dist(GOOD.replace('requires = ">=1.3,<3"', 'requires = ">=9"'))
-        _dist(GOOD.replace('name = "fake"', 'name = "fake2"').replace("facts = ()", 'facts = ("NoSuchFact",)'))
+        _dist(GOOD.replace('name = "fake"', 'name = "fake2"').replace("facts = ()", 'facts = ("NoSuchFact",)'),
+              ep_name="fake2")
         found = {i["name"]: i for i in quiet(dlc.found) if i.get("name") in ("fake", "fake2")}
         assert not found["fake"]["attached"] and f"this is {__version__}" in found["fake"]["why"], found
         assert not found["fake2"]["attached"] and "vocabulary" in found["fake2"]["why"], found
         assert not any(name in ("fake", "fake2") for entries in dlc.targets().values() for _, name in entries)
         said = [r for r in e.records() if str(r.get("said", "")).startswith("dlc:")]
         assert {r["said"] for r in said} >= {"dlc:fake", "dlc:fake2"} and all("not attached" in r["text"] for r in said)
+
+
+def test_entail_dlc_lists_what_may_attach_and_nothing_else_is_imported():
+    with Env(ENTAIL_DLC="other"):
+        _, mod = _dist(GOOD)
+        found = [i for i in quiet(dlc.found) if i["entry_point"] == "fake"]
+        assert not found[0]["attached"] and "not listed" in found[0]["why"], found
+        assert mod not in sys.modules                      # never imported
+    with Env(ENTAIL_DLC="fake,other"):
+        _dist(GOOD)
+        assert [i for i in quiet(dlc.found) if i["entry_point"] == "fake"][0]["attached"]
+    with Env():                                             # the entry point must carry the DLC's name
+        _dist(GOOD, ep_name="notfake")
+        info = [i for i in quiet(dlc.found) if i["entry_point"] == "notfake"][0]
+        assert not info["attached"] and "entry point is named 'notfake'" in info["why"], info
+    with Env():                                             # two distributions, one name: the first is attached
+        _dist(GOOD)
+        _dist(GOOD)
+        mine = [i for i in quiet(dlc.found) if i.get("name") == "fake"]
+        assert [i["attached"] for i in mine].count(True) == 1 and "already attached" in \
+            [i for i in mine if not i["attached"]][0]["why"], mine
 
 
 def test_the_core_installs_an_entry_and_a_failure_does_not_reach_the_program():

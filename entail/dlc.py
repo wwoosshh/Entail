@@ -12,7 +12,11 @@ A DLC's entry point names an object (a module or a class) that says:
             with "dlc:<name>." and its node ids may not be the core's
   facts     (optional) the vocabulary names its checks decide (entail/facts.py); a DLC that only repairs has none
 The core looks the DLCs up once per process, and only when entail is on (ENTAIL=load or debug) and ENTAIL_DLC is not
-"off" (the platform, which runs apart from the engines, looks them up for their nodes). A DLC whose range does not hold
+"off" (the platform, which runs apart from the engines, looks them up for their nodes). ENTAIL_DLC=name,name attaches
+only those: an entry point whose name is not listed is never imported, and a DLC's entry point must carry its name.
+entail does not sandbox a DLC - it is Python code in the program's process, with the program's rights. What the core
+keeps it from is breaking the run (a failure is recorded, not raised) and changing the core's rules; what code runs is
+the user's choice of what to install and list. A DLC whose range does not hold
 the core's version is not attached, and that is said once. The core installs every entry itself (install): an entry
 that raises is recorded at dlc:<name>.install - as unknown for the DLC's first fact, or said when it decides none -
 with the exception, and the program goes on; an entry that failed twice in a process is left out for the rest of it;
@@ -79,6 +83,8 @@ def _read(ep, core_version: str) -> dict:
     nodes = list(getattr(obj, "nodes", []) or [])
     if not isinstance(name, str) or not _NAME.match(name):
         info["why"] = f"its name {name!r} is not lower-case letters, digits, '_' and '-'"
+    elif name != ep.name:
+        info["why"] = f"its entry point is named {ep.name!r}, not {name!r} (ENTAIL_DLC lists entry point names)"
     elif not isinstance(targets, dict) or not all(isinstance(v, (list, tuple)) and all(isinstance(e, str) for e in v)
                                                   for v in targets.values()):
         info["why"] = "its targets are not {module: [\"package.module:function\", ...]}"
@@ -106,8 +112,14 @@ def found(refresh: bool = False) -> List[dict]:
     from . import __version__
 
     out, seen = [], set()
-    if (os.environ.get("ENTAIL_DLC") or "").strip().lower() != "off":
+    setting = (os.environ.get("ENTAIL_DLC") or "").strip().lower()
+    listed = None if setting in ("", "on", "all") else {n.strip() for n in setting.split(",") if n.strip()}
+    if setting != "off":
         for ep in _entry_points():
+            if listed is not None and ep.name not in listed:
+                out.append({"entry_point": ep.name, "dist": getattr(getattr(ep, "dist", None), "name", None),
+                            "attached": False, "why": "not listed in ENTAIL_DLC (not imported)"})
+                continue
             info = _read(ep, __version__)
             if info.get("attached") and info["name"] in seen:
                 info.update(attached=False, why=f"another DLC is already attached as {info['name']!r}")
@@ -116,7 +128,7 @@ def found(refresh: bool = False) -> List[dict]:
             out.append(info)
     _FOUND = out
     for info in out:
-        if not info["attached"]:
+        if not info["attached"] and "not listed in ENTAIL_DLC" not in info["why"]:
             _say(f"dlc:{info.get('name') or info['entry_point']}", f"not attached: {info['why']}")
     return out
 

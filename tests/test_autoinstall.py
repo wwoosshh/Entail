@@ -97,6 +97,34 @@ def test_the_hook_watches_imports_once_when_its_file_is_imported_twice():
             os.environ["ENTAIL_RUN_ID"] = keep_run
 
 
+def test_put_on_pythonpath_it_runs_the_sitecustomize_it_hides():
+    """As `sitecustomize` it hides the one Python would have run (Ubuntu's apport hook); it runs that one too."""
+    import sys
+    import tempfile
+
+    other = tempfile.mkdtemp()
+    with open(os.path.join(other, "sitecustomize.py"), "w", encoding="utf-8") as f:
+        f.write("import os\nos.environ['ENTAIL_TEST_HIDDEN_RAN'] = '1'\n")
+    keep, mode = list(sys.path), os.environ.get("ENTAIL")
+    sys.path[:] = [os.path.dirname(SHIM), other] + keep
+    os.environ.pop("ENTAIL_TEST_HIDDEN_RAN", None)
+    os.environ["ENTAIL"] = "off"                            # build the table only; nothing is activated
+    try:
+        spec = importlib.util.spec_from_file_location("sitecustomize", SHIM)   # as Python imports it from PYTHONPATH
+        spec.loader.exec_module(importlib.util.module_from_spec(spec))
+        assert os.environ.get("ENTAIL_TEST_HIDDEN_RAN") == "1"
+        os.environ.pop("ENTAIL_TEST_HIDDEN_RAN", None)
+        _load()                                             # brought in under another name (the .pth): nothing to run
+        assert "ENTAIL_TEST_HIDDEN_RAN" not in os.environ
+    finally:
+        sys.path[:] = keep
+        os.environ.pop("ENTAIL_TEST_HIDDEN_RAN", None)
+        if mode is None:
+            os.environ.pop("ENTAIL", None)
+        else:
+            os.environ["ENTAIL"] = mode
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
