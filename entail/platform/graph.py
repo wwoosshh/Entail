@@ -156,18 +156,30 @@ def graph(lines: List[dict]) -> dict:
         elif obj.get("said"):
             node(str(obj["said"]))["said"] += 1
     located = record.locate(rows, passes, layers, None, sorted(skipped))
+    # which flows a launch has: those of its nodes with data, not counting shared nodes (a Triton kernel names no
+    # engine, so it must not bring the LLM flow into an image launch); a shared node joins the flows present, at the
+    # end of those that are not its own, and brings its own flow only when nothing else is there
+    present = [fid for fid in m["flows"]
+               if any(n["flow"] == fid and not n.get("shared") and n["id"] in per_node for n in m["nodes"])]
+    shared = [n for n in m["nodes"] if n.get("shared") and n["id"] in per_node]
+    if not present and shared:
+        present = [shared[0]["flow"]]
     flows = []
-    for fid, names in m["flows"].items():
-        members = [n for n in m["nodes"] if n["flow"] == fid]
-        if not any(n["id"] in per_node for n in members):
-            continue
+    for fid in present:
+        names = m["flows"][fid]
+        members = [n for n in m["nodes"] if n["flow"] == fid and not (n.get("shared") and n["id"] not in per_node
+                                                                          and fid != n["flow"])]
         shown = [n for n in members if n["id"] in per_node or n["id"] not in ("other", "user")]
         shown.sort(key=lambda n: n["step"])
+        shown += [n for n in shared if n["flow"] != fid]
         flows.append({"id": fid, "ko": names["ko"], "en": names["en"], "nodes": [n["id"] for n in shown],
                       "edges": [[a["id"], b["id"]] for a, b in zip(shown, shown[1:])]})
-    nodes = []
+    nodes, placed = [], set()
     for fl in flows:
         for nid in fl["nodes"]:
+            if nid in placed:        # a shared node in two flows is one node
+                continue
+            placed.add(nid)
             spec = m["by_id"][nid]
             n = per_node.get(nid) or {"id": nid, "state": "none", "boundaries": set(), "verdicts": {}, "checks": 0,
                                        "passed": 0, "skipped": 0, "timed_calls": 0, "ms": 0.0, "said": 0}

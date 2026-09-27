@@ -135,6 +135,20 @@ def test_an_image_launch_draws_the_image_flow():
     assert {n["id"]: n["state"] for n in g["nodes"]}["prediction"] == "resolved"
 
 
+def test_a_kernel_without_an_engine_joins_the_launch_flow():
+    """P0 evaluation: a Triton kernel names no engine, so in an image launch it must not bring the LLM flow in; it is
+    drawn at the end of the image flow. On its own it shows in its home flow."""
+    lines = [{"v": 2, "t": 1.0, "run": "r", "pid": 1, "boundary": "load:diffusers.latent_scale", "verdict": "pass"},
+             {"v": 2, "t": 2.0, "run": "r", "pid": 1, "boundary": "kernel:triton", "verdict": "unknown"}]
+    g = graph.graph(lines)
+    assert [f["id"] for f in g["flows"]] == ["image"], g["flows"]
+    assert g["flows"][0]["nodes"][-1] == "kernel" and [n["id"] for n in g["nodes"]].count("kernel") == 1
+    alone = graph.graph([lines[1]])
+    assert [f["id"] for f in alone["flows"]] == ["llm"] and "kernel" in alone["flows"][0]["nodes"]
+    llm = graph.graph([{"boundary": "load:vllm.attention", "verdict": "pass"}, lines[1]])
+    assert [f["id"] for f in llm["flows"]] == ["llm"] and llm["flows"][0]["nodes"].count("kernel") == 1
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
