@@ -31,7 +31,10 @@ The core runs every validator itself, and a validator never breaks the program (
   - an exception is recorded as unknown ("the validator failed", with the exception); after two failures the validator
     is left out for the rest of the process; debug mode raises
   - a call that takes longer than the validator's budget (BUDGET_MS unless it says otherwise) is said once and the
-    validator is left out for the process
+    validator is left out for the process. The budget is measured when the call returns, so a validator that may
+    never return (a network call, a lock) should say hard=True: it then runs on a daemon thread and the program
+    stops waiting at the budget - the validator is recorded as not returning, left out, and abandoned (Python
+    cannot stop a thread; it may go on in the background). A hard validator costs a thread start per call
   - nothing runs when entail is off (ENTAIL unset or off) or ENTAIL_NODES=off, and a node turned off in the log
     folder's nodes.json ({"off": [...]}: what the platform writes; read again when it changes) is skipped
 The trust boundary is the DLCs' (entail/dlc.py): a validator is Python code in the program's process with the
@@ -82,18 +85,42 @@ def valid_node(name) -> bool:
     return isinstance(name, str) and bool(_NODE.match(name))
 
 
-def validator(name: str, budget_ms: Optional[float] = None):
-    """Register a validator under `name` (lower-case letters, digits, "_" and "-"); `budget_ms`: its time per call."""
+def validator(name: str, budget_ms: Optional[float] = None, hard: bool = False):
+    """Register a validator under `name` (lower-case letters, digits, "_" and "-"); `budget_ms`: its time per call;
+    `hard`: run it on a thread and stop waiting at the budget (for one that may never return)."""
     if not isinstance(name, str) or not _CHECK.match(name):
         raise ValueError(f"nodes.validator: {name!r} is not lower-case letters, digits, '_' and '-'")
 
     def deco(fn):
         fn._entail_check = name
         fn._entail_budget_ms = BUDGET_MS if budget_ms is None else float(budget_ms)
+        fn._entail_hard = bool(hard)
         _VALIDATORS.setdefault(name, fn)
         return fn
 
     return deco
+
+
+def _call_within(fn, value, params, budget_ms: float):
+    """Run fn on a daemon thread; (finished, result or exception)."""
+    import threading
+
+    box = {}
+
+    def work():
+        try:
+            box["out"] = fn(value, **params)
+        except BaseException as e:  # noqa: BLE001 - handed back to the caller, which decides
+            box["err"] = e
+
+    t = threading.Thread(target=work, name="entail-validator", daemon=True)
+    t.start()
+    t.join(budget_ms / 1000.0)
+    if t.is_alive():
+        return False, None
+    if "err" in box:
+        raise box["err"]
+    return True, box.get("out")
 
 
 def _active() -> bool:
@@ -192,7 +219,17 @@ def _run(node: str, fn, value, params) -> None:
     budget = getattr(fn, "_entail_budget_ms", BUDGET_MS)
     t0 = time.perf_counter()
     try:
-        got = fn(value, **params)
+        if getattr(fn, "_entail_hard", False):
+            finished, got = _call_within(fn, value, params, budget)
+            if not finished:
+                why = (f"the validator {name} did not return within its budget of {budget:g} ms: the program stopped "
+                       f"waiting, and it is left out for the rest of this process (its thread may still run)")
+                _LEFT_OUT[key] = why
+                tally.counts(boundary)["checks"] += 1
+                load.enforce([load.cannot_check(boundary, node, "Check", why)])
+                return
+        else:
+            got = fn(value, **params)
     except Exception as e:  # noqa: BLE001 - principle 12: a validator never breaks the program
         if core.mode() == "debug":
             raise
@@ -211,7 +248,7 @@ def _run(node: str, fn, value, params) -> None:
         _say(boundary, f"the validator {name} took {ms:.1f} ms, over its budget of {budget:g} ms: it is left out for "
                        f"the rest of this process (@validator(budget_ms=...) gives it more)")
     if isinstance(got, bool):
-        got = Result(got, None)
+        got = Result(got, None if got else "the check does not hold")
     elif not isinstance(got, Result):
         got = Result(None, f"the validator returned {type(got).__name__}, not ok(), broken() or unknown()")
     counts = tally.counts(boundary)

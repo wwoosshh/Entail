@@ -166,7 +166,9 @@ def test_the_one_write_is_the_safety_mode_and_needs_the_page_token_and_origin():
         assert _post(port, {"mode": "all"}, token, host="evil.example:80")[0] == 403
         assert _post(port, {"mode": "everything"}, token)[0] == 400
         assert _post(port, b"x" * 5000, token)[0] == 413
-        assert _post(port, {"mode": "all"}, token, path="/api/runs")[0] == 404
+        # the platform's writes are exactly two (LIBRARY_DESIGN.md 13.2): any other path is not one
+        for other in ("/api/runs", "/api/graph", "/api/settings", "/api/node", "/", "/api/safe-mode/../nodes"):
+            assert _post(port, {"mode": "all"}, token, path=other)[0] == 404, other
         assert not os.path.exists(os.path.join(folder, "safe_mode.json"))
         # the write: the file the next start reads, and a new token (the old one works once)
         st, body = _post(port, {"mode": "all"}, token)

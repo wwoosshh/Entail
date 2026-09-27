@@ -142,6 +142,69 @@ def test_a_validator_that_cannot_tell_or_fails_or_is_slow_never_breaks_the_progr
             pass
 
 
+def test_a_hard_validator_that_never_returns_does_not_stall_the_program():
+    with Env() as e:
+        @nodes.validator("stuck", budget_ms=50, hard=True)
+        def stuck(value):
+            time.sleep(3)
+            return True
+
+        t = time.perf_counter()
+        assert quiet(nodes.check, "demo.net", "x", stuck) == "x"
+        assert time.perf_counter() - t < 1.0                   # stopped waiting at the budget, not after 3 s
+        t = time.perf_counter()
+        nodes.check("demo.net", "x", stuck)                    # left out: not run again
+        assert time.perf_counter() - t < 0.05
+        rows = [r for r in e.records() if r.get("boundary") == "node:demo.net/stuck"]
+        assert len(rows) == 1 and rows[0]["verdict"] == "unknown" and "did not return" in rows[0]["note"], rows
+
+        @nodes.validator("quick", budget_ms=500, hard=True)
+        def quick(value):
+            return nodes.broken("wrong") if value == "bad" else nodes.ok()
+
+        quiet(nodes.check, "demo.net", "bad", quick)
+        nodes.check("demo.net", "good", quick)
+
+        @nodes.validator("raises", hard=True)
+        def raises(value):
+            raise RuntimeError("inside the thread")
+
+        quiet(nodes.check, "demo.net", "x", raises)
+        rows = [(r["boundary"], r["verdict"]) for r in e.records() if r.get("verdict")]
+        assert ("node:demo.net/quick", "broken") in rows and ("node:demo.net/raises", "unknown") in rows, rows
+        assert tally.stats("node:demo.net/quick")["passed"] == {"node_check": 1}
+
+
+def test_the_program_s_own_behaviour_is_left_alone():
+    with Env() as e:
+        v, calls = _json_object()
+
+        @nodes.watch("demo.answer", v)
+        def fails(q):
+            raise KeyError(q)
+
+        try:
+            fails("q")
+            raise AssertionError("the program's own exception must come through")
+        except KeyError:
+            pass
+        assert calls == []                                      # nothing returned: nothing to check
+        assert quiet(nodes.check, "demo.flag", 0, lambda value: False) == 0
+        assert quiet(nodes.check, "demo.flag", 0, "no_such_validator") == 0
+
+        @nodes.validator("roomy", budget_ms=1000)
+        def roomy(value):
+            time.sleep(0.02)
+            return True
+
+        nodes.check("demo.flag", 0, roomy)
+        nodes.check("demo.flag", 0, roomy)
+        rows = e.records()
+        assert any(r.get("verdict") == "broken" and "the check does not hold" in r.get("note", "") for r in rows), rows
+        assert any(r.get("said") == "node:demo.flag" and "no validator 'no_such_validator'" in r["text"] for r in rows)
+        assert tally.stats("node:demo.flag/roomy")["checks"] == 2  # a validator's own budget: not left out
+
+
 def test_the_stop_policy_stops_at_a_broken_check():
     with Env(ENTAIL_ON_BROKEN="stop") as e:
         v, _ = _json_object()
