@@ -110,8 +110,8 @@ def test_after_a_capture_or_under_refuse_a_mismatch_stays_broken():
         fr._capturing = was
     assert not ds and torch.equal(out, orig(a, b)), "inside a capture nothing is compared"
     out, ds = decided(lambda: mod.gate(a, b))
-    assert ds[0].verdict is Verdict.BROKEN and "not repaired: the function was called inside a CUDA graph" \
-        in ds[0].note, ds[0].note
+    assert ds[0].verdict is Verdict.BROKEN and "not repaired: a CUDA graph captured in this process holds the " \
+        "kernel" in ds[0].note, ds[0].note
     assert torch.equal(out, orig(a, b)), "unrepaired: the engine gets the function's output"
     mod, orig = setup("swapped")
     pol = core.policy()
@@ -191,16 +191,19 @@ def test_a_call_the_definition_does_not_cover_is_unknown_once():
     assert not ds, "said once"
 
 
-def test_dummy_uniform_and_empty_calls_decide_nothing():
-    mod, orig = setup("swapped")
-    out, ds = decided(lambda: mod.gate(torch.ones(100, 16), torch.ones(100, 16)))
-    assert not ds, "one repeated row decides nothing"
-    out, ds = decided(lambda: mod.gate(torch.randn(0, 16), torch.randn(0, 16)))
-    assert not ds and out.shape == (0, 16)
+def vllm_dummy():
+    """A stand-in for the kernel reference adapter's mark of vLLM's dummy runs (profile run, warm-ups)."""
     vk = types.ModuleType("entail.adapters.vllm_kernel_reference")
     vk._STATE = {"dummy": 1}
-    sys.modules["entail.adapters.vllm_kernel_reference"], was = vk, sys.modules.get(
-        "entail.adapters.vllm_kernel_reference")
+    return vk
+
+
+def test_warm_ups_are_decided_on_a_probe_and_empty_or_vacuous_real_calls_are_not():
+    mod, orig = setup("swapped")
+    out, ds = decided(lambda: mod.gate(torch.randn(0, 16), torch.randn(0, 16)))
+    assert not ds and out.shape == (0, 16), "a call with no token decides nothing"
+    was = sys.modules.get("entail.adapters.vllm_kernel_reference")
+    sys.modules["entail.adapters.vllm_kernel_reference"] = vllm_dummy()
     try:
         out, ds = decided(lambda: mod.gate(torch.randn(100, 16), torch.randn(100, 16)))
     finally:
@@ -208,17 +211,14 @@ def test_dummy_uniform_and_empty_calls_decide_nothing():
             del sys.modules["entail.adapters.vllm_kernel_reference"]
         else:
             sys.modules["entail.adapters.vllm_kernel_reference"] = was
-    assert not ds, "inside vLLM's dummy runs nothing is compared"
-    out, ds = decided(lambda: mod.gate(torch.randn(100, 16), torch.randn(100, 16)))
-    assert len(ds) == 1 and ds[0].verdict is Verdict.RESOLVED, ds
+    assert len(ds) == 1 and ds[0].verdict is Verdict.RESOLVED and "warm-up call of 100 rows" in ds[0].note, ds
     mod, orig = setup("faithful")
     was_tries = fr.TRIES
     fr.TRIES = 3
     try:
-        for _ in range(10):
+        for _ in range(10):         # an unmarked dummy batch of one size class: decided once, on a probe
             out, ds = decided(lambda: mod.gate(torch.ones(100, 16), torch.ones(100, 16)))
-            assert not ds
-        assert fr.stats()["uniform_calls"] == 10, "a dummy batch is not counted towards giving up"
+        assert fr.stats()["warm_decided"] == 1, fr.stats()
         for _ in range(2):          # rows that differ, and an output of zeros: decides nothing, counted
             out, ds = decided(lambda: mod.gate(torch.randn(100, 16), torch.zeros(100, 16)))
             assert not ds
@@ -228,6 +228,77 @@ def test_dummy_uniform_and_empty_calls_decide_nothing():
         fr.TRIES = was_tries
     sig = inspect.signature(stand_in("faithful").gate)
     assert fr._prepare(sig, DEF, (torch.randn(10, 4), torch.randn(9, 4)), {}) is None, "rows that disagree: not cut"
+
+
+def test_an_unmarked_warm_up_is_decided_before_the_capture_and_the_graph_holds_the_definition():
+    """SGLang's order, which the second L3 stage measured broken: warm-ups of one row over and over, the capture,
+    then real calls. The warm-up is decided on a probe made from it (strides kept), the repair precedes the
+    capture, and the capture records the definition."""
+    fused = torch.ones(100, 32)
+    a, b = fused[:, ::2], fused[:, 1::2]        # an inner stride of 2, one row over and over
+    mod, orig = setup("packed_rows", DEF._replace(capturable=True))
+    out, ds = decided(lambda: mod.gate(a, b))
+    assert len(ds) == 1 and ds[0].verdict is Verdict.RESOLVED and "warm-up call of 100 rows" in ds[0].note, ds
+    was = fr._capturing
+    fr._capturing = lambda: True
+    try:
+        out, ds = decided(lambda: mod.gate(a, b))
+    finally:
+        fr._capturing = was
+    assert not ds and torch.equal(out, gate_definition(a, b, _dtype=torch.float32)), "the capture gets the definition"
+
+
+def test_warm_ups_catch_a_launch_that_is_wrong_only_at_large_sizes():
+    """vllm#52576's shape: the tuning table gives another tile at larger sizes. The real call's 64-row slice takes
+    the small launch; warm-ups are compared at the engine's own size, once per size class."""
+    mod = types.ModuleType("fake_engine.ops")
+
+    def gate(a, b, scale=1.0):
+        out = F.silu(a) * b * scale
+        return out if a.shape[0] <= 64 else out + 0.5 * out.flip(-1)
+
+    mod.gate = gate
+    fr.reset()
+    assert fr.wrap(mod, "gate", DEF)
+    out, ds = decided(lambda: mod.gate(torch.ones(32, 16), torch.ones(32, 16)))
+    assert ds[0].verdict is Verdict.PASS and "warm-up call of 32 rows" in ds[0].note, ds
+    was = fr._capturing
+    fr._capturing = lambda: True
+    try:
+        decided(lambda: mod.gate(torch.ones(32, 16), torch.ones(32, 16)))   # class 32 captured, verified there
+    finally:
+        fr._capturing = was
+    out, ds = decided(lambda: mod.gate(torch.ones(256, 16), torch.ones(256, 16)))
+    assert ds[0].verdict is Verdict.RESOLVED and "probe of 256 rows" in ds[0].note, ds
+    assert "graphs captured before hold the kernel at the sizes where it matched" in ds[0].resolution, ds[0].resolution
+
+
+def test_once_the_real_call_is_decided_rows_are_not_looked_at_again():
+    mod, orig = setup("faithful")
+    out, ds = decided(lambda: mod.gate(torch.randn(100, 16), torch.randn(100, 16)))
+    assert ds[0].verdict is Verdict.PASS
+    seen = []
+    was = fr._uniform_call
+    fr._uniform_call = lambda *a: seen.append(1) or False
+    try:
+        out, ds = decided(lambda: mod.gate(torch.ones(100, 16), torch.ones(100, 16)))
+    finally:
+        fr._uniform_call = was
+    assert not ds and not seen, "after the decision the hot path does not examine rows (no device sync)"
+
+
+def test_the_moe_probe_routes_each_token_to_distinct_experts():
+    x, w1, w2, tw, ids, I = _moe_inputs()
+    cut = {"hidden_states": x, "w1": w1, "w2": w2, "topk_weights": tw, "topk_ids": ids}
+    got = definitions.probe_experts(cut, krc.generator("cpu"))
+    new_ids, new_w = got["topk_ids"], got["topk_weights"]
+    assert new_ids.shape == ids.shape and new_ids.dtype == ids.dtype and new_w.dtype == tw.dtype
+    assert int(new_ids.min()) >= 0 and int(new_ids.max()) < w1.shape[0]
+    assert all(len(set(r.tolist())) == r.numel() for r in new_ids), "no expert twice for one token"
+    assert torch.allclose(new_w.sum(-1), torch.ones(new_w.shape[0], dtype=new_w.dtype))
+    assert len({tuple(r.tolist()) for r in new_ids}) > 1, "tokens are routed differently"
+    s = definitions.probe_block_scales({"As": torch.zeros(8, 4)}, krc.generator("cpu"))["As"]
+    assert bool((s >= 0.5).all()) and bool((s < 1.5).all())
 
 
 def test_under_a_stop_policy_the_decision_raises_once_and_the_wrapper_steps_aside():
@@ -253,27 +324,161 @@ def test_install_wraps_the_registered_functions_of_loaded_modules():
     fr.reset()
     made = []
     for d in definitions.DEFINITIONS:
-        modname, fname = d.target.split(":")
+        modname, attr = d.target.split(":")
         if modname in sys.modules:
             continue
         m = types.ModuleType(modname)
-        setattr(m, fname, lambda *a, **k: None)
+        holder, fname = m, attr
+        if "." in attr:                                  # a class's method (M19 L3.3d)
+            cls, fname = attr.split(".")
+            holder = type(cls, (), {fname: lambda self, *a, **k: None})
+            setattr(m, cls, holder)
+        else:
+            setattr(m, fname, lambda *a, **k: None)
         sys.modules[modname] = m
-        made.append((modname, fname, getattr(m, fname)))
+        made.append((modname, holder, fname, holder.__dict__[fname] if isinstance(holder, type) else getattr(m, fname)))
     try:
         assert fr.install() == len(made) and fr.install() == 0, "each function wrapped once"
-        for modname, fname, f in made:
-            assert getattr(sys.modules[modname], fname) is not f
-            assert getattr(sys.modules[modname], fname).__entail_definition__.target == f"{modname}:{fname}"
+        for modname, holder, fname, f in made:
+            got = holder.__dict__[fname] if isinstance(holder, type) else getattr(holder, fname)
+            assert got is not f and got.__entail_definition__ is not None
         fr.uninstall()
-        for modname, fname, f in made:
-            assert getattr(sys.modules[modname], fname) is f, "uninstall puts the function back"
+        for modname, holder, fname, f in made:
+            got = holder.__dict__[fname] if isinstance(holder, type) else getattr(holder, fname)
+            assert got is f, "uninstall puts the function back"
     finally:
-        for modname, _f, _g in made:
+        for modname, _h, _f, _g in made:
             del sys.modules[modname]
         fr.reset()
     hooks = fr.hooks()
     assert len(hooks) == len(definitions.DEFINITIONS)
+
+
+def _pos_inputs():
+    """Three requests in state rows 5, 0, 2 with 3, 1 and 2 query tokens; computed tokens by state row."""
+    idx = torch.tensor([5, 0, 2], dtype=torch.int32)
+    qsl = torch.tensor([0, 3, 4, 6, 6, 6], dtype=torch.int32)
+    nct = torch.tensor([10, 0, 7, 0, 0, 20], dtype=torch.int32)
+    return idx, qsl, nct
+
+
+def test_the_positions_definition_against_hand_values():
+    idx, qsl, nct = _pos_inputs()
+    pos, seq = torch.full((8,), -9, dtype=torch.int64), torch.full((6,), -9, dtype=torch.int32)
+    definitions.prepare_pos_seq_lens(idx, qsl, nct, pos, seq)
+    assert pos.tolist() == [20, 21, 22, 10, 7, 8, -9, -9], pos
+    assert seq.tolist() == [23, 11, 9, 0, 0, 0], seq
+
+
+def _pos_module(kind):
+    mod = types.ModuleType("fake_engine.input_batch")
+
+    def prepare_pos_seq_lens(idx_mapping, query_start_loc, num_computed_tokens, pos, seq_lens):
+        definitions.prepare_pos_seq_lens(idx_mapping, query_start_loc, num_computed_tokens, pos, seq_lens)
+        if kind == "off_by_one":                         # positions from the query offset + 1: a lost base
+            n = int(query_start_loc[idx_mapping.shape[0]])
+            pos[:n] += 1
+
+    mod.prepare_pos_seq_lens = prepare_pos_seq_lens
+    return mod
+
+
+POS = definitions.Definition("fake_engine.input_batch:prepare_pos_seq_lens", "fake", ("idx_mapping",),
+                             definitions.prepare_pos_seq_lens, None, "positions", writes=("pos", "seq_lens"),
+                             whole=True, exact=True)
+
+
+def test_written_integer_outputs_are_held_exactly_and_repaired():
+    for kind, verdict in (("faithful", Verdict.PASS), ("off_by_one", Verdict.RESOLVED)):
+        fr.reset()
+        mod = _pos_module(kind)
+        assert fr.wrap(mod, "prepare_pos_seq_lens", POS)
+        idx, qsl, nct = _pos_inputs()
+        pos, seq = torch.full((8,), -9, dtype=torch.int64), torch.zeros(6, dtype=torch.int32)
+        out, ds = decided(lambda: mod.prepare_pos_seq_lens(idx, qsl, nct, pos, seq))
+        assert len(ds) == 1 and ds[0].verdict is verdict, (kind, ds)
+        assert pos.tolist() == [20, 21, 22, 10, 7, 8, -9, -9], "the engine's buffer holds the definition's values"
+        if kind == "off_by_one":
+            assert "compared element by element" in ds[0].note and "3 differ" not in ds[0].note, ds[0].note
+            assert "6 differ" in ds[0].note, ds[0].note
+
+
+class _Staged:
+    def __init__(self, t):
+        self.gpu = t
+
+
+class BlockTables:
+    """vLLM 0.30's BlockTables in the shape the definition reads: block tables per group (state rows x blocks),
+    kernel block sizes, which groups map slots, a persistent slot-mapping buffer."""
+
+    def __init__(self, kind="faithful", enabled=(True, False)):
+        self.kind = kind
+        self.num_kv_cache_groups = 2
+        self.kernel_block_sizes = [4, 4]
+        self._slot_mapping_enabled = list(enabled)
+        self.cp_size = 1
+        tables = torch.arange(6 * 8, dtype=torch.int32).reshape(6, 8) * 3 + 1
+        self.block_tables = [_Staged(tables), _Staged(tables + 100)]
+        self.slot_mappings = torch.full((2, 10), 777, dtype=torch.int64)
+
+    def compute_slot_mappings(self, idx_mapping, query_start_loc, positions, num_tokens_padded, out=None):
+        got = definitions.compute_slot_mappings(self, idx_mapping, query_start_loc, positions, num_tokens_padded, out)
+        if self.kind == "next_block":                    # reads the block after the token's: an index-base slip
+            slots = self.slot_mappings if out is None else out
+            slots[0, :3] += 4
+        return got
+
+
+SLOTS = definitions.Definition("fake_engine.block_table:BlockTables.compute_slot_mappings", "fake", ("idx_mapping",),
+                               definitions.compute_slot_mappings, None, "slots", whole=True,
+                               fresh=definitions.fresh_slot_mappings, exact=True)
+
+
+def test_the_slot_mapping_definition_against_hand_values():
+    bt = BlockTables()
+    idx, qsl, _ = _pos_inputs()
+    positions = torch.tensor([20, 21, 22, 10, 7, 8, 0, 0], dtype=torch.int64)
+    got = definitions.compute_slot_mappings(bt, idx, qsl, positions, 8)
+    t = bt.block_tables[0].gpu
+    rows = {5: [20, 21, 22], 0: [10], 2: [7, 8]}
+    want = []
+    for s, ps in rows.items():
+        for p in ps:
+            want.append(int(t[s, p // 4]) * 4 + p % 4)
+    assert got[0, :6].tolist() == want, (got[0], want)
+    assert got[0, 6:].tolist() == [-1, -1] and bt.slot_mappings[0, 8:].tolist() == [-1, -1], "pad after the batch"
+    assert got[1].tolist() == [-1] * 8, "a group that maps no slots gets the pad id"
+
+
+def test_a_method_is_wrapped_on_its_class_and_its_engine_buffer_is_left_to_the_real_call():
+    for kind, verdict in (("faithful", Verdict.PASS), ("next_block", Verdict.RESOLVED)):
+        fr.reset()
+        cls = type("BlockTables", (BlockTables,), {})
+        cls.compute_slot_mappings = BlockTables.compute_slot_mappings
+        assert fr.wrap(cls, "compute_slot_mappings", SLOTS)
+        bt = cls(kind)
+        idx, qsl, _ = _pos_inputs()
+        positions = torch.tensor([20, 21, 22, 10, 7, 8, 0, 0], dtype=torch.int64)
+        seen = []
+        real = fr._prepare
+
+        def spy(*a, **k):
+            seen.append(bt.slot_mappings.clone())
+            return real(*a, **k)
+
+        fr._prepare = spy
+        try:
+            out, ds = decided(lambda: bt.compute_slot_mappings(idx, qsl, positions, 8))
+        finally:
+            fr._prepare = real
+        assert len(ds) == 1 and ds[0].verdict is verdict, (kind, ds)
+        assert seen and bool((seen[0] == 777).all()), "before the real call the persistent buffer is untouched"
+        want = definitions.compute_slot_mappings(BlockTables(), idx, qsl, positions, 8)
+        assert torch.equal(out, want), "the real call's slots are the definition's (repaired) or the kernel's (right)"
+        uninstalled = cls.__dict__["compute_slot_mappings"]
+        assert uninstalled.__entail_definition__ is SLOTS
+    fr.reset()
 
 
 def test_every_definition_takes_its_functions_arguments():

@@ -40,6 +40,12 @@ TARGETS = {
     "vllm.model_executor.layers.fused_moe.fused_moe": ["entail.adapters.function_reference:install"],
     "vllm.model_executor.layers.quantization.utils.fp8_utils": ["entail.adapters.function_reference:install"],
     "sglang.kernels.ops.attention.fla.fused_gdn_gating": ["entail.adapters.function_reference:install"],
+    # the model runner's bookkeeping every step goes through (M19 L3.3d): positions and slot mappings
+    "vllm.v1.worker.gpu.input_batch": ["entail.adapters.function_reference:install"],
+    "vllm.v1.worker.gpu.block_table": ["entail.adapters.function_reference:install"],
+    # the engine's own paths against each other on probe requests, once the offline engine is up (M19 L3.3c)
+    "vllm.entrypoints.llm": ["entail.adapters.vllm_paths"],
+    "sglang.srt.entrypoints.engine": ["entail.adapters.sglang_paths"],
     "vllm.v1.core.kv_cache_manager": ["entail.adapters.vllm_cache_contract"],
     "vllm.v1.core.sched.scheduler": ["entail.adapters.vllm_identity"],
     "vllm.entrypoints.pooling.scoring.io_processor": ["entail.adapters.vllm_scoring"],

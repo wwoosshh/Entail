@@ -27,6 +27,16 @@ class Definition(NamedTuple):
     noise: Optional[str]   # dtype of the noise run when the inputs carry no reduced dtype of their own
     source: str            # what the definition follows
     capturable: bool = False   # runs inside a CUDA graph capture (no host synchronisation)
+    probe: Optional[Callable] = None   # (cut arguments, generator) -> the values a warm-up probe gives the arguments
+    #                                    whose range only the function knows (M19 L3.3a); floating token arguments
+    #                                    get seeded normal values without it
+    # M19 L3.3d, for functions that write their result into buffers and index one another's rows (the model runner's
+    # bookkeeping: positions, slot mappings):
+    writes: Tuple[str, ...] = ()       # arguments the function writes: compared after the call, with its return
+    whole: bool = False                # compared on copies of the whole call (the rows index each other: not cut)
+    fresh: Optional[Callable] = None   # (bound arguments) -> fresh buffers for the outputs the function would write
+    #                                    into the engine's own (a persistent slot-mapping buffer): each run gets its own
+    exact: bool = False                # integer outputs (indices, positions) compared exactly
 
 
 def fused_experts(hidden_states, w1, w2, topk_weights, topk_ids, activation=None, apply_router_weight_on_input=False,
@@ -137,14 +147,115 @@ def fused_gdn_gating(A_log, a, b, dt_bias, beta=1.0, threshold=20.0, _dtype=None
     return g.to(torch.float32).unsqueeze(0), torch.sigmoid(b.to(dt)).to(torch.float32).unsqueeze(0)
 
 
+def prepare_pos_seq_lens(idx_mapping, query_start_loc, num_computed_tokens, pos, seq_lens, _dtype=None):
+    """vLLM 0.30's prepare_pos_seq_lens (the model runner's inputs): batch row r is request state idx_mapping[r],
+    its query tokens are [query_start_loc[r], query_start_loc[r+1]); its sequence length is its computed tokens plus
+    its query length, and each query token's position is its computed tokens plus its offset in the query. The
+    seq_lens rows past the batch are 0 (a full CUDA graph reads them); positions outside the batch's tokens are left."""
+    import torch
+
+    n = int(idx_mapping.shape[0])
+    qsl = query_start_loc[: n + 1].long()
+    q = qsl[1:] - qsl[:-1]
+    nct = num_computed_tokens[idx_mapping.long()].long()
+    seq_lens[:n] = (nct + q).to(seq_lens.dtype)
+    seq_lens[n:] = 0
+    start, end = int(qsl[0]), int(qsl[-1])
+    if end > start:
+        req = torch.repeat_interleave(torch.arange(n, device=pos.device), q)
+        tok = torch.arange(start, end, device=pos.device)
+        pos[tok] = (nct[req] + (tok - qsl[req])).to(pos.dtype)
+    return None
+
+
+def compute_slot_mappings(self, idx_mapping, query_start_loc, positions, num_tokens_padded, out=None, _dtype=None):
+    """vLLM 0.30's BlockTables.compute_slot_mappings: where each token's KV goes, per KV-cache group. A token at
+    position p of the request in state row s goes to slot block_table[s, p // kernel_block_size] * kernel_block_size
+    + p % kernel_block_size; a group whose slot mapping is disabled gets the pad id for every token, and every slot
+    from the batch's last token to the end of the buffer is the pad id (a CUDA graph reads them). Context parallelism
+    is not covered."""
+    import torch
+
+    pad = -1
+    slots = self.slot_mappings if out is None else out
+    if self.num_kv_cache_groups == 0:
+        return slots[:, :num_tokens_padded]
+    if int(getattr(self, "cp_size", 1)) != 1:
+        raise NotImplementedError("context parallelism")
+    n = int(idx_mapping.shape[0])
+    qsl = query_start_loc[: n + 1].long()
+    start, end = int(qsl[0]), int(qsl[-1])
+    slots[:, end:] = pad
+    if end > start:
+        req = torch.repeat_interleave(torch.arange(n, device=slots.device), qsl[1:] - qsl[:-1])
+        tok = torch.arange(start, end, device=slots.device)
+        p = positions[tok].long()
+        state = idx_mapping.long()[req]
+        for g in range(self.num_kv_cache_groups):
+            if not self._slot_mapping_enabled[g]:
+                slots[g, tok] = pad
+                continue
+            kbs = int(self.kernel_block_sizes[g])
+            blocks = self.block_tables[g].gpu[state, p // kbs].long()
+            slots[g, tok] = (blocks * kbs + p % kbs).to(slots.dtype)
+    return slots[:, :num_tokens_padded]
+
+
+def fresh_slot_mappings(bound):
+    """Each comparison run writes its slot mappings into a buffer of its own, a copy of the engine's (the rows before
+    the batch keep what they held), never into the engine's persistent buffer."""
+    target = bound.get("out")
+    if target is None:
+        target = bound["self"].slot_mappings
+    return {"out": target.clone()}
+
+
+def probe_experts(args, gen):
+    """A warm-up probe's routing: each token's top-k experts drawn without repeats from all the layer's experts
+    (w1's first dimension) and weights that sum to one. A warm-up call routes every token alike, to the same k."""
+    import torch
+
+    ids, w = args["topk_ids"], args["topk_weights"]
+    T, K = int(ids.shape[0]), int(ids.shape[1])
+    E = int(args["w1"].shape[0])
+    if K > E:
+        return {}
+    order = torch.rand((T, E), generator=gen, device=ids.device).argsort(dim=1)[:, :K]
+    weights = torch.softmax(torch.randn((T, K), generator=gen, device=w.device), dim=-1)
+    return {"topk_ids": order.to(ids.dtype), "topk_weights": weights.to(w.dtype)}
+
+
+def probe_block_scales(args, gen):
+    """A warm-up probe's activation scales for the block FP8 matmul: positive, one per token and K group."""
+    import torch
+
+    As = args["As"]
+    if not As.is_floating_point():
+        return {}
+    vals = torch.rand(tuple(As.shape), generator=gen, device=As.device, dtype=torch.float32) + 0.5
+    return {"As": vals.to(As.dtype)}
+
+
 DEFINITIONS = (
     Definition("vllm.model_executor.layers.fused_moe.fused_moe:fused_experts", "vllm",
                ("hidden_states", "topk_weights", "topk_ids"), fused_experts, None,
-               "per-expert gate/up, SiLU-and-mul, down, routing-weighted sum; INT8 W8A8 by the quant config"),
+               "per-expert gate/up, SiLU-and-mul, down, routing-weighted sum; INT8 W8A8 by the quant config",
+               probe=probe_experts),
     Definition("vllm.model_executor.layers.quantization.utils.fp8_utils:w8a8_triton_block_scaled_mm", "vllm",
                ("A", "As"), w8a8_triton_block_scaled_mm, "bfloat16",
-               "the product of the block-dequantized FP8 operands", True),
+               "the product of the block-dequantized FP8 operands", True, probe=probe_block_scales),
     Definition("sglang.kernels.ops.attention.fla.fused_gdn_gating:fused_gdn_gating", "sglang",
                ("a", "b"), fused_gdn_gating, "bfloat16",
                "g = -exp(A_log) * softplus(a + dt_bias), beta = sigmoid(b)", True),
+    # M19 L3.3d: chosen by how often normal runs reach them (every model, every step of vLLM 0.30's GPU runner;
+    # lowlevel/l2/results/census), and by the kind of meaning L1 found lost most often among these (index and
+    # position bases)
+    Definition("vllm.v1.worker.gpu.input_batch:prepare_pos_seq_lens", "vllm", ("idx_mapping",),
+               prepare_pos_seq_lens, None,
+               "positions = computed tokens + offset in the query; seq_lens = computed + query length, 0 past the batch",
+               writes=("pos", "seq_lens"), whole=True, exact=True),
+    Definition("vllm.v1.worker.gpu.block_table:BlockTables.compute_slot_mappings", "vllm", ("idx_mapping",),
+               compute_slot_mappings, None,
+               "slot = block_table[state, p // kernel_block] * kernel_block + p % kernel_block; pad after the batch",
+               whole=True, fresh=fresh_slot_mappings, exact=True),
 )

@@ -27,6 +27,16 @@ A definition that cannot be run on the input (NotImplementedError, a dtype the n
 once per op class. Integer outputs are not compared. Nothing here touches the engine's tensors: the slices are
 clones, and the kernel's own output on the real input is always what the engine gets, whatever happens in the
 comparison.
+
+Warm-up probes (M19 L3.3a). An engine calls every kernel before it serves: vLLM's profile run and compile warm-ups,
+the warm-up runs before each CUDA graph capture, SGLang's capture warm-ups. Those calls carry the shapes, dtypes and
+strides the engine will use, but one row over and over (token 0, zeros), so they decide nothing, and in a graph mode
+the first real call may never reach Python again. `probed` keeps such a call's shapes, dtypes and strides and makes
+up its token-dimension values (seeded normal values; integer tensors the op alone knows the range of - rotary
+positions, expert ids - are filled by the adapter or kept), so the kernel is held to its definition before any real
+input arrives and before the graph is captured: a resolved mismatch then goes into the graph. A warm-up is decided
+once per size class (`bucket`, a power of two) and compared on the engine's own row count up to WARM_ROWS, so a
+kernel whose launch configuration changes with the batch size is seen at each size the engine warms up.
 """
 import math
 from dataclasses import dataclass
@@ -43,6 +53,9 @@ ULPS = {"bfloat16": 2.0 ** -7, "float16": 2.0 ** -10, "float32": 2.0 ** -23, "fl
 REDUCED = ("torch.bfloat16", "torch.float16")   # the dtypes the reference run casts to float32; fp8 and integer
 #                                                 tensors (quantized inputs, scales) are never cast
 BUDGET = 64 << 20    # bytes the clones may hold when the arguments cannot be cut (their first dimension is a batch)
+WARM_ROWS = 512      # rows a warm-up probe is compared on at most: the engine's own launch size up to this
+WARM_CLASSES = 12    # size classes a kernel is decided in by warm-up probes, at most (1 ... 2048 rows)
+SEED = 20260927      # the probes' values are the same in every run
 
 
 def _is_tensor(x) -> bool:
@@ -94,16 +107,25 @@ def rows_of(args, kwargs, hint: Optional[int] = None) -> Optional[int]:
     return n
 
 
-def kept(t):
+def strided_zeros(shape, stride, dtype, device, margin: int = 0):
+    """A tensor with these strides whose whole storage, the gaps between its elements included, is zeros: a kernel
+    that misreads the layout reads zeros, the same in every run, not whatever the allocator left there. `margin`
+    spare elements follow, for a kernel that reads past the view as it misreads it."""
+    import torch
+
+    shape, stride = tuple(int(n) for n in shape), tuple(int(s) for s in stride)
+    need = 1 + sum((n - 1) * s for n, s in zip(shape, stride)) if all(n > 0 for n in shape) else 1
+    return torch.zeros(need + max(0, int(margin)), dtype=dtype, device=device).as_strided(shape, stride)
+
+
+def kept(t, margin: int = 0):
     """A copy of a tensor with its strides kept (M19 L3). clone() makes a view with gaps - a row of a fused
     projection, a column of an interleaved one - contiguous, and a kernel that misreads that layout would then be
     handed one it reads right. An expanded tensor (a stride of 0) is copied contiguous: its elements share memory."""
     t = t.detach()
     if t.is_contiguous() or any(int(s) == 0 and int(n) > 1 for s, n in zip(t.stride(), t.shape)):
         return t.clone()
-    import torch
-
-    buf = torch.empty_strided(tuple(t.shape), tuple(t.stride()), dtype=t.dtype, device=t.device)
+    buf = strided_zeros(t.shape, t.stride(), t.dtype, t.device, margin)
     buf.copy_(t)
     return buf
 
@@ -138,6 +160,66 @@ def cast(obj, dtype=None):
     return sliced(obj, -1, -1, dtype)
 
 
+def bucket(n: int) -> int:
+    """The size class of a row count: the smallest power of two not below it."""
+    b = 1
+    while b < n:
+        b <<= 1
+    return b
+
+
+def generator(device):
+    """A generator seeded the same in every run, on the device the probe lives on."""
+    import torch
+
+    g = torch.Generator(device=device)
+    g.manual_seed(SEED)
+    return g
+
+
+def made_up(t, gen):
+    """A copy of a floating tensor with its shape, dtype and strides and seeded normal values (fp8 codes are the
+    normal values rounded to the code). An expanded tensor (a stride of 0) is kept: its rows share memory."""
+    import torch
+
+    if any(int(s) == 0 and int(n) > 1 for s, n in zip(t.stride(), t.shape)):
+        return kept(t)
+    vals = torch.randn(tuple(t.shape), generator=gen, device=t.device, dtype=torch.float32).to(t.dtype)
+    buf = strided_zeros(t.shape, t.stride(), t.dtype, t.device)
+    buf.copy_(vals)
+    return buf
+
+
+def probed(obj, n: int, rows: int, gen, fill=None, key=None):
+    """A copy of an argument cut as `sliced` cuts it (strides kept) whose token-dimension values are made up: every
+    floating tensor that holds the token dimension (first dimension n, or the last of a 2-D tensor) gets seeded
+    normal values (made_up). `fill(key, tensor)` - key the parameter name when the caller knows it, else the
+    position - may return other values for a tensor only the op knows the range of (rotary positions, expert ids);
+    other integer tensors, and tensors without the token dimension (weights, scales of the weights), keep the
+    engine's values."""
+    if _is_tensor(obj):
+        t = obj
+        holds = False
+        if t.dim() >= 1 and int(t.shape[0]) == n:
+            t, holds = t[:rows], True
+        elif t.dim() == 2 and int(t.shape[-1]) == n:
+            t, holds = t[:, :rows], True
+        if fill is not None:
+            got = fill(key, t)
+            if got is not None:
+                return got
+        if holds and t.is_floating_point():
+            return made_up(t, gen)
+        return kept(t)
+    if isinstance(obj, tuple):
+        return tuple(probed(o, n, rows, gen, fill, i) for i, o in enumerate(obj))
+    if isinstance(obj, list):
+        return [probed(o, n, rows, gen, fill, i) for i, o in enumerate(obj)]
+    if isinstance(obj, dict):
+        return {k: probed(o, n, rows, gen, fill, k) for k, o in obj.items()}
+    return obj
+
+
 def nbytes(obj) -> int:
     return sum(int(t.numel()) * int(t.element_size()) for t in all_tensors(obj))
 
@@ -169,6 +251,14 @@ class Comparison:
     dtypes: Tuple[str, ...]         # the kernel's output dtypes
     same_as_definition: bool        # every kernel output equals the dtype definition's output bitwise
     same_as_input: bool             # every definition output equals an input of the same shape (an identity)
+    exact: bool = False             # compared element by element (compare_exact: indices, positions, slot ids)
+
+
+def torch_tiny(t) -> float:
+    """The smallest positive normal value of t's dtype (the floor a division by an allowance may use)."""
+    import torch
+
+    return float(torch.finfo(t.dtype).tiny)
 
 
 def _pair(kernel_out, reference_out, native_out):
@@ -219,7 +309,7 @@ def compare(kernel_out, reference_out, native_out=None, inputs=None) -> Comparis
             p90 = float(ne.flatten().kthvalue(max(1, int(math.ceil(0.9 * ne.numel())))).values)
             noise = max(noise, p90)
             allowed = allowed + FACTOR * ne.clamp_min(p90)
-        ratio = e / allowed.clamp_min(1e-300)
+        ratio = e / allowed.clamp_min(torch_tiny(allowed))   # 1e-300 is 0 in float32: 0/0 hid the ratio
         margin = max(margin, float(ratio.max()))
         bad = e > allowed
         violations += int(bad.sum())
@@ -242,6 +332,40 @@ def compare(kernel_out, reference_out, native_out=None, inputs=None) -> Comparis
                       same_as_input=same_in)
 
 
+def compare_exact(kernel_out, reference_out) -> Comparison:
+    """Outputs whose meaning is exact - indices, positions, slot ids (M19 L3.3d): every output tensor, integer or
+    floating, paired by position and compared element by element; `violations` counts the elements that differ (a
+    NaN against a NaN at the same place agrees). Raises ValueError when the outputs do not pair up."""
+    ks, rs = all_tensors(kernel_out), all_tensors(reference_out)
+    if len(ks) != len(rs) or not rs:
+        raise ValueError(f"the kernel gives {len(ks)} tensors, the definition {len(rs)}")
+    diff = scale = 0.0
+    elements = violations = 0
+    worst = None
+    for i, (k, r) in enumerate(zip(ks, rs)):
+        if tuple(k.shape) != tuple(r.shape):
+            raise ValueError(f"output {i}: the kernel gives shape {tuple(k.shape)}, the definition {tuple(r.shape)}")
+        kd, rd = k.detach(), r.detach().to(k.dtype)
+        neq = kd != rd
+        if kd.is_floating_point():
+            neq = neq & ~(kd.isnan() & rd.isnan())
+        elements += int(rd.numel())
+        if rd.numel():
+            scale = max(scale, float(rd.double().abs().max()))
+        n = int(neq.sum())
+        if n:
+            violations += n
+            j = int(neq.flatten().nonzero()[0])
+            d = (kd.double() - rd.double()).abs()
+            diff = max(diff, float(d[neq].max()))
+            if worst is None:
+                worst = (i, j, float(kd.flatten()[j]), None, float(rd.flatten()[j]), 0.0)
+    return Comparison(diff=diff, floor=None, noise=None, scale=scale, elements=elements, violations=violations,
+                      nonfinite=0, margin=(math.inf if violations else 0.0), worst=worst,
+                      dtypes=tuple(_dtype(k) for k in ks), same_as_definition=violations == 0, same_as_input=False,
+                      exact=True)
+
+
 def vacuous(cmp: Comparison) -> Optional[str]:
     """Why this input decides nothing: a definition output of all zeros with which the kernel agrees (a dummy
     input), or a definition that is the identity on it (rotary at position 0) with which the kernel agrees. None
@@ -258,6 +382,12 @@ def vacuous(cmp: Comparison) -> Optional[str]:
 def describe(cmp: Comparison) -> str:
     """The numbers of a comparison, as the record carries them (testbed/m18_kernel_summary.py reads this)."""
     s = f"max |kernel - definition| {cmp.diff:.3g} over {cmp.elements} values"
+    if cmp.exact:
+        s += f"; compared element by element (indices and positions are exact): {cmp.violations} differ"
+        if cmp.worst is not None:
+            i, j, k, _n, r, _a = cmp.worst
+            s += f"; first at output {i} index {j}: kernel {k:.10g}, definition {r:.10g}"
+        return s
     if cmp.floor is not None:
         s += f"; the definition's own noise {cmp.floor:.3g} (typical {cmp.noise:.3g})"
     else:

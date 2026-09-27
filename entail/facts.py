@@ -18,8 +18,11 @@ does not serve one sequence's KV under another's key (codebook v2 I; vllm#49377,
 the token type id a position is given by its role (padding), so a server that pads a cross-encoder's input does not
 give the padding the last real token's segment (vllm#58138; codebook v2 G). v7 (M15.8) adds Stops: the ids at
 which a generation ends (and begins, and is padded), declared in up to three files that each engine reads a
-different subset of (Llama 3, April 2024: config.json named one end, the model emitted another). Each version only
-adds optional fields or whole classes, so an older fact is a newer fact with
+different subset of (Llama 3, April 2024: config.json named one end, the model emitted another). v8 (M17.4) adds
+Rotary.pairing; v9 (M18) Tokenization, KernelReference, Parse and Placeholder; v10 (M19 L3.3c) PathAgreement: what
+one request comes to along two of the engine's own paths that mean the same (decode against a fresh prefill, alone
+against batched, cold against a prefix-cache hit). Each version only adds optional fields or whole classes, so an
+older fact is a newer fact with
 them open, and a fact written with an older version is still read (READABLE_VERSIONS); it may not state a field its
 version did not have (ADDED_IN).
 
@@ -30,8 +33,8 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Optional, Tuple
 
-VOCAB_VERSION = 9
-READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9})   # a later version only adds optional fields or classes; fields in ADDED_IN
+VOCAB_VERSION = 10
+READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 10})   # a later version only adds optional fields or classes; fields in ADDED_IN
 ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("Template", "tool_call_format"): 3,
             ("Rotary", "low_freq_factor"): 4, ("Rotary", "high_freq_factor"): 4,
             ("Rotary", "beta_fast"): 6, ("Rotary", "beta_slow"): 6, ("Rotary", "attention_factor"): 6,
@@ -550,6 +553,27 @@ class Placeholder:
         _number("Placeholder", "preceded_by", self.preceded_by, 0, integer=True)
 
 
+@dataclass(frozen=True)
+class PathAgreement:
+    """What one request came to along two of the engine's own paths that mean the same (v10, M19 L3.3c): `paths`
+    names the pair - "decode_prefill" (the decode steps that read the KV cache the engine wrote, against a fresh
+    prefill of the same tokens), "alone_batched" (a request alone, against the same request in a batch),
+    "cold_cache" (a cold run, against one that reads the prefix cache). `flip_margin` is the largest log-probability
+    gap at which a prediction the first path was confident of changed (0.0 when none changed), `pdrift` the largest
+    move of a kept token's probability, over `probes` probe requests (path_contract.py)."""
+    paths: str
+    probes: int
+    flip_margin: float
+    pdrift: float
+
+    def __post_init__(self):
+        _closed("PathAgreement", "paths", self.paths, frozenset({"decode_prefill", "alone_batched", "cold_cache"}),
+                optional=False)
+        _number("PathAgreement", "probes", self.probes, 0, integer=True)
+        _number("PathAgreement", "flip_margin", self.flip_margin, 0)
+        _number("PathAgreement", "pdrift", self.pdrift, 0)
+
+
 # --- not in the vocabulary ------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -593,13 +617,14 @@ VOCABULARY = {
     "Template": "PROPERTY", "Coverage": "MAPPING", "TokenType": "MAPPING", "Reduction": "REDUCTION", "Epoch": "TIME",
     "Identity": "TIME", "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE", "KernelConfig": "LAYOUT",
     "Vocab": "MAPPING", "Stops": "MAPPING", "Tokenization": "MAPPING", "KernelReference": "PROPERTY",
-    "Parse": "MAPPING", "Placeholder": "FRAME",
+    "Parse": "MAPPING", "Placeholder": "FRAME", "PathAgreement": "PROPERTY",
 }
 _HERE = {"Layout": Layout, "Quantized": Quantized, "Rotary": Rotary, "Positions": Positions, "Valid": Valid,
          "ModelProps": ModelProps, "Prediction": Prediction, "LatentScale": LatentScale, "Template": Template,
          "TokenType": TokenType, "Reduction": Reduction, "Epoch": Epoch, "Identity": Identity, "Assumed": Assumed,
          "Origin": Origin, "KernelConfig": KernelConfig, "Vocab": Vocab, "Stops": Stops, "Tokenization": Tokenization,
-         "KernelReference": KernelReference, "Parse": Parse, "Placeholder": Placeholder}
+         "KernelReference": KernelReference, "Parse": Parse, "Placeholder": Placeholder,
+         "PathAgreement": PathAgreement}
 
 
 def vocabulary_class(name):

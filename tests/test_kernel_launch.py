@@ -91,7 +91,7 @@ def test_the_triton_adapter_binds_arguments_memoises_layouts_and_names_the_engin
                                                                                  "NUM_HEADS": 16}, k1))
     got = [d for d in rec if d.contract.boundary == "kernel:sglang.fused_gdn_gating"]
     assert got and all(d.verdict is Verdict.UNKNOWN for d in got), rec
-    assert triton_launch.handles(fn) == {}
+    assert list(triton_launch.handles(fn)) == ["relay"], "the one repair: relaid copies (M19 L3.3b)"
 
 
 def test_stride_like_names_and_a_stride_told_by_value_are_not_broken():
@@ -156,6 +156,147 @@ def test_the_hook_decides_each_stride_pattern_once_and_caps_strided_patterns_per
         assert triton_launch.stats()["kernels_seen"] == 1 and triton_launch.stats()["patterns_decided"] == 1 + triton_launch.LIMIT
     finally:
         triton_launch.reset()
+
+
+def _gating(knows_inner=False, strides_told=True):
+    """A launch emulated in torch as a Triton kernel reads memory: `a` through its pointer, the row stride it is told
+    (or the row length when it is told none) and an inner stride of 1 unless it knows a's; it writes 2 * a into g."""
+    def launch(args, kwargs):
+        g, a = args[0], args[1]
+        row = kwargs["stride_a"] if strides_told else a.shape[1]
+        inner = a.stride(1) if knows_inner else 1
+        g.copy_(torch.as_strided(a, a.shape, (row, inner), a.storage_offset()) * 2)
+    return launch
+
+
+def _fake(names):
+    def gate():
+        pass
+
+    gate.__module__ = "fake_engine.kernels"
+    return SimpleNamespace(params=[SimpleNamespace(name=n, is_constexpr=False) for n in names], fn=gate)
+
+
+def test_a_launch_the_layout_of_which_cannot_be_told_is_run_twice_and_repaired():
+    """M19 L3.3b: sglang#21843's shape, a strided innermost dimension the kernel is not told - run as given and with
+    the tensor relaid (inner stride 1, the row stride it is told kept): the values differ, so the kernel reads the
+    tensor as if it were contiguous; every later launch of that pattern runs on the relaid copy, written back."""
+    if torch is None:
+        return
+    from entail.adapters import triton_launch as tl
+
+    tl.reset()
+    fn = _fake(["g", "a", "stride_a"])
+    a = torch.randn(8, 32)[:, ::2]                           # strides (32, 2)
+    g = torch.zeros(8, 16)
+    key = tl._layout_key(fn, (g, a), {"stride_a": 32})
+    _, ds = decided(lambda: tl._decide(fn, (g, a), {"stride_a": 32}, key, _gating()))
+    got = [d for d in ds if d.contract.boundary == "kernel:fake_engine.gate"]
+    assert len(got) == 1 and got[0].verdict is Verdict.RESOLVED and "reads a as if it were contiguous" in got[0].note, ds
+    assert int(g.abs().sum()) == 0, "the comparison ran on copies: the caller's output is untouched"
+    assert key in tl._REPAIR and tl.stats()["run_twice"] == 1
+    tl.launch_relaid(_gating(), (g, a), {"stride_a": 32}, *tl._REPAIR[key])
+    assert torch.equal(g, a * 2), "the repaired launch writes what a means"
+    tl.reset()
+    g = torch.zeros(8, 16)
+    _, ds = decided(lambda: tl._decide(fn, (g, a), {"stride_a": 32}, key, _gating(knows_inner=True)))
+    got = [d for d in ds if d.contract.boundary == "kernel:fake_engine.gate"]
+    assert len(got) == 1 and got[0].verdict is Verdict.PASS and "reads a right" in got[0].note, ds
+    assert key not in tl._REPAIR
+    tl.reset()
+
+
+def test_two_read_only_halves_of_one_buffer_are_copied_apart_and_repaired():
+    """sglang#21843 exactly: a and b are every other column of one projection (one storage, only read); the kernel
+    writes g. Sharing storage between tensors that are only read does not stop the comparison."""
+    if torch is None:
+        return
+    from entail.adapters import triton_launch as tl
+
+    def gdn(args, kwargs):
+        g, a, b = args
+        s = kwargs["stride_a"]
+        ra = torch.as_strided(a, a.shape, (s, 1), a.storage_offset())
+        rb = torch.as_strided(b, b.shape, (s, 1), b.storage_offset())
+        g.copy_(ra + 2 * rb)
+
+    tl.reset()
+    fn = _fake(["g", "a", "b", "stride_a"])
+    buf = torch.randn(8, 32)
+    a, b = buf[:, 0::2], buf[:, 1::2]
+    g = torch.zeros(8, 16)
+    key = tl._layout_key(fn, (g, a, b), {"stride_a": 32})
+    _, ds = decided(lambda: tl._decide(fn, (g, a, b), {"stride_a": 32}, key, gdn))
+    got = [d for d in ds if d.contract.boundary == "kernel:fake_engine.gate"]
+    assert len(got) == 1 and got[0].verdict is Verdict.RESOLVED, ds
+    relay, written = tl._REPAIR[key]
+    assert set(relay) == {("a", 1), ("a", 2)} and written == [], "a and b are read, not written: nothing copied back"
+    tl.launch_relaid(gdn, (g, a, b), {"stride_a": 32}, relay, written)
+    assert torch.allclose(g, a + 2 * b) and torch.equal(buf[:, 0::2], a), "the repaired launch; the inputs untouched"
+    tl.reset()
+
+
+def test_a_kernel_told_no_stride_is_relaid_wholly_contiguous():
+    if torch is None:
+        return
+    from entail.adapters import triton_launch as tl
+
+    tl.reset()
+    fn = _fake(["g", "a"])
+    a = torch.randn(8, 32)[:, ::2]
+    g = torch.zeros(8, 16)
+    key = tl._layout_key(fn, (g, a), {})
+    _, ds = decided(lambda: tl._decide(fn, (g, a), {}, key, _gating(strides_told=False)))
+    got = [d for d in ds if d.contract.boundary == "kernel:fake_engine.gate"]
+    assert got[0].verdict is Verdict.RESOLVED and "wholly contiguous" in got[0].resolution, ds
+    assert "worst ratio to the allowance 0;" not in got[0].note, "exact zeros must not hide the ratio (0/0)"
+    tl.launch_relaid(_gating(strides_told=False), (g, a), {}, *tl._REPAIR[key])
+    assert torch.equal(g, a * 2)
+    tl.reset()
+
+
+def test_launches_that_cannot_be_run_twice_are_decided_from_the_launch_alone():
+    if torch is None:
+        return
+    from entail.adapters import triton_launch as tl
+
+    tl.reset()
+    fn = _fake(["g", "a", "stride_a"])
+    x = torch.randn(16, 8).t()                                # transposed: keeping the row stride cannot relay it
+    assert klc.relaid_strides(x) is None and klc.relaid_strides(x, whole=True) == (16, 1)
+    g = torch.zeros(8, 16)
+    _, ds = decided(lambda: tl._decide(fn, (g, x), {"stride_a": 1}, ("k", 1), _gating()))
+    assert [d.verdict for d in ds if d.contract.boundary == "kernel:fake_engine.gate"] == [Verdict.UNKNOWN], ds
+    buf = torch.randn(8, 32)
+    _, ds = decided(lambda: tl._decide(fn, (buf[:, :16], buf[:, ::2]), {"stride_a": 32}, ("k", 2), _gating()))
+    assert [d.verdict for d in ds if d.contract.boundary == "kernel:fake_engine.gate"] == [Verdict.UNKNOWN], \
+        "tensors that share storage would be parted by copies"
+    was = kernel_budget = None
+    from entail import kernel_reference_contract as krc
+    was = krc.BUDGET
+    krc.BUDGET = 16
+    try:
+        a = torch.randn(8, 32)[:, ::2]
+        _, ds = decided(lambda: tl._decide(fn, (torch.zeros(8, 16), a), {"stride_a": 32}, ("k", 3), _gating()))
+    finally:
+        krc.BUDGET = was
+    assert [d.verdict for d in ds if d.contract.boundary == "kernel:fake_engine.gate"] == [Verdict.UNKNOWN]
+    zeros = torch.zeros(8, 32)[:, ::2]
+    assert tl.differential(_gating(), (torch.zeros(8, 16), zeros), {"stride_a": 32}, {("a", 1): False}) is None, \
+        "all zeros: the comparison decides nothing"
+    assert not tl._REPAIR
+    tl.reset()
+
+
+def test_relaid_keeps_outer_strides_and_values():
+    if torch is None:
+        return
+    a = torch.randn(4, 6, 20)[:, :, ::2]                       # (4, 6, 10) strides (120, 20, 2)
+    r = klc.relaid(a)
+    assert r.stride() == (120, 20, 1) and torch.equal(r, a)
+    w = klc.relaid(a, whole=True)
+    assert w.is_contiguous() and torch.equal(w, a)
+    assert klc.relaid(torch.randn(4, 6)) is None, "nothing to change"
 
 
 if __name__ == "__main__":

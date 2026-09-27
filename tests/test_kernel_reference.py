@@ -103,6 +103,34 @@ class Rope(CustomOp):
         return query * self.cache.to(query.dtype) * positions[0].unsqueeze(-1).to(query.dtype)
 
 
+class SizeTiled(CustomOp):
+    """Right at launches of up to 64 rows, wrong above (a launch configuration keyed by the batch size, vllm#52576's
+    shape): a 64-row slice takes the small launch and passes; the engine's own 256-row launch does not."""
+
+    def forward_native(self, x):
+        return x * 2.0
+
+    def forward_cuda(self, x):
+        return x * 2.0 if x.shape[0] <= 64 else x * 2.0 + 0.5 * x.flip(-1)
+
+
+class CachedRope(CustomOp):
+    """A rotary op with its cos/sin cache, one row per position. "doubled" reads the row of twice the position:
+    right at position 0, which is all a warm-up gives it."""
+
+    def __init__(self, kind="faithful"):
+        self.kind = kind
+        super().__init__()
+        self.register_buffer("cos_sin_cache", torch.randn(100, 8))
+
+    def forward_native(self, positions, query):
+        return query * self.cos_sin_cache[positions]
+
+    def forward_cuda(self, positions, query):
+        p = positions if self.kind == "faithful" else (positions * 2) % 100
+        return query * self.cos_sin_cache[p]
+
+
 class Overrides(SiluAndMul):
     def forward(self, x):
         return self.forward_native(x)
@@ -137,6 +165,27 @@ def decided(fn):
 def setup():
     vk.reset()
     torch.manual_seed(0)
+
+
+def captured(m, x):
+    """One call of the op inside a CUDA graph capture, at x's size: the graph holds the kernel there, and nothing
+    held it to the definition at that size - so a later mismatch cannot be repaired for what the graph replays."""
+    was = vk.capturing
+    vk.capturing = lambda: True
+    try:
+        with redirect_stdout(io.StringIO()):
+            m(x)
+    finally:
+        vk.capturing = was
+
+
+def warm(fn):
+    """fn() inside one of vLLM's dummy runs (profile run, warm-ups): the adapter decides on a probe made from it."""
+    vk._STATE["dummy"] += 1
+    try:
+        return decided(fn)
+    finally:
+        vk._STATE["dummy"] -= 1
 
 
 def test_the_fact_checks_its_numbers():
@@ -249,6 +298,7 @@ def test_a_kernel_with_the_halves_swapped_is_broken():
     setup()
     m = SiluAndMul("swapped")
     vk.wrap(m)
+    captured(m, torch.randn(100, 16))
     out, ds = decided(lambda: m(torch.randn(100, 16)))
     assert len(ds) == 1 and ds[0].verdict is Verdict.BROKEN and ds[0].rule == RULES["kernel_reference_mismatch"], ds
     assert "SiluAndMul" in ds[0].note and "max |kernel - definition|" in ds[0].note and "values beyond" in ds[0].note
@@ -259,6 +309,7 @@ def test_a_kernel_that_loses_a_value_to_nan_is_broken():
     setup()
     m = SiluAndMul("nan")
     vk.wrap(m)
+    captured(m, torch.randn(100, 16))
     out, ds = decided(lambda: m(torch.randn(100, 16)))
     assert len(ds) == 1 and ds[0].verdict is Verdict.BROKEN and "non-finite" in ds[0].note, ds
 
@@ -269,6 +320,7 @@ def test_a_kernel_that_zeroes_values_is_broken_whatever_the_largest_value():
     vk.wrap(m)
     x = torch.randn(100, 16)
     x[0, 0] = 300.0
+    captured(m, x)
     out, ds = decided(lambda: m(x))
     assert len(ds) == 1 and ds[0].verdict is Verdict.BROKEN and "values beyond" in ds[0].note, ds
 
@@ -282,6 +334,7 @@ def test_each_output_is_held_to_its_own_size():
     setup()
     m = Quant(double_scale=True)
     vk.wrap(m)
+    captured(m, torch.randn(100, 16))
     out, ds = decided(lambda: m(torch.randn(100, 16)))
     assert len(ds) == 1 and ds[0].verdict is Verdict.BROKEN and "output 1" in ds[0].note, ds
 
@@ -377,10 +430,8 @@ def test_a_dummy_or_identity_input_decides_nothing_and_the_next_call_decides():
     out, ds = decided(lambda: m(torch.ones(100, 16)))
     assert not ds, "one repeated row decides nothing either"
     tried = dict(vk._TRIED)
-    vk._STATE["dummy"] = 1
-    out, ds = decided(lambda: m(torch.randn(100, 16)))
-    vk._STATE["dummy"] = 0
-    assert not ds and vk._TRIED == tried, "inside a dummy run nothing is compared or counted"
+    captured(m, torch.randn(100, 16))
+    assert vk._TRIED == tried, "a capture-time call is noted, not compared or counted"
     out, ds = decided(lambda: m(torch.randn(100, 16)))
     assert len(ds) == 1 and ds[0].verdict is Verdict.BROKEN and "call 3" in ds[0].note, ds
     setup()
@@ -408,6 +459,7 @@ def test_under_a_stop_policy_the_decision_raises_once_and_the_wrapper_steps_asid
     m = SiluAndMul("swapped")
     orig = m._forward_method
     vk.wrap(m)
+    captured(m, torch.randn(100, 16))       # unrepairable, so the mismatch is broken - and a stop policy stops there
     os.environ["ENTAIL_ON_BROKEN"] = "stop"
     try:
         try:
@@ -494,12 +546,18 @@ def test_a_mismatch_is_sent_to_the_definition_when_graphs_are_off():
 
 def test_with_graphs_or_under_refuse_a_mismatch_stays_broken():
     setup()
-    m = SiluAndMul("swapped")             # without vLLM, graphs are not known to be off: no repair is offered
+    m = SiluAndMul("swapped")             # a graph captured the kernel at a size nothing held it to the definition
     vk.wrap(m)
     x = torch.randn(100, 16)
+    captured(m, torch.randn(8, 16))
     out, ds = decided(lambda: m(x))
-    assert ds[0].verdict is Verdict.BROKEN and "not repaired: CUDA graphs" in ds[0].note, ds[0].note
+    assert ds[0].verdict is Verdict.BROKEN and "not repaired: CUDA graphs were captured" in ds[0].note, ds[0].note
     assert torch.equal(out, SiluAndMul("swapped").forward_cuda(x)), "unrepaired: the engine gets the kernel's output"
+    setup()
+    m = SiluAndMul("swapped")             # nothing captured yet: the switch reaches every later call and capture
+    vk.wrap(m)
+    out, ds = decided(lambda: m(x))
+    assert ds[0].verdict is Verdict.RESOLVED and torch.equal(out, m.forward_native(x)), ds
     setup()
     was, pol = vk.graphs_off, core.policy()
     vk.graphs_off = lambda: True
@@ -555,6 +613,85 @@ def test_every_runner_method_that_feeds_dummy_input_is_marked():
             del sys.modules[name]
         else:
             sys.modules[name] = was
+
+
+def test_a_warm_up_call_is_decided_on_a_probe_before_any_capture():
+    """M19 L3.3a: vLLM's warm-up feeds one row over and over; the probe keeps its shape and makes up the values, so
+    the mismatch is decided - and repaired - before a graph is captured, and the capture records the definition."""
+    setup()
+    m = SiluAndMul("swapped")
+    vk.wrap(m)
+    x = torch.ones(100, 16)
+    out, ds = warm(lambda: m(x))
+    assert len(ds) == 1 and ds[0].verdict is Verdict.RESOLVED, ds
+    assert "probe of 100 rows made from vLLM's warm-up call of 100 rows" in ds[0].note, ds[0].note
+    assert torch.equal(out, m.forward_native(x)), "the warm-up itself already runs the definition"
+    assert m._forward_method == m.forward_native, "a capture from here on records the definition"
+    assert vk.stats()["warm_decided"] == 1
+    a = krc.probed((x,), 100, 64, krc.generator("cpu"))
+    b = krc.probed((x,), 100, 64, krc.generator("cpu"))
+    assert tuple(a[0].shape) == (64, 16) and not krc.uniform_rows(a) and torch.equal(a[0], b[0]), "seeded"
+    cols = torch.ones(100, 32)[:, ::2]
+    p = krc.probed((cols, torch.zeros(100, dtype=torch.long)), 100, 64, krc.generator("cpu"))
+    assert p[0].stride() == cols.stride() and p[1].dtype == torch.long and int(p[1].abs().sum()) == 0, \
+        "strides kept; an integer the op alone knows the range of keeps the engine's values without a fill"
+
+
+def test_warm_ups_are_decided_once_per_size_class():
+    setup()
+    m = SiluAndMul("faithful")
+    vk.wrap(m)
+    for n in (1, 2, 3, 4, 100, 120, 128):
+        out, ds = warm(lambda: m(torch.ones(n, 16)))
+    assert vk.stats()["warm_decided"] == 4, vk.stats()
+    assert vk._PASSED[vk.config_of(m, "SiluAndMul")] == {1, 2, 4, 128}
+    out, ds = decided(lambda: m(torch.randn(50, 16)))
+    assert len(ds) == 1 and ds[0].verdict is Verdict.PASS and "call 1" in ds[0].note, "the first real call still decides"
+
+
+def test_a_kernel_wrong_only_at_large_launches_is_caught_at_that_size():
+    setup()
+    m = SizeTiled()
+    vk.wrap(m)
+    out, ds = decided(lambda: m(torch.randn(256, 16)))
+    assert ds[0].verdict is Verdict.PASS, "the real call's 64-row slice takes the small launch: missed"
+    setup()
+    m = SizeTiled()
+    vk.wrap(m)
+    out, ds = warm(lambda: m(torch.ones(32, 16)))
+    assert ds[0].verdict is Verdict.PASS
+    captured(m, torch.randn(32, 16))       # the graph of class 32 holds a kernel verified at that size
+    out, ds = warm(lambda: m(torch.ones(256, 16)))
+    assert ds[0].verdict is Verdict.RESOLVED and "probe of 256 rows" in ds[0].note, ds
+    setup()
+    m = SizeTiled()
+    vk.wrap(m)
+    captured(m, torch.randn(512, 16))      # a graph at a size nothing verified
+    out, ds = warm(lambda: m(torch.ones(256, 16)))
+    assert ds[0].verdict is Verdict.BROKEN and "not repaired" in ds[0].note, ds
+
+
+def test_rotary_positions_are_drawn_from_the_cache_so_a_warm_up_decides():
+    for kind, verdict in (("doubled", Verdict.RESOLVED), ("faithful", Verdict.PASS)):
+        setup()
+        m = CachedRope(kind)
+        vk.wrap(m)
+        out, ds = warm(lambda: m(torch.zeros(50, dtype=torch.long), torch.ones(50, 8)))
+        assert len(ds) == 1 and ds[0].verdict is verdict, (kind, ds)
+
+
+def test_a_repair_reaches_every_module_of_its_configuration():
+    setup()
+    m1, m2, m3 = SiluAndMul("swapped"), SiluAndMul("swapped"), SiluAndMul("swapped", eps=1e-5)
+    for m in (m1, m2, m3):
+        vk.wrap(m)
+    x = torch.randn(100, 16)
+    out, ds = decided(lambda: m1(x))
+    assert ds[0].verdict is Verdict.RESOLVED, ds
+    assert m2._forward_method == m2.forward_native, "the layer that shares the configuration is switched too"
+    out2, ds2 = decided(lambda: m2(x))
+    assert not ds2 and torch.equal(out2, m2.forward_native(x))
+    assert m3._forward_method != m3.forward_native, "another configuration is its own decision"
 
 
 def test_instrument_walks_a_model_and_says_what_it_skipped():

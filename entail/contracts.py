@@ -118,6 +118,12 @@ RULES = {
                             "permutation that moved its item: another item can be served under the key",
     "kernel_stride_assumed": "a tensor handed to a kernel is strided in its innermost dimension and the kernel "
                              "takes no stride argument: it reads the tensor as if it were contiguous",
+    "paths_disagree": "the engine answers the same request differently along two of its own paths that mean the "
+                      "same (decode against a fresh prefill, alone against batched, cold against a prefix-cache "
+                      "hit): a confident prediction changed or a kept token's probability moved",
+    "kernel_layout_variant": "the kernel writes other values when a tensor it is handed is strided in its innermost "
+                             "dimension than when the same values are laid out contiguously there: it reads the "
+                             "tensor as if it were contiguous",
     "rotary_pairing_mismatch": "the built model's rotary layers pair the rotated dimensions differently from what "
                                "the checkpoint's architecture or config declares",
     "rotary_pairing_ignored": "the engine's kernel path pairs the rotated dimensions split-wise regardless of the "

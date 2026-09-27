@@ -27,13 +27,29 @@ kernel (ladder: a consumer whose use is unknown is unknown, so the rule is conse
 
 Each (kernel, stride pattern of its tensor arguments) is decided once per process (the adapter's memo), so the cost
 sits at the first launch of each pattern, not on every launch.
+
+Deciding by running it (M19 L3.3b). "Cannot be told from the launch" need not stay unknown: the same launch can be
+run twice on copies of its tensors, once as given and once with the strided tensors laid out again - the innermost
+dimension contiguous, every other stride kept (`relaid`), so the kernel's stride arguments still describe the
+tensor and a kernel that assumes a contiguous innermost dimension reads it right. The meaning of a tensor does not
+depend on how its values are laid out, so the two launches must write the same values:
+
+  kernel_layout_variant   the launch as given writes other values than the same launch with the strided tensors
+                          laid out contiguously in their innermost dimension (beyond the kernel's own run-to-run
+                          noise, measured by a second run of that layout): it reads the tensor as if it were
+                          contiguous. Resolved by launching the kernel with the tensors laid out that way (and
+                          copying what it wrote back), the layout its arguments describe.
+  (pass)                  the two launches write the same values: the kernel reads the strides right.
+
+A layout that keeping the outer strides cannot give (a transposed tensor: its innermost dimension's neighbour has
+stride 1) is not run twice; the launch stays with the rule above.
 """
 import re
 from typing import Dict, Iterable, List, Optional
 
 from . import tally as _tally
 
-RULE_NAMES = ("kernel_stride_assumed",)
+RULE_NAMES = ("kernel_stride_assumed", "kernel_layout_variant")
 STRIDE_NAME = re.compile(r"stride|_s\d+$|^s[a-z]{1,2}(_[a-z0-9])?$|^s_|^ld", re.IGNORECASE)   # sq_d, sxm; not seq_len
 
 
@@ -123,6 +139,86 @@ def check(boundary: str, consumer: str, kernel: str, bound: Dict[str, object], w
         elif any(d.verdict is Verdict.BROKEN for d in decisions):
             _tally.broken(boundary)
         _tally.tick(boundary)
+    return decisions
+
+
+def relaid_strides(t, whole: bool = False) -> Optional[tuple]:
+    """The strides of `t` with its innermost dimension of size > 1 made contiguous and every other stride kept (the
+    layout a kernel told the outer strides reads right), or, with `whole`, the contiguous strides (the layout a kernel
+    told no stride at all reads right). None when there is nothing to change, or when keeping the outer strides would
+    put two elements at one place (a transposed tensor)."""
+    inner = innermost_stride(t)
+    if inner is None or inner[2] in (0, 1):
+        return None
+    shape = [int(n) for n in t.shape]
+    if whole:
+        strides, acc = [0] * len(shape), 1
+        for d in range(len(shape) - 1, -1, -1):
+            strides[d] = acc
+            acc *= max(shape[d], 1)
+        return tuple(strides)
+    strides = [int(s) for s in t.stride()]
+    strides[inner[0]] = 1
+    dims = sorted((s, n) for s, n in zip(strides, shape) if n > 1)
+    for (s0, n0), (s1, _n1) in zip(dims, dims[1:]):
+        if s1 < s0 * n0:
+            return None
+    return tuple(strides)
+
+
+def relaid(t, margin: int = 0, whole: bool = False):
+    """A copy of `t` in the layout relaid_strides gives (same shape, dtype and values), in zeroed storage with
+    `margin` spare elements after it; None when there is no such layout."""
+    strides = relaid_strides(t, whole)
+    if strides is None:
+        return None
+    from .kernel_reference_contract import strided_zeros
+
+    buf = strided_zeros(t.shape, strides, t.dtype, t.device, margin)
+    buf.copy_(t)
+    return buf
+
+
+def check_relaid(boundary: str, consumer: str, kernel: str, names: List[str], cmp, where: str, owner=None,
+                 policy=None, repair: Optional[str] = None, record: bool = True) -> list:
+    """Decide a launch run twice (as given, and with `names` relaid; cmp = kernel_reference_contract.compare of
+    the as-given launch's floating tensors against the relaid launch's, the second relaid run as the noise). `repair`
+    is offered as the resolution of a mismatch unless the policy repairs nothing for Layout."""
+    from . import load, policies
+    from .contracts import RULES, Contract, Decision, Verdict, unrepaired
+    from .kernel_reference_contract import describe
+
+    policy = policy or policies.current()
+    contract = Contract(boundary, consumer, ("Layout",), ("Layout",))
+    which = ", ".join(names)
+    numbers = describe(cmp).replace("kernel - definition", "as given - relaid").replace("the definition's own noise",
+                                                                                      "the kernel's own noise")
+    if cmp.violations or cmp.nonfinite:
+        note = (f"{where}: {kernel} writes other values when {which} is strided in its innermost dimension than when "
+                f"the same values are laid out contiguously there with every other stride kept: it reads {which} as "
+                f"if it were contiguous ({numbers})")
+        if repair and policy.mismatch_setting("Layout") == "resolve":
+            d = Decision(contract, "Layout", Verdict.RESOLVED, RULES["resolved"], resolution=repair, note=note)
+        else:
+            verdict, blocking = unrepaired(policy, "Layout")
+            d = Decision(contract, "Layout", verdict, RULES["kernel_layout_variant"], blocking=blocking, note=note)
+    else:
+        d = Decision(contract, "Layout", Verdict.PASS, RULES["match"],
+                     note=f"{where}: {kernel} reads {which} right: the launch as given and the launch with {which} "
+                          f"laid out contiguously in the innermost dimension write the same values ({numbers})")
+    decisions = [d]
+    if record:
+        _tally.counts(boundary)["checks"] += 1
+        if d.verdict is Verdict.PASS:
+            _tally.passed(boundary, ["kernel_layout_variant"])
+        elif d.blocking:
+            _tally.refused(boundary)
+        elif d.verdict is Verdict.BROKEN:
+            _tally.broken(boundary)
+        elif d.verdict is Verdict.RESOLVED:
+            _tally.counts(boundary)["resolved"] += 1
+        _tally.tick(boundary)
+        load.enforce(decisions, once_for=owner)
     return decisions
 
 

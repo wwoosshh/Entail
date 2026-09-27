@@ -16,10 +16,18 @@ kernel_reference_contract.py; vllm#42016).
                query's dtype: rotary's _match_cos_sin_cache_dtype); the rule is in the core.
   handles      the op's dispatched method (M19 L3): a kernel that differs from its definition is resolved by sending
                the op to its definition, the meaning-keeping consumer (principle 7) - from the very call that was
-               compared (the slice is decided before the real input is computed) and for every later call of that
-               module in the process. Offered only when the engine runs without CUDA graphs: captured graphs replay
-               the kernel whatever the module's method says, so there it stays broken, with that reason. Under
-               ENTAIL_POLICY=refuse (or KernelReference=refuse) nothing is switched and the mismatch is broken.
+               compared (the slice is decided before the real input is computed) and for every later call of every
+               module of that op class and configuration in the process (one layer's decision stands for the layers
+               that share its configuration, so the repair reaches them all). Offered when the engine runs without
+               CUDA graphs, or when every graph captured so far holds the kernel only at size classes where it was
+               held to the definition and matched (M19 L3.3a); otherwise captured graphs replay the kernel whatever
+               the module's method says, so it stays broken, with that reason. Under ENTAIL_POLICY=refuse (or
+               KernelReference=refuse) nothing is switched and the mismatch is broken.
+  warm-ups     (M19 L3.3a) a call inside vLLM's dummy runs - the profile run, the compile warm-ups, the warm-up runs
+               before each capture - is decided on a probe made from it (kernel_reference_contract.probed: the
+               call's shapes, dtypes and strides, made-up token values; rotary positions drawn from the op's own
+               cos/sin cache range), once per size class, on the engine's own row count up to WARM_ROWS, before the
+               graph of that size is captured. A capture-time call is noted (its size class), not compared.
 Not compared, each said once as unknown: ops that override forward() (the mamba mixers, static sink attention:
 stateful, not row-wise); ops that hold the engine's state (a KV cache, an index buffer, a forward that reads the
 forward context: DeepSeek's sparse attention indexer - re-running it on a slice would write the engine's buffers
@@ -53,7 +61,10 @@ _TRIED = {}            # key -> real calls that decided nothing (dummy or identi
 _WRAPPED = {}          # id(module) -> (module, original _forward_method)
 _STATS = {}            # counts by reason: instrumented, native, overrides_forward, stateful, unreached, decided
 _STATE = {"dummy": 0}  # depth of vLLM's dummy runs (profile run, capture warm-ups) in this process
-_REPAIRED = {}         # id(module) -> True: the op was sent to its definition (a resolved mismatch)
+_REPAIRED = set()      # op configurations (module, class, configuration) sent to their definition
+_WARM = set()          # (key, size class) decided on a warm-up probe (M19 L3.3a)
+_CAPTURED = {}         # op configuration -> size classes captured into a CUDA graph with the kernel
+_PASSED = {}           # op configuration -> size classes where the kernel was held to the definition and matched
 TRIES = 64             # real calls a key may decide nothing on before it is given up: the dummy runs are not counted,
 #                        and a real slice decides unless every row is one token; a single-token request through a
 #                        rotary instance shared by 32 layers gives 32 such calls, so 64 covers two of them
@@ -163,8 +174,13 @@ def pattern(args, kwargs) -> tuple:
     return tuple(one(a) for a in args) + tuple((k, one(v)) for k, v in sorted(kwargs.items()))
 
 
+def config_of(module, name) -> tuple:
+    """The op's class and configuration: modules that share it are decided, and repaired, together."""
+    return (type(module).__module__, name, scalars(module))
+
+
 def key_of(module, name, args, kwargs) -> tuple:
-    return (type(module).__module__, name, scalars(module), pattern(args, kwargs))
+    return config_of(module, name) + (pattern(args, kwargs),)
 
 
 def capturing() -> bool:
@@ -231,10 +247,19 @@ def graph_mode():
 
 
 def graphs_off() -> bool:
-    """Whether the engine runs without CUDA graphs (enforce_eager, or a cudagraph mode of none). Only then does a
-    switch of an op's dispatched method reach every later call; captured graphs replay the kernel regardless. Not
-    known to be off: no repair is offered."""
+    """Whether the engine runs without CUDA graphs (enforce_eager, or a cudagraph mode of none). Then a switch of an
+    op's dispatched method reaches every later call; captured graphs replay the kernel regardless."""
     return (_STATE.get("cudagraph_mode") or graph_mode()) == "NONE"
+
+
+def repairable(cfg) -> bool:
+    """Whether sending the op to its definition now keeps every later call right: the engine runs without CUDA
+    graphs, or every graph captured so far in this process holds the kernel only at size classes where it was held
+    to its definition and matched (those graphs keep a kernel that is right at their size; every later call and
+    capture gets the definition)."""
+    if graphs_off():
+        return True
+    return _CAPTURED.get(cfg, set()) <= _PASSED.get(cfg, set())
 
 
 def prepare(args, kwargs):
@@ -246,6 +271,48 @@ def prepare(args, kwargs):
         return None
     rows = min(krc.ROWS, n)
     a, k = krc.sliced(args, n, rows), krc.sliced(kwargs, n, rows)
+    return a, k, n, rows, krc.nbytes(a) + krc.nbytes(k)
+
+
+def _device_of(obj):
+    ts = kernel_reference_contract.all_tensors(obj)
+    return ts[0].device if ts else "cpu"
+
+
+def positions(module, orig):
+    """The probe's fill for the arguments only the op knows the range of: a rotary op's positions index its cos/sin
+    cache, one row per position, and a warm-up's positions are zeros (rotary at position 0 is the identity and
+    decides nothing), so they are drawn from the cache's rows. Every other integer argument keeps the engine's
+    values."""
+    krc = kernel_reference_contract
+    try:
+        names = list(__import__("inspect").signature(orig).parameters)
+    except (TypeError, ValueError):
+        names = []
+    cache = getattr(module, "cos_sin_cache", None)
+    limit = int(cache.shape[0]) if _is_tensor(cache) and cache.dim() >= 1 else 0
+
+    def fill(key, t):
+        name = names[key] if isinstance(key, int) and key < len(names) else key
+        if limit and isinstance(name, str) and "position" in name and not t.is_floating_point():
+            return torch.randint(0, limit, tuple(t.shape), generator=krc.generator(t.device), device=t.device,
+                                 dtype=t.dtype)
+        return None
+
+    return fill
+
+
+def prepare_warm(module, orig, args, kwargs):
+    """A probe made from a warm-up call (kernel_reference_contract.probed): (args, kwargs, n, rows, bytes) on the
+    engine's own row count up to WARM_ROWS, or None when the arguments share no token dimension or hold none."""
+    krc = kernel_reference_contract
+    n = krc.rows_of(args, kwargs, token_hint())
+    if not n:
+        return None
+    rows = min(krc.WARM_ROWS, n)
+    gen = krc.generator(_device_of((args, kwargs)))
+    fill = positions(module, orig)
+    a, k = krc.probed(args, n, rows, gen, fill), krc.probed(kwargs, n, rows, gen, fill)
     return a, k, n, rows, krc.nbytes(a) + krc.nbytes(k)
 
 
@@ -311,24 +378,28 @@ def read_choice(module, orig, a, k):
     return k_out, n_out, r_out, changed, called["n"] > 0
 
 
-def _decide(module, name, orig, cut, call: int) -> bool:
+def _decide(module, name, orig, cut, call: int, warm: bool = False) -> bool:
     """Compare on this call. Returns whether something was decided (a decision or an unknown was recorded); False
-    when the input decides nothing (zeros, one repeated row, an identity) and the next call should try again."""
+    when the input decides nothing (zeros, one repeated row, an identity) and the next call should try again.
+    `warm`: the cut is a probe made from a warm-up call (prepare_warm), whose values are made up."""
     from .. import load
 
     krc = kernel_reference_contract
     consumer = f"vllm.{name}"
+    cfg = config_of(module, name)
 
     def unknown(why):
         load.enforce([load.cannot_check(BOUNDARY, consumer, "KernelReference", f"{name}: {why}")])
         return True
 
     def again(why):
-        if call < TRIES:
+        if warm or call < TRIES:
             return False
         return unknown(f"{why}, on each of its first {call} real calls; not compared")
 
     if cut is None:
+        if warm:
+            return False
         return unknown("its arguments share no token dimension to cut (no tensor, or metadata such as cu_seqlens), "
                        "so its kernel is not compared")
     if cut == "failed":
@@ -338,7 +409,7 @@ def _decide(module, name, orig, cut, call: int) -> bool:
         return unknown(f"its arguments cannot be cut (their first dimension is not the token count) and hold "
                        f"{size >> 20} MB: too large to compare whole")
     inputs = krc.tensors_of(list(a)) + krc.tensors_of(k)
-    if krc.uniform_rows(inputs):
+    if not warm and krc.uniform_rows(inputs):
         return again("every row of the input is the same token (a dummy input)")
     k_out, n_out, r_out, changed, via_definition = read_choice(module, orig, a, k)
     if not krc.tensors_of(k_out):
@@ -348,21 +419,79 @@ def _decide(module, name, orig, cut, call: int) -> bool:
     why = krc.vacuous(cmp)
     if why is not None:
         return again(why)
-    where = (f"{name}'s dispatched {getattr(orig, '__name__', 'kernel')} ({type(module).__module__}) on {rows} rows "
-             f"of its call {call}" + (" (batch-invariant mode: the definition's own ops are vLLM's kernels)"
-                                      if batch_invariant() else ""))
+    if warm:
+        where = (f"{name}'s dispatched {getattr(orig, '__name__', 'kernel')} ({type(module).__module__}) on a probe "
+                 f"of {rows} rows made from vLLM's warm-up call of {n} rows (the engine's shapes, dtypes and "
+                 f"strides; the values made up, seed {krc.SEED}), before any graph of that size is captured")
+    else:
+        where = (f"{name}'s dispatched {getattr(orig, '__name__', 'kernel')} ({type(module).__module__}) on {rows} "
+                 f"rows of its call {call}")
+    if batch_invariant():
+        where += " (batch-invariant mode: the definition's own ops are vLLM's kernels)"
     extra = f"; the runs replaced {changed} tensors of the op's state, put back" if changed else ""
     if via_definition:
         extra += "; the dispatched method calls the definition itself on this input (not an independent kernel)"
     repair = None
-    if graphs_off() and not via_definition:
-        repair = (f"{name} sent to its definition (forward_native) from this call on, for every later call of this "
-                  f"module in the process")
+    if not via_definition and repairable(cfg):
+        repair = (f"{name} sent to its definition (forward_native) from this call on, for every later call of every "
+                  f"module of this configuration in the process")
     elif cmp.violations or cmp.nonfinite:
-        extra += "; not repaired: CUDA graphs are captured with the kernel and replay it whatever the op dispatches"
-    if krc.resolved(krc.check(BOUNDARY, consumer, name, cmp, where, extra=extra, repair=repair)):
-        _REPAIRED[id(module)] = True
+        extra += ("; not repaired: CUDA graphs were captured with the kernel at sizes where it was not held to its "
+                  "definition, and replay it whatever the op dispatches")
+    decisions = krc.check(BOUNDARY, consumer, name, cmp, where, extra=extra, repair=repair)
+    if krc.resolved(decisions):
+        _send_all(cfg)
+    elif decisions and decisions[0].verdict.name == "PASS":
+        _PASSED.setdefault(cfg, set()).add(krc.bucket(n))
     return True
+
+
+def _send_all(cfg) -> int:
+    """The repair: every wrapped module of this op configuration dispatches to its definition from now on (a module
+    whose wrapper already stepped aside is switched here too). Returns how many modules were switched."""
+    _REPAIRED.add(cfg)
+    n = 0
+    for module, _orig in list(_WRAPPED.values()):
+        try:
+            if config_of(module, type(module).__name__) == cfg:
+                module._forward_method = module.forward_native
+                n += 1
+        except Exception:  # noqa: BLE001 - a module that cannot be read keeps its dispatch
+            continue
+    return n
+
+
+def _warm_up(module, name, orig, args, kwargs) -> None:
+    """Decide on a probe made from this warm-up call, once per (key, size class) and at most WARM_CLASSES classes
+    per op configuration (M19 L3.3a)."""
+    from .. import load
+
+    krc = kernel_reference_contract
+    try:
+        n = krc.rows_of(args, kwargs, token_hint())
+        if not n:
+            return
+        key = (key_of(module, name, args, kwargs), krc.bucket(n))
+        cfg = config_of(module, name)
+    except Exception:  # noqa: BLE001 - never the engine's problem (principle 12)
+        return
+    if key in _WARM or sum(1 for w in _WARM if w[0][:3] == cfg) >= krc.WARM_CLASSES:
+        return
+    _WARM.add(key)
+    cut = load.safely(BOUNDARY, f"vllm.{name}", "KernelReference", lambda: prepare_warm(module, orig, args, kwargs),
+                      default="failed")
+    load.safely(BOUNDARY, f"vllm.{name}", "KernelReference",
+                lambda: _decide(module, name, orig, cut, 0, warm=True), default=True)
+    _count("warm_decided")
+
+
+def _note_capture(module, name, args, kwargs) -> None:
+    """A call inside a CUDA graph capture: the graph of that size class holds whatever the op dispatches now."""
+    try:
+        n = kernel_reference_contract.rows_of(args, kwargs, token_hint())
+    except Exception:  # noqa: BLE001
+        n = None
+    _CAPTURED.setdefault(config_of(module, name), set()).add(kernel_reference_contract.bucket(n or 1))
 
 
 def wrap(module) -> bool:
@@ -377,7 +506,23 @@ def wrap(module) -> bool:
     def run(*args, **kwargs):
         if torch.compiler.is_compiling():        # traced: the graph holds the kernel alone
             return orig(*args, **kwargs)
-        if _STATE["dummy"] or capturing():
+        try:
+            cfg = config_of(module, name)
+        except Exception:  # noqa: BLE001 - never the engine's problem (principle 12)
+            return orig(*args, **kwargs)
+        if cfg in _REPAIRED:                     # another module of this configuration was decided and repaired
+            module._forward_method = module.forward_native
+            _count("sent_to_definition")
+            return module.forward_native(*args, **kwargs)
+        if capturing():
+            _note_capture(module, name, args, kwargs)
+            return orig(*args, **kwargs)
+        if _STATE["dummy"]:                      # the engine's own warm-up: decided on a probe made from it
+            _warm_up(module, name, orig, args, kwargs)
+            if cfg in _REPAIRED:
+                module._forward_method = module.forward_native
+                _count("sent_to_definition")
+                return module.forward_native(*args, **kwargs)
             return orig(*args, **kwargs)
         try:
             key = key_of(module, name, args, kwargs)
@@ -405,8 +550,7 @@ def wrap(module) -> bool:
         if decided:
             _DECIDED.add(key)
             _count("decided")
-            if _REPAIRED.get(id(module)):
-                module._forward_method = module.forward_native
+            if cfg in _REPAIRED:
                 _count("sent_to_definition")
                 return module.forward_native(*args, **kwargs)
             module._forward_method = orig
@@ -556,5 +700,9 @@ def reset():
     _TRIED.clear()
     _STATS.clear()
     _REPAIRED.clear()
+    _WARM.clear()
+    _CAPTURED.clear()
+    _PASSED.clear()
     _STATE["dummy"] = 0
+    _STATE.pop("cudagraph_mode", None)
     kernel_reference_contract.reset(BOUNDARY)
