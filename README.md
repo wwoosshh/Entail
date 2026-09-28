@@ -21,9 +21,8 @@ small model's load, most of it a start-up check of the engine's own paths that `
 - **102 healthy runs, no run broken.** 38 popular models on transformers, vLLM and SGLang: outputs identical to the
   run without entail in 97 of 98 comparisons (the other is the engine's own nondeterminism), and no check added in
   1.3.0 raised an alarm. Six runs report a real tokenizer difference (transformers 5 drops a leading space for two
-  Llama-2-era tokenizers); one false alarm is known outside that set (encoder-decoder models on vLLM, see
-  [Known gaps](#known-gaps)). (1.0.0 got 17 of its first 81 runs wrong; those causes are fixed and in the
-  [changelog](CHANGELOG.md).)
+  Llama-2-era tokenizers). The one false alarm found outside that set (encoder-decoder models on vLLM) is fixed
+  in 2.0.0. (1.0.0 got 17 of its first 81 runs wrong; those causes are fixed and in the [changelog](CHANGELOG.md).)
 
 Check your own model in three lines:
 
@@ -40,7 +39,7 @@ run goes on (it stops only if you ask it to); said to be "unknown" when nobody d
 default stand in silently. The name is the logical sense of *entail*: what a checkpoint declares must entail what
 the engine executes. (ent·**AI**·**L**: an AI library.)
 
-> **Status: 2.0.0, measured on one machine.** 2.0 adds the
+> **Status: 2.0.1, measured on one machine.** 2.0.1 corrects this README; its code is 2.0.0's. 2.0 adds the
 > platform - `entail serve`, two safety modes, official DLCs and custom nodes ([The platform](#the-platform-20)) -
 > around the same checks: on the 102 healthy runs it made exactly the decisions 1.3.0's frozen code made (no run
 > broken, the same six real tokenizer differences reported), requests cost at most about 1% more with entail on (1.000-1.011 over ten
@@ -459,13 +458,13 @@ For 1.0 every measurement of the development milestones was run again on the fin
   lines in all, the library's share of load time 1.4% at the median and 8.2% at the 90th percentile (measured
   again with the six rows above added: the same runs, the same repairs, the same 69 lines, nothing new said).
   Statically over 230 popular model folders: no false `broken` from the new facts.
-- **Second replay (pre-registered, vocabulary frozen at this version's code, commit `ce79b19`):** the next 150
+- **Second replay (pre-registered, vocabulary frozen at 1.2.0's code, commit `ce79b19`):** the next 150
   issues in the same fixed order were screened by the same rules; 20 passed and 15 reproduced here (six
   environments at the reported versions were built for them). Two blind raters put 8 of the 15 in entail's class
   (agreement kappa 0.72 over seven categories, 0.68 for in-class versus not; a third blind rater settled the 18
   of 86 items they disagreed on). entail detected **0 of those 8** (rule of three: at most 3 of 8 at 95%),
   raised no false alarm on the 7 reproduced outside the class, and broke one run itself (a wrapper with a fixed
-  signature on vLLM 0.23.0; fixed in this version). The misses: three tokenizers whose built class encodes
+  signature on vLLM 0.23.0; fixed in 1.2.0). The misses: three tokenizers whose built class encodes
   differently from the folder's tokenizer.json (the Vocab check compares sizes, not ids; one of the three was said
   `unknown` at the tokenizer boundary), and five at sites with no boundary (a kernel's scale layout, a
   linear-attention kernel's input layout, a tool parser, a multimodal placeholder's binding, a response's
@@ -481,13 +480,13 @@ For 1.0 every measurement of the development milestones was run again on the fin
   (SGLang, Phi-3.5-mini-instruct): the start-up probes were the engine's first prefills and met an engine defect
   (flashinfer's state merge does not take head_dim 96; any prompt of 128 tokens or more stops the scheduler, with
   entail off as well). SGLang's path check is opt-in since.
-- **Third and fourth replays (pre-registered, code frozen at `07fceac` and at this version's `2aa975b`):** the third
+- **Third and fourth replays (pre-registered, code frozen at `07fceac` and at 1.3.0's `2aa975b`):** the third
   screened the next 150 issues of the same order (10 passed, 8 reproduced), the fourth a new population of 437
   issues from the six months before the first (150 screened, 10 passed, 9 reproduced). Two blind raters, a third
   settling their disagreements, put 5 and 6 of the reproduced in entail's class (kappa 0.735 and 0.826 over seven
   categories, 0.776 and 0.916 for in-class versus not); they also rated whether a defect sits in the data and the
   computation itself or around them. entail detected **0 of 5** and **0 of 6** (0 of 2 and 0 of 5 in the data and
-  computation), raised no false alarm in the third and one in the fourth (Known gaps). Class share among the rated
+  computation), raised no false alarm in the third and one in the fourth (fixed in 2.0.0). Class share among the rated
   reports: 36 of 96 (37.5%) and 25 of 91 (27.5%). Over the four replays: 0 of 26. Protocol sections 8 and 9,
   screening, ratings and cases: `testbed/results/m18/replay3/` and `testbed/results/m19/replay4/`.
 - **31 test problems** (16 reproduction cases, 8 field cases, 7 simulated market incidents): each defect was
@@ -536,16 +535,11 @@ For 1.0 every measurement of the development milestones was run again on the fin
   adapter's module paths, a C++ kernel's input scale (Marlin), a GGUF tokenizer's declared type and cross-attention
   metadata captured in a CUDA graph. A multimodal model's vision tower is not compared for its rotary pairing (its
   reference pairs on its own terms); only the language model is.
-- **The start-up path check counts non-finite log-probabilities as agreement:** a model whose every log-probability
-  was NaN (vLLM 0.16, NVFP4 with float16 activations, vllm#33560) passed all three pairs.
-- **A false alarm on encoder-decoder models on vLLM:** whisper-large-v3-turbo gets nine `broken` lines at the KV cache
-  boundary (cache group 1 holds 0 slots for its tokens) although its output is right; the rule does not know that a
-  cross-attention cache group follows the encoder, not the decoder's tokens. The run goes on.
 - **Where the comparisons do not reach:** on vLLM's default path (torch.compile) custom ops are compiled and not
   compared with their definitions (the comparison runs in eager mode), and kernels called from C++ (Marlin) are not
   reached at all. SGLang's start-up path check runs only with `ENTAIL_PATHS=1`.
-- **Models loaded by hub id** are read from the snapshot the engine downloaded into the local cache (fixed in this
-  version: huggingface_hub refused such snapshots as incomplete, so every hub-id load said "could not be checked"
+- **Models loaded by hub id** are read from the snapshot the engine downloaded into the local cache (fixed in
+  1.2.0: huggingface_hub refused such snapshots as incomplete, so every hub-id load said "could not be checked"
   for Vocab and Stops; GLM-OCR by hub id on vLLM 0.30 now passes both). A model the cache does not hold at all
   is still `unknown` there.
 

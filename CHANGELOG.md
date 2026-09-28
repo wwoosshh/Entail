@@ -1,5 +1,26 @@
 # Changelog
 
+Version numbers (written down with 2.0.1): the first number changes when the design's structure changes; the second
+for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
+for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
+
+## 2.0.1
+
+Released 2026-09-28. A correction of the README (English and Korean); the code is 2.0.0's, apart from its version
+number. The PyPI page shows the README, so the correction needed a release.
+
+**Fixed**
+- The known gaps still listed two defects 2.0.0 had fixed - the start-up path check counting log-probabilities that
+  are not finite numbers as agreement (vllm#33560), and the false alarm on vLLM's encoder-decoder models
+  (whisper-large-v3-turbo) - and the summary at the top still called that false alarm known. Both are gone from the
+  list; the summary and the fourth replay's paragraph say it was fixed in 2.0.0.
+- Four sentences written for 1.2.0 and 1.3.0 said "this version": the second replay's frozen code (`ce79b19`), the
+  wrapper that broke a run on vLLM 0.23.0 and the hub-id fix are 1.2.0's, and the frozen `2aa975b` is 1.3.0's.
+  They name their version now.
+
+**Changed**
+- The version rule is written down (above, and in RELEASING.md).
+
 ## 2.0.0
 
 Released 2026-09-28. entail 2.0: a local platform that manages the stability of an AI project (ROADMAP product track
