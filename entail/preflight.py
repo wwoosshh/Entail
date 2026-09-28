@@ -4,13 +4,15 @@ This is the "load" check of entail (DESIGN.md section 2) as a command-line tool.
 before the model is loaded:
 
   PROPERTY (attention) - attn_logit_softcapping and sliding_window against a capability table for the engine's
-      attention backends. The table was written by reading the installed engines (audits/W_property_audit.md)
-      and the rows marked measured were confirmed by running them (audits/cap_probe.py).
+      attention backends (data/caps.json: each row says whether it was measured or read in the engine's code, and
+      on which version). The properties are read as the load check reads them (readers.read_hf_dict).
   MAPPING (config keys) - a key in config.json may be renamed on the way in, but its value has to survive
       somewhere in the resolved config. The naive "every key must be an attribute" rule fires on healthy
       models; measured in audits/W_MORE_FACTS.md.
   PROPERTY (tied embeddings) - tie_word_embeddings against what the checkpoint actually ships. When the value
       comes from the library default rather than the config, the message says so (PRECEDENCE).
+
+The model's RoPE is shown as the config declares it; it is checked where the engine builds it, at load (ENTAIL=load).
 
 Usage:
   entail preflight --model /path/to/gemma-2-2b-it --engine sglang --backend flashinfer
@@ -22,14 +24,21 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import fields
 
 from . import caps as _caps
+from . import readers
 from .facts import KernelCaps, ModelProps
+
+# How a row of the table is known, as a short label. The rows' refs name result files of the research workspace,
+# which the package does not have; printed, they read like internal notes (field test, entail#17).
+HOW = {"measured": "measured on {}", "code": "read in {}'s code", "documented": "documented by {}"}
+WORDS = {"softcap": "softcap", "sliding_window": "sliding window"}
 
 
 def _legacy_caps():
-    """engine -> backend -> (KernelCaps, evidence), built from data/caps.json (M3.1). The table used to be written
-    here; it is data now, and this view remains for the code that has not moved to caps.py yet."""
+    """engine -> backend -> (KernelCaps, {field: how it is known}), built from data/caps.json (M3.1). The table used
+    to be written here; it is data now, and this view remains for the code that has not moved to caps.py yet."""
     out = {}
     for consumer, cells in _caps.as_dict(_caps.default_table()).items():
         engine, role, short = consumer.split(".", 2)
@@ -39,7 +48,7 @@ def _legacy_caps():
             continue
         sc, sw = cells.get("ModelProps.softcap"), cells.get("ModelProps.sliding_window")
         kc = KernelCaps(softcap=bool(sc and sc.honours), sliding_window=bool(sw and sw.honours))
-        why = "; ".join(f"{c.field} {c.evidence}: {c.ref}" for c in cells.values())
+        why = {c.field: HOW[c.evidence].format(c.version) for c in cells.values()}
         out.setdefault(engine, {})[short] = (kc, why)
     return out
 
@@ -48,12 +57,29 @@ def _legacy_caps():
 CAPS = _legacy_caps()
 
 
-def read_props(model_dir):
+def _read(model_dir):
+    """What config.json declares, read by the reader the load check uses."""
     with open(os.path.join(os.path.expanduser(model_dir), "config.json"), encoding="utf-8") as f:
-        cfg = json.load(f)
-    text = cfg.get("text_config", cfg)
-    return ModelProps(softcap=text.get("attn_logit_softcapping"), sliding_window=text.get("sliding_window"),
-                      tie_word_embeddings=cfg.get("tie_word_embeddings"))
+        return readers.read_hf_dict(json.load(f), "config.json")
+
+
+def read_props(model_dir, read=None):
+    """The ModelProps config.json declares, read as the load check reads them (field test, entail#17): a window the
+    config switches off (Qwen2.5's use_sliding_window false) or one that never binds (Phi-3.5's 262144 over 131072
+    positions) is not a requirement, so no backend is said to drop it."""
+    read = read or _read(model_dir)
+    return next((f.value for f in read.facts if f.name == "ModelProps"), None) or ModelProps()
+
+
+def _evidence(why, props):
+    """How the table knows what a backend does with each property the model declares, and only those."""
+    return "; ".join(f"{WORDS[f]} {why[f]}" for f in WORDS if getattr(props, f) is not None and f in why)
+
+
+def _rope(value):
+    """A Rotary value's set fields; longrope's per-dimension factors are counted (factor_terms), not shown."""
+    return ", ".join(f"{f.name}={getattr(value, f.name)!r}" for f in fields(value)
+                     if getattr(value, f.name) is not None and not f.name.endswith("_sha256"))
 
 
 def check(props, caps):
@@ -90,6 +116,7 @@ ELSEWHERE = {
     "architectures": "the loader picks the class from it before the config object exists",
     "torch_dtype": "read by from_pretrained, not stored as a config field",
     "dtype": "read by from_pretrained, not stored as a config field",
+    "auto_map": "the Auto classes find the checkpoint's own code with it (trust_remote_code), not a model fact",
 }
 PROVENANCE_SUFFIXES = ("_version",)  # who produced the checkpoint: unsloth_version, transformers_version
 
@@ -100,6 +127,37 @@ def _classify(key):
     if key.endswith(PROVENANCE_SUFFIXES):
         return "note", "provenance metadata about the tool that wrote the checkpoint"
     return "complaint", None
+
+
+def _holders(obj, path=""):
+    """Every dict and list in a nested config, with where it is."""
+    if isinstance(obj, dict):
+        if path:
+            yield path, obj
+        for k, v in obj.items():
+            yield from _holders(v, f"{path}.{k}" if path else k)
+    elif isinstance(obj, (list, tuple)):
+        yield path, obj
+        for i, v in enumerate(obj):
+            yield from _holders(v, f"{path}[{i}]")
+
+
+def _kept_in(value, resolved):
+    """Where a dict or a list from config.json landed among the known fields: a dict whose every item one of them
+    holds (transformers 5 keeps rope_scaling as rope_parameters and adds rope_theta to it; field test, entail#17),
+    or an equal list. None when it is in none of them."""
+    for where, held in _holders(resolved):
+        if isinstance(value, dict) and isinstance(held, dict) and all(k in held and held[k] == v
+                                                                      for k, v in value.items()):
+            return where
+        if isinstance(value, list) and isinstance(held, (list, tuple)) and list(held) == value:
+            return where
+    return None
+
+
+def _short(value, limit=100):
+    text = repr(value)
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def _known_fields(cfg):
@@ -123,6 +181,8 @@ def check_config_keys(model_dir):
       value-survives-anywhere: 0 false positives, but it also passes case 15, because an unknown key is stored
           as an attribute and therefore "survives" in to_dict().
       this one (unknown to the class AND the value is in no known field): 0 false positives, catches case 15.
+    A dict counts as kept when a known field holds all of its items: transformers 5.17 merges rope_scaling into
+    rope_parameters, and the scalars-only rule called that a loss on Llama 3.2 and Phi-3.5 (field test, entail#17).
     """
     path = os.path.expanduser(model_dir)
     with open(os.path.join(path, "config.json"), encoding="utf-8") as f:
@@ -132,7 +192,7 @@ def check_config_keys(model_dir):
     except ImportError:
         return None, "transformers is not installed"
     cfg = AutoConfig.from_pretrained(path)
-    lost, notes = [], []
+    lost, notes, renamed = [], [], []
     for where, obj, d in (("", cfg, raw), ("text_config.", getattr(cfg, "text_config", None),
                                            raw.get("text_config", {}))):
         if obj is None:
@@ -140,18 +200,28 @@ def check_config_keys(model_dir):
         known = _known_fields(obj)
         if known is None:
             return None, f"cannot build a default {type(obj).__name__} to list its fields"
-        resolved = _scalars({k: v for k, v in obj.to_dict().items() if k in known})
+        values = {k: v for k, v in obj.to_dict().items() if k in known}
+        resolved = _scalars(values)
         for k, v in d.items():
             if k == "text_config" or k in known:
                 continue
             if not isinstance(v, (dict, list)) and (type(v).__name__, v) in resolved:
                 continue  # renamed on the way in, but the value landed in a field the loader knows
+            if isinstance(v, (dict, list)):
+                if not v:
+                    continue  # empty: nothing in it to lose
+                held = _kept_in(v, values)
+                if held:
+                    renamed.append(f"{where}{k} in {where}{held}")
+                    continue
             kind, why = _classify(k)
             if kind == "note":
-                notes.append(f"{where}{k}={v!r} ({why})")
+                notes.append(f"{where}{k}={_short(v)} ({why})")
             else:
-                lost.append(f"{where}{k}={v!r} is not a field of {type(obj).__name__} and its value is in none")
+                lost.append(f"{where}{k}={_short(v)} is not a field of {type(obj).__name__} and its value is in none")
     why = f"{len(raw)} keys in config.json"
+    if renamed:
+        why += f"; kept under another name: {', '.join(renamed)}"
     if notes:
         why += f"; {len(notes)} read elsewhere: {'; '.join(notes)}"
     return lost, why
@@ -207,9 +277,15 @@ def main(argv=None):
     ap.add_argument("--backend")
     ap.add_argument("--list", action="store_true", help="show every backend of the engine for this model")
     args = ap.parse_args(argv)
-    props = read_props(args.model)
+    read = _read(args.model)
+    props = read_props(args.model, read)
     declared = {k: v for k, v in vars(props).items() if v is not None}
     print(f"model {args.model}: declared {declared or '{}'}")
+    rope = next((f.value for f in read.facts if f.name == "Rotary"), None)
+    if rope is not None:   # the README's headline fact, shown with where it is checked (entail#17)
+        print(f"  rope: {_rope(rope)} (checked at load, where the engine builds it: ENTAIL=load)")
+    for problem in read.problems:
+        print(f"  note: {problem}")
 
     # Facts that do not depend on the engine. They are checked first: a checkpoint that disagrees with its own
     # config is wrong on every backend.
@@ -229,11 +305,18 @@ def main(argv=None):
             print(f"  {'ok':45} {label} ({why})")
 
     table = CAPS[args.engine]
+    none = "the model declares neither softcap nor sliding window"
+    attention = any(getattr(props, f) is not None for f in WORDS)
     if args.list or not args.backend:
+        if not attention:
+            print(f"  {'ok':45} {args.engine}: {none}, so none of its {len(table)} attention backends has one to "
+                  f"drop ({', '.join(sorted(table))})")
+            return 0 if args.list else standalone
         worst = 0
         for name, (caps, why) in sorted(table.items()):
             missing = check(props, caps)
-            print(f"  {'DROPS ' + ', '.join(missing) if missing else 'ok':45} {args.engine}:{name:16} ({why})")
+            print(f"  {'DROPS ' + ', '.join(missing) if missing else 'ok':45} {args.engine}:{name:16} "
+                  f"({_evidence(why, props)})")
             worst = max(worst, 1 if missing else 0)
         return 0 if args.list else max(worst, standalone)
     if args.backend not in table:
@@ -243,9 +326,14 @@ def main(argv=None):
     caps, why = table[args.backend]
     missing = check(props, caps)
     if missing:
-        print(f"RoleError: {args.engine} backend '{args.backend}' does not honour: {', '.join(missing)}\n  evidence: {why}")
+        print(f"RoleError: {args.engine} backend '{args.backend}' does not honour: {', '.join(missing)}\n"
+              f"  evidence: {_evidence(why, props)}")
         return 1
-    print(f"ok: {args.engine} backend '{args.backend}' honours the declared properties\n  evidence: {why}")
+    if not attention:
+        print(f"ok: {none}, so {args.engine} backend '{args.backend}' has none to drop")
+        return standalone
+    print(f"ok: {args.engine} backend '{args.backend}' honours the declared properties\n"
+          f"  evidence: {_evidence(why, props)}")
     return standalone
 
 

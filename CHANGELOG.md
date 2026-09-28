@@ -13,6 +13,16 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   infer` on a path that does not exist says so in one line instead of a traceback. ComfyUI's lines name the
   checkpoint by its full path, so the page's declare box gives commands that run as pasted; the box also says where
   the form is and how `ENTAIL_MANIFESTS` keeps manifests in a folder.
+- **`entail preflight` no longer raises false alarms on popular models** (#17). transformers 5.17 keeps
+  `rope_scaling` as `rope_parameters` (adding `rope_theta` to it), and the config-key check, which looked only for
+  scalars, printed a `RoleError` for Llama 3.2's and Phi-3.5's `rope_scaling`; a dict a known field holds whole now
+  counts as kept ("kept under another name: rope_scaling in rope_parameters"), and `auto_map` is a key the Auto
+  classes read. The attention properties are read as the load check reads them, so a window the config switches
+  off (Qwen2.5's `use_sliding_window: false`) or one that never binds (Phi-3.5's 262144 over 131072 positions) is no
+  longer said to be dropped by SGLang's flashinfer and flex_attention. The output shows the RoPE the config declares
+  and where it is checked (at load, `ENTAIL=load`); each backend's evidence is a short label ("measured on vllm
+  0.30.0", "read in vllm 0.30.0's code") for the properties the model declares, not a path into the research
+  workspace; a model that declares neither softcap nor a sliding window gets one line instead of five rows.
 
 ## 2.1.1
 
