@@ -41,7 +41,10 @@ so `main` stays a straight line of the commits as written.
 5. Merging it starts the `publish` workflow on `main`. It builds the wheel and checks that it installs, then **waits
    for the maintainer's approval** of the deployment to the `pypi` environment (*Actions → the run → Review
    deployments*). Approved, it publishes to PyPI, tags the commit `v2.3.6`, makes the GitHub release from the
-   version's CHANGELOG section, installs the release from PyPI to try it, and comments on each issue the release's
+   version's CHANGELOG section, installs the release from PyPI to try it (`.github/scripts/verify_release.py`: the
+   upload is checked in the version's own JSON at once; PyPI's index, which pip reads, can lag behind an upload, so
+   it is waited for up to 20 minutes, after which the uploaded wheel is checked by its URL and sha256 and the run
+   says the index was late - a warning, not a failure), and comments on each issue the release's
    pull requests closed: "Released in entail 2.3.6" (once; a failure here never fails the release). Rejected, nothing
    is published; the version stays unreleased on `main` until the run is approved again (*Run workflow* on
    `publish`).
