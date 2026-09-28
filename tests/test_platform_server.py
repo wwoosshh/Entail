@@ -250,6 +250,22 @@ def test_a_line_still_being_written_waits_for_its_newline():
     assert len(store.lines) == n + 1 and store.lines[-1][1]["verdict"] == "pass"
 
 
+def test_the_page_translates_only_rules_the_core_still_says():
+    """The page reads the common rule texts in Korean (field test, entail#7). Every text it translates must still be
+    one of the core's rules, or a renamed rule would quietly lose its translation."""
+    import re
+    from entail.contracts import RULES
+    js = open(os.path.join(server.STATIC, "app.js"), encoding="utf-8").read()
+    block = js[js.index("const RULE_KO = {"):]
+    block = block[:block.index("};")]
+    keys = re.findall(r'^\s*"([^"]+)":', block, re.M)
+    assert len(keys) >= 10, keys
+    assert all(k in RULES.values() for k in keys), [k for k in keys if k not in RULES.values()]
+    # the facts the page offers to declare are the ones a manifest drafts (entail/manifest.py relevant_names)
+    names = re.findall(r'"(\w+)"', js[js.index("const DECLARABLE"):].split(";", 1)[0])
+    assert set(names) == {"Prediction", "LatentScale", "ModelProps", "Rotary", "Template"}, names
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

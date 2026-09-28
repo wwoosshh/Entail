@@ -65,6 +65,7 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "conf
 class Declared:
     facts: Dict[str, List[Fact]] = field(default_factory=dict)
     problems: List[str] = field(default_factory=list)
+    label: str = ""   # the file the facts are about (its name), for the lines a model's decisions make
 
     def get(self, name) -> List[Fact]:
         return list(self.facts.get(name, ()))

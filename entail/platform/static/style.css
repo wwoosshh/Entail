@@ -592,6 +592,11 @@ svg { display: block; }
 .dec-row .k { display: block; margin-bottom: 2px; font-size: 12px; font-weight: 600; color: var(--muted); }
 .dec-row .v { color: var(--body); overflow-wrap: anywhere; }
 .dec-row .v.mono { font-size: 12px; }
+.declare { margin-top: 14px; padding: 12px 14px; border: 1px dashed var(--hairline-strong); border-radius: var(--r-md); }
+.declare-title { font-size: 13px; font-weight: 600; color: var(--ink); }
+.declare-body { margin-top: 4px; font-size: 12.5px; line-height: 1.55; color: var(--body); }
+.declare .codeblock { margin-top: 10px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.declare .text-link { margin-top: 10px; }
 .dec-block { margin-top: 12px; padding: 10px 12px; border-radius: var(--r-md); background: var(--st-bg); font-size: 13px; color: var(--body-strong); }
 .conflict { margin-top: 12px; }
 .conflict .item { margin-top: 6px; font-size: 12px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }

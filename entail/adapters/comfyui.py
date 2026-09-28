@@ -24,6 +24,7 @@ import contextvars
 import functools
 import importlib
 import inspect
+import os
 
 from .. import core, load, policies, readers
 from ..facts import LatentScale, Prediction
@@ -146,10 +147,18 @@ def _state_dict_loader(orig):
         model = getattr(patcher, "model", None)
         if model is not None and (path is not None or header is not None):
             load.safely("load:comfyui.checkpoint", "comfyui.loader", "Prediction",
-                        lambda: load.remember(model, load.declared(path, header=header)))
+                        lambda: load.remember(model, _labelled(load.declared(path, header=header), path)))
         return out
 
     return load_state_dict
+
+
+def _labelled(facts, path):
+    """The checkpoint's facts with its file name: the decisions at sampling name the model they are about, so two
+    models that declare nothing are two lines, not one said once (field test, entail#2: the second model's line was
+    left off the console as a repeat of the first's)."""
+    facts.label = os.path.basename(str(path)) if path else ""
+    return facts
 
 
 def install():
@@ -215,7 +224,7 @@ def _decide(model, precomputed, ms_mod):
     base = model.model
     facts = load.remembered(base) or load.Declared()
     ms = model.get_model_object("model_sampling")
-    where = type(base.model_config).__name__
+    where = type(base.model_config).__name__ + (f", {facts.label}" if facts.label else "")
     switchable = () if precomputed or not read_choice("discrete", ms, ms_mod) else ("eps", "v")
     why = "" if switchable else ("the sigmas were computed before sampling, from the set-up it had" if precomputed
                                  else "it is not ComfyUI's discrete eps/v schedule, which is what entail switches")
