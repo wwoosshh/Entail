@@ -161,7 +161,10 @@ def declare_on(config, fact: Fact, path: Optional[str] = None) -> None:
 def local_folder(name, revision=None, cache_dir=None) -> Optional[str]:
     """The local folder a model name stands for: the path itself, or the huggingface_hub cache folder a hub id was
     downloaded to. Only the local cache is asked: nothing is downloaded here (M15.3; the diffusers adapter did the
-    same for pipelines in M11.6). None when neither is there."""
+    same for pipelines in M11.6). None when neither is there. A path object is read like the same path as a string
+    (field test, entail#8: text-generation-webui loads its tokenizers from a pathlib.Path)."""
+    if hasattr(name, "__fspath__"):
+        name = os.fsdecode(os.fspath(name))
     if not isinstance(name, str) or not name:
         return None
     if os.path.isdir(os.path.expanduser(name)):

@@ -125,6 +125,45 @@ def test_put_on_pythonpath_it_runs_the_sitecustomize_it_hides():
             os.environ["ENTAIL"] = mode
 
 
+def test_turning_on_says_so_once_per_launch_on_stderr():
+    """Field test, entail#7: nothing showed that ENTAIL=load took effect until the first model loaded. The process
+    that starts a launch says so in one line on stderr (a program's own output stays as it was); a process that
+    inherits the launch says nothing; ENTAIL_QUIET=start leaves the line out."""
+    import io
+    import sys
+    import tempfile
+    from contextlib import redirect_stderr
+
+    if os.path.dirname(HERE) not in sys.path:      # the shim imports entail, as the installed hook does
+        sys.path.insert(0, os.path.dirname(HERE))
+    mod = _load()
+    keep_meta = list(sys.meta_path)
+    keep = {k: os.environ.get(k) for k in ("ENTAIL", "ENTAIL_RUN_ID", "ENTAIL_LOG_DIR", "ENTAIL_QUIET")}
+    logs = tempfile.mkdtemp()
+    try:
+        os.environ.update({"ENTAIL": "load", "ENTAIL_LOG_DIR": logs})
+        os.environ.pop("ENTAIL_RUN_ID", None)
+        os.environ.pop("ENTAIL_QUIET", None)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            mod.activate()
+            mod.activate()          # the same launch, as in a process the engine started
+        assert err.getvalue().splitlines() == [f"[entail] on (load): what it finds goes to {logs}"], err.getvalue()
+        os.environ.pop("ENTAIL_RUN_ID", None)
+        os.environ["ENTAIL_QUIET"] = "unknown,start"
+        err = io.StringIO()
+        with redirect_stderr(err):
+            mod.activate()
+        assert err.getvalue() == "", err.getvalue()
+    finally:
+        sys.meta_path[:] = keep_meta
+        for k, v in keep.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

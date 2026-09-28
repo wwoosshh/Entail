@@ -25,12 +25,14 @@ import json
 import importlib.util
 import os
 import platform
+import re
 import sys
 
 from . import __version__, hook
 
 # Versions the adapters were measured against (see README, "Tested with").
-TESTED = {"transformers": "5.12.1, 5.16.1, 5.17.0", "vllm": "0.30.0", "sglang": "0.5.20"}
+TESTED = {"transformers": "5.12.1, 5.16.1, 5.17.0", "vllm": "0.30.0", "sglang": "0.5.20", "diffusers": "0.40.0",
+          "comfyui": "0.34.1"}
 
 
 def _installed(name):
@@ -38,6 +40,36 @@ def _installed(name):
         return md.version(name)
     except md.PackageNotFoundError:
         return None
+
+
+def _tested(name, version):
+    """What doctor says next to an engine's version: the versions its adapters were measured on, and whether this is
+    one of them (field test, entail#6: a ComfyUI 0.37 user could not tell that 0.34.1 was the tested one)."""
+    if name not in TESTED or not version:
+        return ""
+    same = version in [v.strip() for v in TESTED[name].split(",")]
+    return f"   (tested with {TESTED[name]}{'' if same else '; not this version'})"
+
+
+def _comfyui():
+    """ComfyUI's version. It is not a pip package: its comfyui_version.py is in the folder doctor runs from, or next
+    to the `comfy` package this Python finds (a portable build puts ComfyUI on its path)."""
+    places = [os.path.join(os.getcwd(), "comfyui_version.py")]
+    try:
+        spec = importlib.util.find_spec("comfy")
+        if spec is not None and spec.origin:
+            places.append(os.path.join(os.path.dirname(os.path.dirname(spec.origin)), "comfyui_version.py"))
+    except (ImportError, ValueError):
+        pass
+    for path in places:
+        try:
+            with open(path, encoding="utf-8") as f:
+                m = re.search(r"__version__\s*=\s*[\"']([^\"']+)", f.read())
+        except OSError:
+            continue
+        if m:
+            return m.group(1)
+    return None
 
 
 def _targets():
@@ -64,21 +96,30 @@ def doctor(_args):
             "different": "the file exists but is not the one this version writes; run `entail hook install`"}[state]
     print(f"start-up hook: {state}  {p}\n  {note}")
     print("engines in this environment:")
-    for name in ("torch", "transformers", "vllm", "sglang"):
+    for name in ("torch", "transformers", "vllm", "sglang", "diffusers"):
         v = _installed(name)
-        tested = f"   (tested with {TESTED[name]})" if name in TESTED else ""
-        print(f"  {name:13} {v or 'not installed'}{tested if v else ''}")
+        print(f"  {name:13} {v or 'not installed'}{_tested(name, v)}")
+    v = _comfyui()
+    print(f"  {'comfyui':13} {v or 'not found'}" + (_tested("comfyui", v) if v else
+                                                    "   (not a pip package: run doctor from ComfyUI's folder, with its Python)"))
     mode = os.environ.get("ENTAIL", "off")
     print(f"ENTAIL={mode}  ENTAIL_POLICY={os.environ.get('ENTAIL_POLICY', 'resolve')}"
           f"  ENTAIL_ONLY={os.environ.get('ENTAIL_ONLY', '') or '(all)'}")
     print("adapters that ENTAIL=load installs, once their module is imported:")
+    absent = {}
     for module, adapters in _targets().items():
         top = module.split(".")[0]
         # ComfyUI is not a pip package: it is importable when you run from its folder, as its launcher does
         present = (importlib.util.find_spec(top) is not None or os.path.isdir(os.path.join(os.getcwd(), top))
                    or os.path.isfile(os.path.join(os.getcwd(), top + ".py")))
+        if not present:     # folded into one line, so the ones that act here stand out (field test, entail#6)
+            engine = "comfyui" if top in ("comfy", "nodes") else top      # ComfyUI's own modules
+            absent[engine] = absent.get(engine, 0) + len(adapters)
+            continue
         for a in adapters:
-            print(f"  {a:48} after {module}{'' if present else '   (engine not installed here)'}")
+            print(f"  {a:48} after {module}")
+    if absent:
+        print("  for engines not installed here: " + ", ".join(f"{top} ({n})" for top, n in sorted(absent.items())))
     from . import dlc
 
     found = dlc.found() if os.environ.get("ENTAIL_DLC", "on") != "off" else []

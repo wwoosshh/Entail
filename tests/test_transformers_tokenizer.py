@@ -77,6 +77,21 @@ def test_an_ordinary_folder_is_quiet():
     transformers_tokenizer.reset()
 
 
+def test_a_folder_given_as_a_path_object_is_read_like_the_same_path_as_a_string():
+    """Field test, entail#8: text-generation-webui loads its tokenizers from a pathlib.Path, and both checks said
+    'no local folder to read' although the folder was there."""
+    import pathlib
+
+    d, e = folder(10, config_vocab=12), folder(10, config_vocab=12)     # one folder is decided once: two alike
+    as_str = decide(d, FakeTokenizer(10))
+    transformers_tokenizer.reset()
+    as_path = decide(pathlib.Path(e), FakeTokenizer(10))
+    assert [(x.name, x.verdict) for x in as_path] == [(x.name, x.verdict) for x in as_str], (as_str, as_path)
+    assert not any("no local folder" in x.note for x in as_path), as_path
+    assert load.local_folder(pathlib.Path(d)) == d
+    transformers_tokenizer.reset()
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

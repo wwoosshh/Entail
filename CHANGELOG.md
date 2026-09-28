@@ -6,7 +6,7 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
 
 ## Unreleased
 
-From the first field test of 2.1.0 (ComfyUI and transformers, used from the docs only; issues #2, #3, #5, #7, #9):
+From the first field test of 2.1.0 (ComfyUI, transformers and text-generation-webui, used from the docs only; issues #2 to #9):
 
 - **A could-not-check line names its model and says what it means.** ComfyUI's decisions name the checkpoint's file,
   so a second model that declares nothing gets its own line; the console used to leave it off as a repeat of the
@@ -21,6 +21,18 @@ From the first field test of 2.1.0 (ComfyUI and transformers, used from the docs
   An unknown value that a manifest can declare (Prediction, LatentScale, ModelProps, Rotary, Template) shows how to
   declare it, with the model's file when the record names it (#5). On a Korean page the common rule texts and source
   phrases read in Korean, the original on hover (#7).
+- **A folder given as a path object is read** (#8): `load.local_folder` takes a `pathlib.Path` like the same path as a
+  string. text-generation-webui loads its tokenizers that way, and both tokenizer checks said "no local folder to
+  read" there.
+- **An image run no longer draws an LLM flow for its text encoder's tokenizer** (#4): ComfyUI builds its CLIP
+  tokenizer with transformers, and the tokenizer node is now shared, as the kernels' is: it joins the flow the launch
+  has and keeps its place in an LLM launch.
+- **`entail doctor` lists diffusers and ComfyUI** (#6), ComfyUI's version read from its `comfyui_version.py`, each with
+  the versions its adapters were measured on and "not this version" when it is not one of them. The adapters of
+  engines that are not installed fold into one line.
+- **Small things** (#7): at start one line on stderr says entail is on and where it writes (`ENTAIL_QUIET=start`
+  leaves it out); `entail serve` says its token needs nothing from the user; the README names every file
+  `entail_logs/` may hold (`said.txt`, `tokenizer_ids.json`, `vocab_sources.json`, `safe_mode.json`, `nodes.json`).
 
 ## 2.1.0
 

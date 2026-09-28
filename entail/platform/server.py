@@ -343,9 +343,10 @@ def serve(folder: str, port: int = 8765, open_browser: bool = False) -> int:
         return 2
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"[entail] serving {folder} at {url} (Ctrl-C stops; this machine only)", flush=True)
-    print(f"[entail] it reads the records and writes two files there - the safety mode of the next start and which "
-          f"custom nodes are off; a write needs this token, which works once (its page has its own): "
-          f"{server.safe.token}", flush=True)
+    # what the token is for, so that nobody wonders what to do with it (field test, entail#7): nothing, on the page
+    print(f"[entail] it reads the records; the page itself writes its two settings there (the safety mode of the next "
+          f"start, which custom nodes are off) - nothing to do here. Only a script that changes them needs this "
+          f"token, which works once: {server.safe.token}", flush=True)
     if open_browser:
         import webbrowser
 
