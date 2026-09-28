@@ -4,9 +4,11 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
-## Unreleased
+## 2.1.1
 
-From the first field test of 2.1.0 (ComfyUI, transformers and text-generation-webui, used from the docs only; issues #2 to #9):
+Released 2026-09-28. Fixes from the first field test of 2.1.0 (ComfyUI, transformers and text-generation-webui, used
+from the docs only; issues #2 to #9). Releases now go through a release pull request, and the maintainer approves
+each one (RELEASING.md).
 
 - **A could-not-check line names its model and says what it means.** ComfyUI's decisions name the checkpoint's file,
   so a second model that declares nothing gets its own line; the console used to leave it off as a repeat of the

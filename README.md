@@ -45,9 +45,10 @@ engine compiled into the app (Ollama, LM Studio, llama.cpp) give it nothing to a
 each tool - your scripts, vLLM behind Open WebUI, ComfyUI (git, portable, Desktop), text-generation-webui, vLLM in
 Docker - is in [INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md).
 
-> **Status: 2.1.0, measured on one machine.** 2.1.0 remakes the page of `entail serve` (plain words, a node canvas)
-> and adds install steps by tool ([INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md)); the checks
-> are 2.0's. 2.0 adds the
+> **Status: 2.1.1, measured on one machine.** 2.1.1 fixes what the first field test of 2.1.0 found (clearer console
+> lines and page wording, a tokenizer folder given as a path object, doctor's engine list). 2.1.0 remade the page of
+> `entail serve` (plain words, a node canvas) and added install steps by tool
+> ([INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md)); the checks are 2.0's. 2.0 adds the
 > platform - `entail serve`, two safety modes, official DLCs and custom nodes ([The platform](#the-platform-20)) -
 > around the same checks: on the 102 healthy runs it made exactly the decisions 1.3.0's frozen code made (no run
 > broken, the same six real tokenizer differences reported), requests cost at most about 1% more with entail on (1.000-1.011 over ten
