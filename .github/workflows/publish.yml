@@ -3,8 +3,8 @@ name: publish
 # Releases what a merged release pull request put on main (RELEASING.md). On every push to main it reads the version in
 # entail/__init__.py; when that version has no tag yet, it builds and checks the wheel, publishes to PyPI once the
 # researcher approves the deployment to the `pypi` environment (its required reviewer), then tags the commit, makes the
-# GitHub release from the version's CHANGELOG section and installs the release from PyPI to try it. A push that keeps
-# a released version does nothing. PyPI trusts this workflow file and that environment (RELEASING.md): keep both names.
+# GitHub release from the version's CHANGELOG section, installs the release from PyPI to try it, and says on each
+# issue the release closes that its fix is released. A push that keeps a released version does nothing. PyPI trusts this workflow file and that environment (RELEASING.md): keep both names.
 on:
   push:
     branches: [main]
@@ -91,6 +91,24 @@ jobs:
         run: |
           python3 .github/scripts/release_notes.py "$VERSION" > notes.md
           gh release create "v$VERSION" --target "$GITHUB_SHA" --title "entail $VERSION" --notes-file notes.md
+
+  announce:
+    needs: [plan, release]
+    runs-on: ubuntu-latest
+    continue-on-error: true      # a comment that cannot be made never fails a release
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Say "released" on the issues this release closes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: python3 .github/scripts/release_issues.py "$VERSION"
 
   verify:
     needs: [plan, release]
