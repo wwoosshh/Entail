@@ -182,6 +182,23 @@ def test_a_kernel_without_an_engine_joins_the_launch_flow():
     assert [f["id"] for f in llm["flows"]] == ["llm"] and llm["flows"][0]["nodes"].count("kernel") == 1
 
 
+def test_an_image_launch_keeps_its_text_encoders_tokenizer_in_the_image_flow():
+    """Field test, entail#4: ComfyUI builds its CLIP text encoder with transformers' tokenizer, and an image run drew
+    an 'LLM' flow for that one node. The tokenizer node is shared: it joins the flow the launch has, and stays in its
+    own place in an LLM launch."""
+    lines = [{"v": 2, "t": 1.0, "run": "r", "pid": 1, "boundary": "load:transformers.tokenizer.ids",
+              "verdict": "unknown", "name": "Tokenization"},
+             {"v": 2, "t": 2.0, "run": "r", "pid": 1, "boundary": "load:comfyui.prediction", "verdict": "unknown",
+              "name": "Prediction"}]
+    g = graph.graph(lines)
+    assert [f["id"] for f in g["flows"]] == ["image"], g["flows"]
+    assert g["flows"][0]["nodes"][-1] == "tokenizer" and "tokenizer" in {n["id"] for n in g["nodes"]}, g["flows"]
+    alone = graph.graph(lines[:1])       # a program that only builds a tokenizer: the LLM flow, as before
+    assert [f["id"] for f in alone["flows"]] == ["llm"], alone["flows"]
+    llm = graph.graph(_launch())
+    assert llm["flows"][0]["nodes"][:2] == ["config", "tokenizer"], llm["flows"]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

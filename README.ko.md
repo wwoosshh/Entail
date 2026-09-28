@@ -31,7 +31,7 @@ entail은 값의 뜻을 타입처럼 분명하게 만든다. 뜻을 만드는 �
 ## 환경에 무엇을 남기나
 
 - `pip install entail-ai`는 패키지 하나(import 이름은 `entail`, 의존성 없음)와 `site-packages`의 한 줄(`entail-autoinstall.pth`)을 더한다. 이 한 줄로 엔진이 띄우는 작업 프로세스까지 닿는다. `ENTAIL`이 없으면 그 줄은 바로 돌아온다. 파이썬 시작마다 0.2~0.3 ms이고 불러오는 모듈이 없다. `entail hook status`로 보고 `entail hook uninstall`로 지운다.
-- `ENTAIL=load`이면 entail이 말한 것은 프로그램을 실행한 폴더의 `entail_logs/`에 남는다(날마다 로그와 JSON 기록, `.gitignore` 포함). `ENTAIL_LOG_DIR=off`면 아무것도 쓰지 않고, `ENTAIL_LOG_DIR=<폴더>`면 그곳에 쓴다. `ENTAIL_QUIET=unknown`은 멈추지 않는 `unknown` 줄을 화면에서 뺀다.
+- `ENTAIL=load`이면 entail이 말한 것은 프로그램을 실행한 폴더의 `entail_logs/`에 남는다(날마다 로그와 JSON 기록, `.gitignore` 포함). 이 폴더에는 `said.txt`(이번 실행에서 이미 찍은 줄: 엔진의 여러 프로세스가 같은 줄을 되풀이하지 않게), 토크나이저 폴더에서 읽은 것의 작은 캐시(`tokenizer_ids.json`, `vocab_sources.json`), 화면의 설정 두 파일(`safe_mode.json`, `nodes.json`)도 생길 수 있다. `ENTAIL_LOG_DIR=off`면 아무것도 쓰지 않고, `ENTAIL_LOG_DIR=<폴더>`면 그곳에 쓴다. 시작할 때 stderr에 entail이 켜졌고 어디에 쓰는지 한 줄을 찍는다. `ENTAIL_QUIET=unknown`은 멈추지 않는 `unknown` 줄을, `ENTAIL_QUIET=start`는 그 첫 줄을 화면에서 뺀다(둘 다: `unknown,start`).
 - 어댑터는 아래 표의 엔진 판에서 잰 내부 함수에 건다. 다른 판에서 설치되지 않는 어댑터는 한 번 알리고(`could not install ...`) 빠지며, 나머지는 돈다. `entail doctor`가 무엇이 설치돼 있고 무엇이 걸릴지 보여 준다.
 
 | 엔진 | 잰 판 | 어댑터가 보는 것 |
@@ -349,7 +349,7 @@ logits = step()["logits"]                                                       
 | `ENTAIL_ONLY` | 예: `rope_alias,sglang_adapter` | 적은 어댑터만 설치한다 |
 | `ENTAIL_SKIP` | 예: `comfyui:install_nodes` | 적은 항목만 빼고 설치한다(어댑터 이름만 적으면 그 어댑터 전체를 뺀다). 나머지가 그것 없이 무엇을 하는지 잴 때 쓴다 |
 | `ENTAIL_VERBOSE` | `1` | 어댑터가 설치될 때마다 알린다 |
-| `ENTAIL_QUIET` | `unknown` | 멈추지 않는 `unknown` 판정을 화면에 찍지 않는다. 로그와 기록에는 남고, 프로세스마다 한 번 그렇다고 알린다 |
+| `ENTAIL_QUIET` | `unknown`, `start`(쉼표로 여럿) | `unknown`: 멈추지 않는 `unknown` 판정을 화면에 찍지 않는다. 로그와 기록에는 남고, 프로세스마다 한 번 그렇다고 알린다. `start`: entail이 켜졌다는 첫 줄을 뺀다 |
 | `ENTAIL_SOURCE` | `1` | 적재한 가중치를 체크포인트 파일과도 대조한다(vLLM, 시작 때 약간의 입출력) |
 | `ENTAIL_NO_PATHS` | `1` | vLLM: 시작 때 엔진 자신의 경로끼리 대조하는 점검을 뺀다(거기서 entail 적재 비용의 대부분) |
 | `ENTAIL_PATHS` | `1` | SGLang: 시작 때 엔진 자신의 경로끼리 대조하는 점검을 돌린다(기본은 끔: 탐침이 SGLang의 첫 prefill이 된다) |

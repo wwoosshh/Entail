@@ -214,10 +214,16 @@ def activate():
     is fixed here, where the program starts, so the processes an engine spawns write to the same one (M6.4)."""
     try:
         from entail import record
-        record.log_dir()
+        folder = record.log_dir()
         # the launch id: the first process that turned entail on names it, the engine's child processes inherit it,
         # and a line one of them said is not said again by another (record.said_in_this_launch; M15.6 review)
+        first = "ENTAIL_RUN_ID" not in os.environ
         os.environ.setdefault("ENTAIL_RUN_ID", f"{os.getpid()}-{int(time.time())}")
+        if first and "start" not in os.environ.get("ENTAIL_QUIET", "").replace(" ", "").split(","):
+            # one line, once per launch, that it took effect: nothing else is printed until the first model loads
+            # (field test, entail#7). On stderr, so a program whose output is read stays as it was
+            print(f"[entail] on ({os.environ.get('ENTAIL')}): what it finds goes to "
+                  f"{folder or 'no folder (ENTAIL_LOG_DIR=off)'}", file=sys.stderr, flush=True)
     except Exception:  # noqa: BLE001 - a log folder that cannot be named does not stop the checks
         pass
     mine = any(isinstance(f, _PatchAfterImport) for f in sys.meta_path)

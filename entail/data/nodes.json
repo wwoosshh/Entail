@@ -1,5 +1,5 @@
 {
-  "_about": "The platform's node model (LIBRARY_DESIGN.md 13.3, ROADMAP product track P1). A node is one stage of a project's workflow; every boundary a decision names belongs to the first node, in this list's order, whose pattern matches the boundary's name (regular expressions, searched from the start). 'flow' is the workflow the node belongs to and 'step' its place in that flow's order, which the graph draws left to right. The last node takes every boundary no other node matches. A 'shared' node (kernels: a Triton kernel carries no engine in its name) does not bring its own flow into a launch: it joins the flows the launch's other nodes have, at the end of those that are not its own (LIBRARY_DESIGN.md 13.3).",
+  "_about": "The platform's node model (LIBRARY_DESIGN.md 13.3, ROADMAP product track P1). A node is one stage of a project's workflow; every boundary a decision names belongs to the first node, in this list's order, whose pattern matches the boundary's name (regular expressions, searched from the start). 'flow' is the workflow the node belongs to and 'step' its place in that flow's order, which the graph draws left to right. The last node takes every boundary no other node matches. A 'shared' node (kernels: a Triton kernel carries no engine in its name; the tokenizer: ComfyUI's CLIP text encoder is built with transformers' tokenizer, field test entail#4) does not bring its own flow into a launch: it joins the flows the launch's other nodes have, at the end of those that are not its own (LIBRARY_DESIGN.md 13.3).",
   "version": 1,
   "flows": {
     "llm": {"ko": "LLM", "en": "LLM"},
@@ -11,7 +11,7 @@
      "patterns": ["^load:[^.]+\\.config\\.rope", "^load:[^.]+\\.(attention|paged_attention|rotary_pairing)"]},
     {"id": "config", "flow": "llm", "step": 1, "ko": "모델 파일과 설정", "en": "Model files and config",
      "patterns": ["^load:(transformers|vllm|sglang)\\.(config(?!\\.rope)|model_config|generation_config)"]},
-    {"id": "tokenizer", "flow": "llm", "step": 2, "ko": "토크나이저", "en": "Tokenizer",
+    {"id": "tokenizer", "flow": "llm", "step": 2, "shared": true, "ko": "토크나이저", "en": "Tokenizer",
      "patterns": ["^load:[^.]+\\.tokenizer", "^load:[^.]+\\.input_processor"]},
     {"id": "weights", "flow": "llm", "step": 3, "ko": "가중치 적재", "en": "Weight loading",
      "patterns": ["^load:(transformers|vllm|sglang)\\.(loader|weights|linear|quant_method)"]},
