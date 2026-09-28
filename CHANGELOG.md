@@ -28,6 +28,11 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   Now the header says "entail repaired 1 value: Attention and rotary (theta unset → 500000.0)": the node and the
   fields that changed, from what the engine had to the declared value. The run graph carries each repair's two
   values for it.
+- **Windows: upgrading while `entail serve` runs** (#18). pip cannot replace a running `entail.exe`; when the
+  environment is on another drive than `%TEMP%`, `pip install -U entail-ai` stops half-way and leaves the
+  environment without entail, so a tool started with `ENTAIL=load` runs with entail off. INSTALL now says to start
+  the page as `python -m entail serve` on Windows (it holds no `entail.exe`), to close an `entail.exe` serve before
+  upgrading, and how to recover (close it, delete the `~ntail*` folders in `site-packages`, install again).
 
 ## 2.1.1
 
