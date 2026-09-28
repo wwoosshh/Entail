@@ -211,6 +211,29 @@ entail serve --dir entail_logs --open
 For example in ComfyUI's portable folder: `python_embeded\python.exe -m entail serve --dir entail_logs --open`.
 The page is at http://127.0.0.1:8765/ and answers this machine only.
 
+On Windows, start it through the environment's Python, as that example does (`python -m entail serve ...`), rather
+than as `entail serve`: a running `entail.exe` cannot be replaced, and an upgrade stops half-way (next section).
+
+## Upgrading
+
+Upgrade with the environment's own Python, as you installed it: `<that python> -m pip install -U entail-ai`. Restart
+the tool afterwards; a process that is already running keeps the version it started with.
+
+On Windows, first close `entail serve` if it was started as `entail serve` (`entail.exe`). pip cannot replace a
+running `entail.exe`, and when the environment is on another drive than `%TEMP%` the upgrade stops half-way: pip
+prints `[WinError 5]` or `[WinError 32]` naming `Scripts\entail.exe` and leaves the environment without entail -
+`No module named entail`, `entail-autoinstall.pth` gone, and `WARNING: Ignoring invalid distribution ~ntail-ai` from
+every later pip command. A tool started with `ENTAIL=load` then runs with entail off, and nothing says so. A serve
+started as `python -m entail serve` holds no `entail.exe`; the upgrade goes through while it runs.
+
+If pip stopped that way:
+
+1. Close `entail serve`.
+2. Delete the folders whose names start with `~ntail` in the environment's `site-packages` (for a venv,
+   `.venv\Lib\site-packages`; for ComfyUI portable, `python_embeded\Lib\site-packages`).
+3. Run the same `pip install -U entail-ai` again, then check with `<that python> -m entail doctor` and
+   `<that python> -m entail hook status`.
+
 ## Check, turn off, remove
 
 - `entail doctor` shows what entail sees in the environment; `entail hook status` shows whether its start-up line is
@@ -223,6 +246,12 @@ The page is at http://127.0.0.1:8765/ and answers this machine only.
 - **Run, Windows 11, Python 3.12 (2026-09-28):** a new virtual environment, entail installed from a wheel; `ENTAIL`
   set the PowerShell way and the `cmd` way both turned it on, and unset it stayed off; a program wrote `entail_logs`
   in the folder it started from, `ENTAIL_LOG_DIR` moved it, and `entail serve` showed the run.
+- **Run, upgrading on Windows 11, Python 3.12, pip 25.0.1 (2026-09-28; field test, #18):** a reinstall of entail
+  from a local wheel while `entail serve` ran. Started as `entail.exe`, with pip's temporary folder on another drive:
+  pip stopped with `[WinError 5]` on `Scripts\entail.exe`, and left no `entail` module, no `entail-autoinstall.pth`
+  and two `~ntail` folders, as the field test found; with the temporary folder on the environment's drive it went
+  through. Started as `python -m entail serve`, it went through both ways, and the serve kept running. The recovery
+  above (close serve, delete `~ntail*`, reinstall) restored the module and the `.pth`.
 - **Run, Linux (WSL2):** vLLM 0.30.0, SGLang 0.5.20 and transformers 5.17.0 - the healthy runs and measurements in
   the README.
 - **Run, ComfyUI installed with git, in a Windows venv:** entail installed with pip and started from a launcher with

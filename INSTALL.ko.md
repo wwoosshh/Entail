@@ -210,6 +210,30 @@ entail serve --dir entail_logs --open
 예를 들어 ComfyUI 포터블 폴더에서는 `python_embeded\python.exe -m entail serve --dir entail_logs --open`.
 화면은 http://127.0.0.1:8765/ 에 있고, 이 컴퓨터에서만 열린다.
 
+Windows에서는 이 예처럼 그 환경의 파이썬으로 시작한다(`python -m entail serve ...`). `entail serve`로 시작하면
+실행 중인 `entail.exe`를 바꿀 수 없어서, 업그레이드가 도중에 멈춘다(다음 절).
+
+## 업그레이드
+
+설치할 때처럼 그 환경의 파이썬으로 올린다: `<그 파이썬> -m pip install -U entail-ai`. 올린 뒤에는 도구를 다시
+시작한다. 이미 돌고 있는 프로세스는 시작할 때의 판을 그대로 쓴다.
+
+Windows에서는 `entail serve`를 `entail serve`(`entail.exe`)로 시작했다면 먼저 닫는다. pip는 실행 중인
+`entail.exe`를 바꾸지 못한다. 그 환경이 `%TEMP%`와 다른 드라이브에 있으면 업그레이드가 도중에 멈춘다. pip는
+`Scripts\entail.exe`를 가리키며 `[WinError 5]`나 `[WinError 32]`를 내고, entail이 없는 환경을 남긴다.
+`No module named entail`이 나고, `entail-autoinstall.pth`가 사라지고, 그 뒤의 pip 명령마다
+`WARNING: Ignoring invalid distribution ~ntail-ai`가 나온다. 그러면 `ENTAIL=load`로 시작한 도구는 entail이 꺼진
+채로 돌고, 아무것도 그렇다고 알리지 않는다. `python -m entail serve`로 시작한 화면은 `entail.exe`를 잡지 않으므로,
+켜 둔 채로도 업그레이드가 끝난다.
+
+pip가 그렇게 멈췄다면:
+
+1. `entail serve`를 닫는다.
+2. 그 환경의 `site-packages`에서 이름이 `~ntail`로 시작하는 폴더를 지운다(가상 환경은
+   `.venv\Lib\site-packages`, ComfyUI 포터블은 `python_embeded\Lib\site-packages`).
+3. 같은 `pip install -U entail-ai`를 다시 실행하고, `<그 파이썬> -m entail doctor`와
+   `<그 파이썬> -m entail hook status`로 확인한다.
+
 ## 확인, 끄기, 지우기
 
 - `entail doctor`는 그 환경에서 entail이 보는 것을 보여 주고, `entail hook status`는 시작 줄이 놓였는지 보여 준다.
@@ -221,6 +245,12 @@ entail serve --dir entail_logs --open
 - **실행, Windows 11, Python 3.12(2026-09-28):** 새 가상 환경에 휠로 설치했다. PowerShell 방식과 `cmd` 방식으로
   `ENTAIL`을 주면 둘 다 켜졌고, 주지 않으면 꺼져 있었다. 프로그램이 시작한 폴더에 `entail_logs`를 썼고,
   `ENTAIL_LOG_DIR`가 그 자리를 옮겼으며, `entail serve`가 그 실행을 보여 주었다.
+- **실행, Windows 11 업그레이드, Python 3.12, pip 25.0.1(2026-09-28, 현장 시험 #18):** `entail serve`를 켜 둔 채
+  로컬 휠로 entail을 다시 설치했다. `entail.exe`로 시작하고 pip의 임시 폴더를 다른 드라이브에 두면, pip가
+  `Scripts\entail.exe`에서 `[WinError 5]`로 멈추고 `entail` 모듈도 `entail-autoinstall.pth`도 없는 환경과 `~ntail`
+  폴더 둘을 남겼다(현장 시험과 같다). 임시 폴더가 그 환경과 같은 드라이브면 끝까지 설치됐다.
+  `python -m entail serve`로 시작하면 두 경우 모두 끝까지 설치됐고, 화면도 계속 돌았다. 위의 복구 절차(화면
+  닫기, `~ntail*` 지우기, 다시 설치)로 모듈과 `.pth`가 돌아왔다.
 - **실행, Linux(WSL2):** vLLM 0.30.0, SGLang 0.5.20, transformers 5.17.0. README의 정상 실행과 측정이다.
 - **실행, git으로 설치한 ComfyUI, Windows 가상 환경:** pip로 설치하고 `set ENTAIL=load`를 넣은 실행 파일로
   시작했다(예전 판 entail, 2026-09-23). 같은 폴더의 ComfyUI 0.34.1에서 어댑터를 측정했다(README).
