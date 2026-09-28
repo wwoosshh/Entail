@@ -4,6 +4,27 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
+## 2.1.0 (unreleased)
+
+The page of `entail serve`, made again so that someone who has never read the design can tell what happened in a run.
+The API, the two writes and their checks (token, Origin, Host) are as before; a minor version, since the page is a
+large piece of work with a purpose and the structure is unchanged.
+
+- **The look:** a dark, ComfyUI-like node canvas in the ClickHouse design system (as written up in
+  VoltAgent/awesome-design-md, MIT): near-black surfaces, one yellow accent kept for selection and the main action,
+  hairline borders, no shadows. Each flow is a group; its nodes run in rows as wide as the window allows, joined by
+  wires; a dotted wire means steps with no records lie in between (they can be shown). Fonts are named, not downloaded.
+- **Plain words:** the header says what happened ("A value broke at Tokenizer"; "Nothing broke", with how many points
+  could not be checked) and a button per state picks those nodes out. The right panel starts with the run's summary (what is worth
+  a look, when, which engines) and, on a node, shows the declared value next to the one the engine used with the
+  fields that differ marked, where each came from, the rule and the note.
+- **One language at a time:** English or Korean, by the browser's language, with a switch in the top bar (it was
+  both at once).
+- **Panels:** runs, settings (safe mode, custom nodes turned off - they can be turned back on from there) and help in
+  a side bar; on narrower windows the panels become drawers, and on a phone the flow runs top to bottom.
+- `/api/runs` also gives, per launch, the node where meaning first broke (`where`), how many nodes are in each state
+  (`states`) and the flows drawn (`flows`), for the run list.
+
 ## 2.0.1
 
 Released 2026-09-28. A correction of the README (English and Korean); the code is 2.0.0's, apart from its version

@@ -181,10 +181,12 @@ entail serve --open                   # http://127.0.0.1:8765/ - this machine on
 
 The page shows each launch as a workflow of nodes (model files and config, tokenizer, weights, attention and
 rotary, the engine's self-check, request, cache, kernels, response; checkpoint, prediction, VAE and LoRA for
-images; your own code), each in its state - passed, resolved, broken, stopped, or not decided (`unknown`,
-`unchecked`, shown apart from a break). A banner names the node that first broke; a node shows what was declared,
-what the consumer chose, the rule, the repair and why. New record lines update the page live. The server reads the
-record files from a process of its own: it adds nothing to the engine's cost.
+images; your own code), each in its state - passed, resolved, broken, stopped, or not verified (`unknown`,
+`unchecked`, shown apart from a break). The header says in plain words what happened and names the node where meaning
+first broke; clicking a node shows the declared value next to the one the engine used, the fields that differ marked,
+with the rule, the repair and the note. New record lines update the page live. The page speaks English or Korean
+(the browser's language; a switch in the top bar). The server reads the record files from a process of its own: it
+adds nothing to the engine's cost.
 
 - On planted faults (M7.3's eleven and a healthy run) the page named the same place the program located in process
   in 12 of 12 - 9 from the records alone, 3 through the diagnosis mode's `located` lines.
@@ -194,7 +196,7 @@ record files from a process of its own: it adds nothing to the engine's cost.
 
 ### Two safety modes
 
-`ENTAIL_SAFE` (or the page's selector, which writes `entail_logs/safe_mode.json` for the next start):
+`ENTAIL_SAFE` (or the page's settings, which write `entail_logs/safe_mode.json` for the next start):
 
 - **auto** (default) - *the selective safe path.* At start the engine's own paths are held against each other (vLLM:
   decode against a fresh prefill, alone against batched, cold against a prefix-cache hit). When they disagree, the
@@ -585,7 +587,7 @@ For 1.0 every measurement of the development milestones was run again on the fin
 | `ENTAIL_SOURCE` | `1` | also compare loaded weights with the checkpoint file (vLLM, a little I/O at start-up) |
 | `ENTAIL_NO_PATHS` | `1` | vLLM: leave out the start-up comparison of the engine's own paths (most of entail's load cost there) |
 | `ENTAIL_PATHS` | `1` | SGLang: run the start-up comparison of the engine's own paths (off by default: its probes would be SGLang's first prefills) |
-| `ENTAIL_SAFE` | `auto` (default), `all`, `off` | the safety modes: `auto` narrows a disagreement of the engine's own paths to one optimization over the next starts; `all` turns every optimization the engine declares result-neutral off; unset, `entail_logs/safe_mode.json` (the page's selector) decides |
+| `ENTAIL_SAFE` | `auto` (default), `all`, `off` | the safety modes: `auto` narrows a disagreement of the engine's own paths to one optimization over the next starts; `all` turns every optimization the engine declares result-neutral off; unset, `entail_logs/safe_mode.json` (the page's settings) decides |
 | `ENTAIL_DLC` | `off`, or names | official DLCs: all installed ones attach unless `off`; a list attaches only those (the rest are not imported) |
 | `ENTAIL_NODES` | `off`, or names | custom nodes: `off` runs none; a list names the workshop packages that may attach. One node is turned off from the page (`entail_logs/nodes.json`) |
 | `ENTAIL_MANIFESTS` | folders, separated by `:` (`;` on Windows) | where to look for manifests (`<sha256>.json`) of model files that do not declare what they mean. A file is hashed only when a manifest could be for it, and its hash is kept in `entail_hashes.json` in the first folder |

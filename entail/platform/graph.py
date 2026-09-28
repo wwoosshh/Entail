@@ -271,11 +271,20 @@ def node_detail(lines: List[dict], node_id: str) -> dict:
 
 def summaries(groups: Dict[str, List[dict]]) -> List[dict]:
     """One line per launch, newest first: when it started and ended, its processes and engines, how many decisions
-    and the worst state."""
+    and the worst state; for the run list also the node where meaning first broke ("where": its names), how many
+    nodes are in each state (nodes with nothing decided are left out) and the flows drawn."""
     out = []
     for key, lines in groups.items():
         g = graph(lines)
+        broken_at = g["locate"]["broken_at"]
+        where = next(({"id": n["id"], "ko": n["ko"], "en": n["en"]} for n in g["nodes"]
+                      if broken_at and broken_at in n["boundaries"]), None)
+        states: Dict[str, int] = {}
+        for n in g["nodes"]:
+            if n["state"] != "none":
+                states[n["state"]] = states.get(n["state"], 0) + 1
         out.append({"run": key, "start": g["start"], "end": g["end"], "pids": g["pids"], "engines": g["engines"],
-                    "decisions": g["decisions"], "state": g["state"], "broken_at": g["locate"]["broken_at"]})
+                    "decisions": g["decisions"], "state": g["state"], "broken_at": broken_at, "where": where,
+                    "states": states, "flows": [f["id"] for f in g["flows"]]})
     out.sort(key=lambda s: (s["start"] is None, -(s["start"] or 0)))
     return out

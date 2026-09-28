@@ -131,6 +131,10 @@ def test_launches_group_by_run_and_old_files_by_file():
     assert set(groups) == {"file:record-2026-09-26.jsonl", "4242-1790000000"}, set(groups)
     s = graph.summaries(groups)
     assert s[0]["run"] == "4242-1790000000" and s[0]["state"] == "broken" and s[-1]["start"] is None, s
+    # the run list names the node where meaning first broke and counts the nodes by state
+    assert s[0]["where"] and s[0]["where"]["id"] == "tokenizer" and s[0]["where"]["en"] == "Tokenizer", s[0]
+    assert s[0]["states"].get("broken") == 1 and "none" not in s[0]["states"] and s[0]["flows"] == ["llm"], s[0]
+    assert s[-1]["where"] is None, s[-1]
 
 
 def test_an_image_launch_draws_the_image_flow():

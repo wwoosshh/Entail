@@ -3,40 +3,117 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <meta name="entail-token" content="__ENTAIL_TOKEN__">
 <title>entail</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%23faff69'/%3E%3Cpath d='M6 12h12' stroke='%230a0a0a' stroke-width='2'/%3E%3Ccircle cx='6' cy='12' r='2.6' fill='%230a0a0a'/%3E%3Ccircle cx='12' cy='12' r='2.6' fill='%230a0a0a'/%3E%3Ccircle cx='18' cy='12' r='2.6' fill='%230a0a0a'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header>
-  <strong>entail</strong>
-  <span class="sub">AI 프로젝트의 안정성 · stability of AI projects</span>
-  <span id="folder" class="folder"></span>
-  <span id="live" class="live" title="live">●</span>
-</header>
-<main>
-  <aside id="runs">
-    <h2>실행 <span class="en">Runs</span></h2>
-    <ul id="runlist"></ul>
-    <h2 class="gap">안전모드 <span class="en">Safe mode</span></h2>
-    <select id="safemode" aria-label="안전모드 · safe mode">
-      <option value="auto">자동: 선택적 안전 경로 (기본)</option>
-      <option value="all">명시적 안전모드: 모두 끔</option>
-      <option value="off">끔</option>
-    </select>
-    <div id="safenote" class="hint small"></div>
-    <ul id="safepaths"></ul>
+<div class="app" id="app">
+  <header class="topbar">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+        <rect width="24" height="24" rx="6" fill="#faff69"/>
+        <path d="M6 12h12" stroke="#0a0a0a" stroke-width="2"/>
+        <circle cx="6" cy="12" r="2.6" fill="#0a0a0a"/>
+        <circle cx="12" cy="12" r="2.6" fill="#0a0a0a"/>
+        <circle cx="18" cy="12" r="2.6" fill="#0a0a0a"/>
+      </svg>
+      <span class="wordmark">entail</span>
+    </div>
+    <span class="topbar-sep" aria-hidden="true"></span>
+    <button class="folder" id="folder" type="button">
+      <span class="folder-label" data-t="folder"></span>
+      <span class="folder-path" id="folder-path"></span>
+    </button>
+    <div class="topbar-right">
+      <button class="safe-chip" id="safe-chip" type="button">
+        <span class="icon-slot" data-icon="shield"></span>
+        <span class="safe-chip-text" id="safe-chip-text"></span>
+      </button>
+      <span class="live" id="live">
+        <span class="live-dot" aria-hidden="true"></span>
+        <span class="live-text" id="live-text"></span>
+      </span>
+      <div class="seg" id="lang" role="group" aria-label="Language">
+        <button type="button" data-lang="ko">한국어</button>
+        <button type="button" data-lang="en">EN</button>
+      </div>
+    </div>
+  </header>
+
+  <nav class="rail" id="rail">
+    <button class="rail-btn" type="button" data-tab="runs"><span class="icon-slot" data-icon="runs"></span></button>
+    <button class="rail-btn" type="button" data-tab="settings"><span class="icon-slot" data-icon="settings"></span></button>
+    <button class="rail-btn" type="button" data-tab="help"><span class="icon-slot" data-icon="help"></span></button>
+  </nav>
+
+  <aside class="side" id="side">
+    <section class="pane" id="pane-runs">
+      <div class="pane-head">
+        <h2 data-t="runsTitle"></h2>
+        <span class="count" id="run-count"></span>
+      </div>
+      <div class="pane-body">
+        <div id="notices"></div>
+        <div class="runlist" id="runlist"></div>
+      </div>
+    </section>
+    <section class="pane" id="pane-settings" hidden>
+      <div class="pane-head"><h2 data-t="settingsTitle"></h2></div>
+      <div class="pane-body">
+        <h3 class="sec-label" data-t="safeTitle"></h3>
+        <p class="sec-note" data-t="safeNote"></p>
+        <div class="radio-cards" id="safe-options" role="radiogroup"></div>
+        <div class="file-line" id="safe-file"></div>
+        <h3 class="sec-label" data-t="pathsTitle"></h3>
+        <div id="safe-paths"></div>
+        <h3 class="sec-label" data-t="offNodesTitle"></h3>
+        <div id="off-nodes"></div>
+      </div>
+    </section>
+    <section class="pane" id="pane-help" hidden>
+      <div class="pane-head"><h2 data-t="helpTitle"></h2></div>
+      <div class="pane-body" id="help-body"></div>
+    </section>
   </aside>
-  <section id="center">
-    <div id="banner" class="banner">기록을 읽는 중… <span class="en">reading records</span></div>
-    <div id="flows"></div>
-    <div id="legend" class="legend"></div>
-  </section>
-  <aside id="detail">
-    <h2 id="dtitle">노드 <span class="en">Node</span></h2>
-    <div id="dbody" class="hint">노드를 누르면 어디서, 왜가 여기에 나온다. <span class="en">Pick a node to see where and why.</span></div>
+
+  <main class="main" id="main">
+    <div class="runhead" id="runhead"></div>
+    <div class="canvas" id="canvas">
+      <div class="board" id="board"></div>
+      <div class="empty" id="empty" hidden></div>
+    </div>
+    <div class="canvas-tools" id="canvas-tools">
+      <button class="tool" id="show-all" type="button" aria-pressed="false">
+        <span class="icon-slot" data-icon="steps"></span><span class="tool-label" data-t="showAll"></span>
+      </button>
+      <button class="tool" id="toggle-detail" type="button" aria-pressed="true">
+        <span class="icon-slot" data-icon="panel"></span><span class="tool-label" data-t="panel"></span>
+      </button>
+    </div>
+  </main>
+
+  <aside class="detail" id="detail">
+    <div class="detail-head" id="dhead"></div>
+    <div class="detail-body" id="dbody"></div>
   </aside>
-</main>
+  <div class="scrim" id="scrim" hidden></div>
+</div>
+
+<dialog class="dialog" id="dialog">
+  <form method="dialog">
+    <h3 class="dialog-title" id="dialog-title"></h3>
+    <div class="dialog-body" id="dialog-body"></div>
+    <div class="dialog-actions">
+      <button class="btn btn-secondary" value="cancel" id="dialog-cancel"></button>
+      <button class="btn btn-primary" value="ok" id="dialog-ok"></button>
+    </div>
+  </form>
+</dialog>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
 <script src="/static/app.js"></script>
 </body>
 </html>
