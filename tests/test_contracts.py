@@ -255,12 +255,14 @@ def test_ledger_says_everything_in_one_line():
             "(engine: model_sampling, declared); rule: " + RULES["no_resolution"] + "; {end}")
     unknown = ("[entail] unknown at load:comfyui.sampler: Prediction nothing declared; comfyui.sampler uses eps "
                "without zero terminal SNR (engine: model_sampling, declared); rule: " + RULES["undeclared"])
+    # a could-not-check line that does not stop says what it means (field test, entail#2, #3)
+    unchecked = unknown + "; not checked, so neither a pass nor a fault (details: entail serve)"
     assert ledger.lines() == [
         "[entail] resolved at load:comfyui.sampler: Prediction declared v-prediction "
         "(file: m.safetensors#modelspec.prediction_type, declared); comfyui.sampler uses eps without zero terminal SNR "
         "(engine: model_sampling, declared); rule: " + RULES["resolved"] + "; changed: set the sampler "
         "(eps without zero terminal SNR -> v-prediction)",
-        unknown,
+        unchecked,
         unknown + "; stops here",
         said.format(v="broken", end="reported, not stopped"),
         said.format(v="refused", end="stops here"),
@@ -272,6 +274,43 @@ def test_ledger_says_everything_in_one_line():
         ("resolved", "set_sampling", "m.safetensors#modelspec.prediction_type", "eps without zero terminal SNR")
     found = ledger.locate()   # M7.1: the first boundary that broke is the problem area
     assert (found.broken_at, found.all_intact) == (ledger.broken()[0].contract.boundary, False), found
+
+
+def test_a_line_shows_what_changed_not_the_whole_values():
+    """Field test, entail#9: the line of a Rotary repair printed both whole values (twenty unset fields each), 2,197
+    characters, and hid the one field that changed. A line leaves out unset fields and, when the two values are of
+    one kind, shows only the fields that differ; the record keeps the whole values."""
+    c = Contract("load:transformers.config.rope_scaling", "transformers.rotary_embedding", ("Rotary",), ("Rotary",))
+    want = Rotary("yarn", theta=5000000, factor=4.0, original_max_position=262144)
+    lost = Rotary("yarn", theta=None, factor=4.0, original_max_position=262144)
+    declared = Fact("Rotary", want, Source("user", "rope_scaling given at load"), Certainty.DECLARED)
+    chosen = Fact("Rotary", lost, Source("engine", "Qwen3Config"), Certainty.VERIFIED)
+    with resolutions(("Rotary", Resolution("write the old name where the model reads it, as config.json would", "x"))):
+        (d,) = decide(c, {"Rotary": declared}, {"Rotary": chosen})
+    text = record.line(d)
+    assert d.verdict is Verdict.RESOLVED, d
+    assert "declared Rotary(rope_type='yarn', theta=5000000, factor=4.0, original_max_position=262144)" in text, text
+    assert "uses Rotary(rope_type='yarn', factor=4.0, original_max_position=262144)" in text, text
+    assert text.endswith("as config.json would (theta None -> 5000000)"), text
+    assert "beta_fast" not in text and len(text) < 600, (len(text), text)   # 2,197 before
+    assert record.decision_json(d)["declared"]["value"] == str(want)
+    # long values: only the fields that differ
+    want = Rotary("yarn", theta=1e6, factor=32.0, original_max_position=4096, beta_fast=32.0, beta_slow=1.0, mscale=1.0,
+                  mscale_all_dim=1.0, attention_factor=1.2)
+    lost = Rotary("yarn", theta=None, factor=32.0, original_max_position=4096, beta_fast=32.0, beta_slow=1.0,
+                  mscale=1.0, mscale_all_dim=1.0, attention_factor=1.2)
+    (d,) = decide(c, {"Rotary": Fact("Rotary", want, Source("user", "u"), Certainty.DECLARED)},
+                  {"Rotary": Fact("Rotary", lost, Source("engine", "e"), Certainty.VERIFIED)})
+    text = record.line(d)
+    assert "declared Rotary(theta=1000000.0)" in text and "uses Rotary(theta=None)" in text and "beta_slow" not in text, text
+    # a custom node's check: short values stay whole, unset fields left out
+    c = Contract("node:app.answer/json_object", "app.answer", ("Check",), ("Check",))
+    (d,) = decide(c, {"Check": Fact("Check", Check("json_object", True), Source("user", "app.answer"), Certainty.DECLARED)},
+                  {"Check": Fact("Check", Check("json_object", False, "not JSON"), Source("probe", "json_object"),
+                                 Certainty.VERIFIED)})
+    text = record.line(d)
+    assert "declared Check(check='json_object', holds=True) (" in text, text
+    assert "uses Check(check='json_object', holds=False, detail='not JSON')" in text, text
 
 
 def test_policy_from_the_environment():

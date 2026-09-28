@@ -28,7 +28,7 @@ import os
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 LOG_DIR_NAME = "entail_logs"
@@ -185,9 +185,41 @@ def said_in_this_launch(key) -> bool:
     return False
 
 
-def _shown(fact):
-    value = "unknown" if fact.value is None else str(fact.value)
-    return f"{value} ({fact.source}, {fact.certainty.value})"
+LONG_VALUE = 100   # a value in a line longer than this shows only the fields that differ from the other side
+
+
+def _plain(value) -> bool:
+    """A fact value that prints as its dataclass fields (no text of its own, as Prediction has)."""
+    return is_dataclass(value) and not isinstance(value, type) and type(value).__str__ is object.__str__
+
+
+def _fields(value, names=None) -> str:
+    """`value`'s fields as `name=value`: the named ones, or every field that is set (None fields left out)."""
+    pairs = [(f.name, getattr(value, f.name)) for f in fields(value) if names is None or f.name in names]
+    return ", ".join(f"{n}={v!r}" for n, v in pairs if names is not None or v is not None)
+
+
+def _differing(a, b):
+    """The fields in which two values of one plain dataclass differ; None when they do not compare that way."""
+    if not (_plain(a) and _plain(b) and type(a) is type(b)):
+        return None
+    names = [f.name for f in fields(a) if getattr(a, f.name) != getattr(b, f.name)]
+    return names or None
+
+
+def _value(fact, names=None) -> str:
+    """A fact's value in a line. A plain dataclass value leaves out its unset fields, or shows only `names` (the
+    fields a repair or a mismatch is about): a line naming two Rotary values with twenty unset fields each ran to
+    2,197 characters and hid the one field that changed (field test, entail#9). The record keeps the whole value."""
+    if fact.value is None:
+        return "unknown"
+    if _plain(fact.value):
+        return f"{type(fact.value).__name__}({_fields(fact.value, names)})"
+    return str(fact.value)
+
+
+def _shown(fact, names=None):
+    return f"{_value(fact, names)} ({fact.source}, {fact.certainty.value})"
 
 
 def line(decision) -> str:
@@ -203,11 +235,20 @@ def line(decision) -> str:
         where = d.declared.source.where if d.declared is not None else d.contract.consumer
         return (f"[entail] unknown at {d.contract.boundary}: {where}: keys taken by neither the config class nor a "
                 f"reader entail knows: {keys} (the record holds the whole decision)")
-    declared = f"declared {_shown(d.declared)}" if d.declared is not None else "nothing declared"
-    used = f"{consumer} uses {_shown(d.chosen)}" if d.chosen is not None else f"what {consumer} uses is unknown"
+    both = d.declared is not None and d.chosen is not None
+    diff = _differing(d.declared.value, d.chosen.value) if both else None
+    # short values stay whole (what they share is context: Layout's kind); long ones show only what differs
+    names = diff if diff and max(len(_value(d.declared)), len(_value(d.chosen))) > LONG_VALUE else None
+    declared = f"declared {_shown(d.declared, names)}" if d.declared is not None else "nothing declared"
+    used = f"{consumer} uses {_shown(d.chosen, names)}" if d.chosen is not None else f"what {consumer} uses is unknown"
     text = f"[entail] {d.verdict.value} at {d.contract.boundary}: {d.name} {declared}; {used}; rule: {d.rule}"
     if d.resolution:
-        text += f"; changed: {d.resolution}"
+        how = d.resolution
+        cut = how.find(f" ({type(d.chosen.value).__name__}(") if diff else -1
+        if cut >= 0 and how.endswith(")"):   # the two whole values the repair went between: only what changed
+            how = how[:cut] + " (" + ", ".join(f"{n} {getattr(d.chosen.value, n)!r} -> {getattr(d.declared.value, n)!r}"
+                                             for n in diff) + ")"
+        text += f"; changed: {how}"
     if d.observed is not None:
         text += f"; the data shows {_shown(d.observed)}"
     if d.conflict:
@@ -216,6 +257,10 @@ def line(decision) -> str:
         text += f"; note: {d.note}"
     if d.blocking:
         text += "; stops here"
+    elif d.verdict.value == "unknown":
+        # what a could-not-check line means, in the line (field test, entail#2, #3: read as a warning, or as an
+        # all-clear, when it is neither)
+        text += "; not checked, so neither a pass nor a fault (details: entail serve)"
     elif d.verdict.value == "broken":
         text += "; reported, not stopped"
     return text

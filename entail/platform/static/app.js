@@ -50,8 +50,8 @@ const WORDS = {
       resolved: "엔진이 선언과 다른 값을 쓰려 해서, entail이 선언대로 바로잡았습니다.",
       broken: "엔진이 선언과 다른 값을 썼습니다. 실행은 계속됐지만, 이 뒤의 결과는 틀렸을 수 있습니다.",
       refused: "값이 어긋나서 결과를 내기 전에 실행을 멈췄습니다.",
-      unknown: "선언이 없거나 엔진이 어떤 값을 쓰는지 알 수 없어서 확인하지 못했습니다. 문제가 있다는 뜻은 아닙니다.",
-      unchecked: "검사할 수 없는 자리라서 건너뛰었습니다(예: CUDA 그래프 안에서 돈 호출). 문제가 있다는 뜻은 아닙니다.",
+      unknown: "선언이 없거나 엔진이 어떤 값을 쓰는지 알 수 없어서 확인하지 못했습니다. 괜찮다는 뜻도, 문제라는 뜻도 아닙니다.",
+      unchecked: "검사할 수 없는 자리라서 건너뛰었습니다(예: CUDA 그래프 안에서 돈 호출). 괜찮다는 뜻도, 문제라는 뜻도 아닙니다.",
       none: "이 단계의 기록은 있지만 확인할 값은 없었습니다.",
       absent: "이 실행에서 이 단계는 기록이 없습니다.",
       off: "이 커스텀 노드의 검사를 꺼 두었습니다.",
@@ -61,14 +61,14 @@ const WORDS = {
     headRefused: (w) => `${w}에서 값이 어긋나 실행을 멈췄습니다`,
     headLost: "값이 전달되는 도중에 사라졌습니다",
     headSaid: "프로그램이 이상을 알렸습니다",
-    headClean: "어긋난 곳은 없습니다",
+    headClean: "어긋난 곳은 찾지 못했습니다",
     headOk: "모두 정상입니다",
     headEmpty: "아직 확인한 곳이 없습니다",
     subBroken: (n) => (n > 1 ? `선언과 다른 값이 쓰인 곳이 ${n}곳 있습니다. ` : "") +
       "실행은 계속됐지만, 이 뒤의 결과는 틀렸을 수 있습니다. 노드를 누르면 무엇이 달랐는지 볼 수 있습니다.",
     subRefused: "결과를 내기 전에 멈췄으므로 틀린 결과는 나가지 않았습니다.",
     subLost: (w) => `값을 잃은 곳: ${w}`,
-    subClean: (n, u) => `확인한 ${n}곳은 모두 정상이고, ${u}곳은 확인하지 못했습니다.`,
+    subClean: (n, u) => `확인한 ${n}곳은 모두 정상이었습니다. ${u}곳은 확인하지 못했으니, 결과가 이상하면 그곳부터 보세요.`,
     subOk: (n) => `확인한 ${n}곳 모두 선언된 값 그대로 쓰였습니다.`,
     subResolved: (n) => ` 그 가운데 entail이 바로잡은 결과가 ${n}건 있습니다.`,
     subEmpty: "모델을 불러오거나 요청을 처리하면 결과가 나타납니다.",
@@ -108,6 +108,13 @@ const WORDS = {
     lostBy: "값을 잃은 곳",
     blocking: "이 결과에서 실행을 멈췄습니다.",
     conflict: "출처마다 다른 값",
+    declareTitle: "선언해서 확인하게 하려면",
+    declareBody: "이 모델의 값을 알고 있다면 매니페스트로 선언할 수 있습니다. 파일 옆에 두면 다음 실행부터 entail이 이 값을 확인합니다.",
+    declareFill: "# 초안의 빈 칸을 채운 뒤",
+    declareFile: "<모델 파일>",
+    declareMore: "선언하는 법 (README)",
+    declareUrl: "https://github.com/wwoosshh/entail/blob/main/README.ko.md#모델-파일이-뜻을-선언하지-않을-때",
+    original: "기록 원문",
     perPoint: "지점별 검사",
     pChecks: "검사",
     pPassed: "통과",
@@ -228,8 +235,8 @@ const WORDS = {
       resolved: "The engine was about to use a different value, and entail put the declared one back.",
       broken: "The engine used a value other than the declared one. The run went on, but what came after may be wrong.",
       refused: "A value did not match, so the run stopped before it produced output.",
-      unknown: "Nothing declared the value, or what the engine uses is not known, so it could not be checked. This does not mean something is wrong.",
-      unchecked: "The check was skipped where it cannot run (for example, a call inside a CUDA graph). This does not mean something is wrong.",
+      unknown: "Nothing declared the value, or what the engine uses is not known, so it could not be checked. That is neither an all-clear nor an alarm.",
+      unchecked: "The check was skipped where it cannot run (for example, a call inside a CUDA graph). That is neither an all-clear nor an alarm.",
       none: "This step left records, but had no value to check.",
       absent: "This step left no records in this run.",
       off: "Checks of this custom node are turned off.",
@@ -239,14 +246,14 @@ const WORDS = {
     headRefused: (w) => `A value broke at ${w}, and the run stopped`,
     headLost: "A value was lost on the way",
     headSaid: "The program reported a fault",
-    headClean: "Nothing broke",
+    headClean: "No mismatch found",
     headOk: "All clear",
     headEmpty: "Nothing checked yet",
     subBroken: (n) => (n > 1 ? `${n} points used a value other than the declared one. ` : "") +
       "The run went on, but what came after may be wrong. Click the node to see what differed.",
     subRefused: "It stopped before producing output, so no wrong output went out.",
     subLost: (w) => `Lost at: ${w}`,
-    subClean: (n, u) => `All ${n} checked points kept their values; ${u} could not be checked.`,
+    subClean: (n, u) => `All ${n} checked points held; ${u} could not be checked, so if the output looks wrong, start there.`,
     subOk: (n) => `All ${n} checked points used the declared values.`,
     subResolved: (n) => ` entail repaired ${n} ${n === 1 ? "result" : "results"} among them.`,
     subEmpty: "Results appear once the program loads a model or serves a request.",
@@ -286,6 +293,13 @@ const WORDS = {
     lostBy: "Lost at",
     blocking: "The run stopped at this result.",
     conflict: "Values by source",
+    declareTitle: "To have it checked, declare it",
+    declareBody: "If you know this model's value, a manifest declares it. Kept next to the file, it makes entail check the value from the next run on.",
+    declareFill: "# fill in the draft's empty slots, then",
+    declareFile: "<model file>",
+    declareMore: "Declaring a value (README)",
+    declareUrl: "https://github.com/wwoosshh/entail#when-a-model-file-does-not-say-what-it-means",
+    original: "As recorded",
     perPoint: "Checks by point",
     pChecks: "checks",
     pPassed: "passed",
@@ -365,6 +379,27 @@ const WORDS = {
 
 const ORDER = ["refused", "broken", "unknown", "unchecked", "resolved", "pass", "none", "absent"];   // worst first
 const VERDICTS = new Set(["pass", "resolved", "unknown", "unchecked", "broken", "refused"]);
+// The rule texts a record carries are the core's (entail/contracts.py RULES), in English. The common ones read in
+// Korean on a Korean page, the original a hover away (field test, entail#7); tests/test_platform_server.py checks
+// that every text here is still a rule the core says.
+const RULE_KO = {
+  "the consumer uses the declared value": "쓰는 쪽이 선언된 값을 씀",
+  "nothing declares it": "선언한 곳이 없음",
+  "this boundary could not be checked": "이 지점은 검사할 수 없었음",
+  "what the consumer uses is unknown (not read, or not in the capability table)": "쓰는 쪽이 무엇을 쓰는지 알 수 없음(읽지 못했거나 능력표에 없음)",
+  "the consumer differs from the declaration; a registered resolution repairs it": "쓰는 쪽이 선언과 달라서, 등록된 해소로 바로잡음",
+  "the consumer differs from the declaration and no resolution is registered": "쓰는 쪽이 선언과 다르고, 바로잡을 해소가 등록되어 있지 않음",
+  "the consumer differs from the declaration and the policy repairs nothing": "쓰는 쪽이 선언과 다르고, 정책상 바로잡지 않음",
+  "the user's explicit choice contradicts the declaration; it is not overridden": "사용자가 직접 정한 값이 선언과 달라서, 덮어쓰지 않음",
+  "only a default, never declared": "기본값뿐이고, 선언된 적이 없음",
+  "only inferred, never declared": "추정뿐이고, 선언된 적이 없음",
+  "the sources disagree": "출처끼리 값이 다름",
+  "the engine's tokenizer encodes a probe text to other ids than the tokenizer the folder declares": "엔진의 토크나이저가 시험 문장을 폴더가 선언한 토크나이저와 다른 id로 나눔",
+  "a custom node's validator: the value at this point of the program does not have the property the developer declared for it (the validator's words are in the note)": "커스텀 노드의 검증기: 이 지점의 값이 개발자가 선언한 성질을 갖지 않음(검증기의 말은 '자세히'에 있음)",
+};
+const WHERE_KO = [["as the engine set it up", "엔진이 설정한 대로"], ["set explicitly by the user", "사용자가 직접 정함"]];
+// what a manifest can declare (entail/manifest.py relevant_names): an unknown of these can be made checkable
+const DECLARABLE = new Set(["Prediction", "LatentScale", "ModelProps", "Rotary", "Template"]);
 const ENGINES = {
   transformers: "transformers", vllm: "vLLM", sglang: "SGLang", comfyui: "ComfyUI", diffusers: "Diffusers",
   torch: "PyTorch", triton: "Triton",
@@ -1289,11 +1324,33 @@ function valueBlock(label, fact, parsed, diffs) {
   if (fact.source) {
     const src = el("div", "src");
     src.append(el("span", "kind", w("source")[fact.source.kind] || fact.source.kind || "?"));
-    if (fact.source.where) src.append(document.createTextNode(" · " + fact.source.where));
+    if (fact.source.where) src.append(document.createTextNode(" · " + whereText(fact.source.where)));
     if (fact.certainty) src.append(el("span", "cert", w("certainty")[fact.certainty] || fact.certainty));
     wrap.append(src);
   }
   return wrap;
+}
+
+function ruleText(rule) {
+  return lang === "ko" && RULE_KO[rule] ? RULE_KO[rule] : rule;
+}
+
+function whereText(where) {
+  if (lang !== "ko") return where;
+  return WHERE_KO.reduce((t, [en, ko]) => t.split(en).join(ko), String(where));
+}
+
+// For an unknown a manifest can settle: the commands, with the model's file when the record names it
+function declareEl(x) {
+  const where = (x.chosen && x.chosen.source && x.chosen.source.where) || "";
+  const m = /([^\s,()]+\.(?:safetensors|ckpt|gguf))/i.exec(where);
+  const file = m ? m[1] : w("declareFile");
+  const box = el("div", "declare");
+  box.append(el("div", "declare-title", w("declareTitle")), el("p", "declare-body", w("declareBody")),
+             el("pre", "codeblock", [`entail infer "${file}" --out "${file}.entail.json"`, w("declareFill"),
+                                     `entail pin "${file}.entail.json"`].join("\n")),
+             externalLink(w("declareMore"), w("declareUrl")));
+  return box;
 }
 
 function decRow(k, v, mono) {
@@ -1320,7 +1377,11 @@ function decisionEl(x) {
   if (x.observed) box.append(valueBlock(w("observed"), x.observed, ov, diffKeys(dv, ov)));
   if (x.resolution) box.append(decRow(w("resolution"), x.resolution + (x.handle ? " (" + x.handle + ")" : "")));
   if (x.lost_by) box.append(decRow(w("lostBy"), x.lost_by, true));
-  if (x.rule) box.append(decRow(w("rule"), x.rule));
+  if (x.rule) {
+    const r = decRow(w("rule"), ruleText(x.rule));
+    if (ruleText(x.rule) !== x.rule) r.title = w("original") + ": " + x.rule;
+    box.append(r);
+  }
   if (x.note) box.append(decRow(w("note"), x.note));
   if ((x.conflict || []).length > 1) {
     const c = el("div", "conflict");
@@ -1333,6 +1394,7 @@ function decisionEl(x) {
     }
     box.append(c);
   }
+  if (st === "unknown" && !x.declared && DECLARABLE.has(x.name)) box.append(declareEl(x));
   if (x.blocking) box.append(el("div", "dec-block", w("blocking")));
   return box;
 }

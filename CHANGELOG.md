@@ -4,6 +4,24 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
+## Unreleased
+
+From the first field test of 2.1.0 (ComfyUI and transformers, used from the docs only; issues #2, #3, #5, #7, #9):
+
+- **A could-not-check line names its model and says what it means.** ComfyUI's decisions name the checkpoint's file,
+  so a second model that declares nothing gets its own line; the console used to leave it off as a repeat of the
+  first model's (#2). A non-stopping `unknown` line ends "not checked, so neither a pass nor a fault (details: entail
+  serve)" (#3), and INSTALL says what these lines are and how `ENTAIL_QUIET=unknown` keeps them off the console.
+- **Lines show what differs, not whole values.** A value in a line leaves out its unset fields; a long one shows only
+  the fields that differ from the other side, and a repair names the fields it changed (`theta None -> 5000000`).
+  The field test's Rotary repair printed 2,197 characters; the same kind of repair now prints about 520 (#9). The
+  record keeps the whole values.
+- **The page no longer calls an unchecked value "not a problem"** (#2): unknown and skipped read "neither an
+  all-clear nor an alarm", and the header says "No mismatch found", with where to start if the output looks wrong.
+  An unknown value that a manifest can declare (Prediction, LatentScale, ModelProps, Rotary, Template) shows how to
+  declare it, with the model's file when the record names it (#5). On a Korean page the common rule texts and source
+  phrases read in Korean, the original on hover (#7).
+
 ## 2.1.0
 
 Released 2026-09-28. The page of `entail serve`, made again so that someone who has never read the design can tell

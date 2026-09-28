@@ -47,6 +47,10 @@ python app.py
 In `cmd` and `.bat` files keep `set ENTAIL=load` on a line of its own: in `set ENTAIL=load && ...` the space before
 `&&` becomes part of the value.
 
+A console line that starts `[entail] unknown` does not report a fault: it says a value could not be checked (nothing
+declared it, or it cannot be checked there). To keep those lines off the console, and in `entail_logs/` only, set
+`ENTAIL_QUIET=unknown` the same way as `ENTAIL=load`.
+
 ## Your own script (transformers, diffusers)
 
 Install into the environment the script runs in, and start it with the variable set:

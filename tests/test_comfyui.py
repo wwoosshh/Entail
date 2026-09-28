@@ -143,11 +143,11 @@ from entail.adapters import comfyui  # noqa: E402
 assert comfyui.install() == 5 and comfyui.install_sampling() == 2
 
 
-def checkpoint(meta, keys=("model.diffusion_model.input_blocks.0.0.weight",)):
+def checkpoint(meta, keys=("model.diffusion_model.input_blocks.0.0.weight",), name="model.safetensors"):
     header = {k: {"dtype": "F32", "shape": [1], "data_offsets": [4 * i, 4 * i + 4]} for i, k in enumerate(keys)}
     header["__metadata__"] = meta
     h = json.dumps(header).encode()
-    p = os.path.join(tempfile.mkdtemp(), "model.safetensors")
+    p = os.path.join(tempfile.mkdtemp(), name)
     with open(p, "wb") as f:
         f.write(struct.pack("<Q", len(h)) + h + b"\0" * (4 * len(keys)))
     return p
@@ -237,6 +237,18 @@ def test_a_model_that_declares_nothing_is_unknown_and_left_as_it_is():
     custom = sd.load_state_dict_guess_config({"v_pred": 0}, metadata={})[0]   # built before entail looked
     used, printed = run(lambda: sample.sample(custom, None, 20, 7.0))
     assert used is custom and "unknown at load:comfyui.prediction" in printed
+
+
+def test_a_decision_names_the_model_it_is_about():
+    """Field test, entail#2: two checkpoints that declare nothing made the same line, and the second model's line was
+    left off the console as a repeat of the first. The line names the checkpoint's file, so each model has its own."""
+    lines = []
+    for name in ("first.safetensors", "second.safetensors"):
+        patcher, _ = run(lambda: sd.load_checkpoint_guess_config(checkpoint({}, name=name))[0])
+        _, printed = run(lambda: sample.sample(patcher, None, 20, 7.0))
+        lines.append([ln for ln in printed.splitlines() if "unknown at load:comfyui.prediction" in ln])
+    assert lines[0] and lines[1] and lines[0] != lines[1], lines
+    assert "first.safetensors" in lines[0][0] and "second.safetensors" in lines[1][0], lines
 
 
 def test_a_state_dict_in_hand_declares_like_the_file():

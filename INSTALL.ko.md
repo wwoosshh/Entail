@@ -47,6 +47,10 @@ python app.py
 `cmd`와 `.bat` 파일에서는 `set ENTAIL=load`를 따로 한 줄에 쓴다. `set ENTAIL=load && ...`로 쓰면 `&&` 앞의 빈칸이
 값에 들어간다.
 
+콘솔에 `[entail] unknown`으로 시작하는 줄이 나오면, 문제를 찾았다는 뜻이 아니라 그 값을 확인하지 못했다는 뜻이다
+(선언이 없거나 그 자리에서 검사할 수 없음). 이 줄을 콘솔에서 빼고 `entail_logs/`에만 남기려면 `ENTAIL=load`와 같은
+방법으로 `ENTAIL_QUIET=unknown`을 준다.
+
 ## 내 스크립트(transformers, diffusers)
 
 스크립트를 돌리는 환경에 설치하고, 변수를 준 채로 시작한다.
