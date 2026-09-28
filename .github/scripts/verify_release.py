@@ -92,7 +92,12 @@ def from_index(py, name, version, tries=3, pause=30):
             return None
         if i + 1 < tries:
             time.sleep(pause)
-    return (r.stderr or r.stdout).strip().splitlines()[-1:]
+    return failure(r)
+
+
+def failure(r):
+    """What a failed pip run said last, or its exit code when it said nothing."""
+    return (r.stderr or r.stdout).strip().splitlines()[-1:] or [f"pip exited {r.returncode}"]
 
 
 def from_file(py, wheel):
@@ -108,7 +113,7 @@ def from_file(py, wheel):
     if digest != wheel["digests"]["sha256"]:
         return [f"{wheel['filename']}: sha256 {digest}, PyPI says {wheel['digests']['sha256']}"]
     r = run(py, "-m", "pip", "install", "-q", "--no-cache-dir", path)
-    return None if r.returncode == 0 else (r.stderr or r.stdout).strip().splitlines()[-1:]
+    return None if r.returncode == 0 else failure(r)
 
 
 def page_answers(entail, port):
