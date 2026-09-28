@@ -45,7 +45,9 @@ engine compiled into the app (Ollama, LM Studio, llama.cpp) give it nothing to a
 each tool - your scripts, vLLM behind Open WebUI, ComfyUI (git, portable, Desktop), text-generation-webui, vLLM in
 Docker - is in [INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md).
 
-> **Status: 2.0.1, measured on one machine.** 2.0.1 corrects this README; its code is 2.0.0's. 2.0 adds the
+> **Status: 2.1.0, measured on one machine.** 2.1.0 remakes the page of `entail serve` (plain words, a node canvas)
+> and adds install steps by tool ([INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md)); the checks
+> are 2.0's. 2.0 adds the
 > platform - `entail serve`, two safety modes, official DLCs and custom nodes ([The platform](#the-platform-20)) -
 > around the same checks: on the 102 healthy runs it made exactly the decisions 1.3.0's frozen code made (no run
 > broken, the same six real tokenizer differences reported), requests cost at most about 1% more with entail on (1.000-1.011 over ten
@@ -235,7 +237,7 @@ leak is back; in two normal workflows it changed no image and said nothing. `ENT
 from this repository:
 
 ```bash
-pip install "git+https://github.com/wwoosshh/entail@v2.0.0#subdirectory=dlc/comfyui"
+pip install "git+https://github.com/wwoosshh/entail@v2.1.0#subdirectory=dlc/comfyui"
 ```
 
 ### Custom nodes
@@ -267,7 +269,7 @@ Packages of validators attach through the entry point group `entail.nodes`; `ent
 `examples/custom_nodes`. The package is not on PyPI either:
 
 ```bash
-pip install "git+https://github.com/wwoosshh/entail@v2.0.0#subdirectory=workshop/basics"
+pip install "git+https://github.com/wwoosshh/entail@v2.1.0#subdirectory=workshop/basics"
 ```
 
 entail does not sandbox a DLC or a validator: it is code in your program's process, with its rights. It keeps them

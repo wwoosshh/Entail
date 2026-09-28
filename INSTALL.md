@@ -171,7 +171,7 @@ ComfyUI 0.34.1's dynamic VRAM loader writes a sampling node's schedule into the 
 another image, then black). It is not on PyPI and installs with git, into the same Python as entail:
 
 ```bat
-python -m pip install "git+https://github.com/wwoosshh/entail@v2.0.0#subdirectory=dlc/comfyui"
+python -m pip install "git+https://github.com/wwoosshh/entail@v2.1.0#subdirectory=dlc/comfyui"
 ```
 
 (Use `python_embeded\python.exe` or `.venv\Scripts\python.exe` in place of `python`, as above.)

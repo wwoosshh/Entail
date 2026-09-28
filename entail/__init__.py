@@ -13,7 +13,7 @@ from .facts import (LAYOUT_KINDS, Assumed, Epoch, Identity, KernelCaps, KernelCo
                     ModelProps, Origin, Positions, Prediction, Quantized, Reduction, Rotary, Template, TokenType,
                     Valid, Vocab, Stops, Tokenization, KernelReference, Parse, Placeholder)
 
-__version__ = "2.0.1"
+__version__ = "2.1.0"
 
 
 def enable(mode="load", policy="resolve"):

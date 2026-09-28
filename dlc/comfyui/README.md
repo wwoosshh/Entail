@@ -12,7 +12,7 @@ point group `entail.dlc`.
 It is not on PyPI; it installs from entail's repository, with entail 2.0 or later as the core it attaches to:
 
 ```bash
-pip install "git+https://github.com/wwoosshh/entail@v2.0.0#subdirectory=dlc/comfyui"
+pip install "git+https://github.com/wwoosshh/entail@v2.1.0#subdirectory=dlc/comfyui"
 ```
 
 With `ENTAIL=load`, entail finds it and installs the repair when ComfyUI's modules are imported. `entail doctor` lists

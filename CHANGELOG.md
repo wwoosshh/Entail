@@ -4,11 +4,12 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
-## 2.1.0 (unreleased)
+## 2.1.0
 
-The page of `entail serve`, made again so that someone who has never read the design can tell what happened in a run.
-The API, the two writes and their checks (token, Origin, Host) are as before; a minor version, since the page is a
-large piece of work with a purpose and the structure is unchanged.
+Released 2026-09-28. The page of `entail serve`, made again so that someone who has never read the design can tell
+what happened in a run, and install steps by tool. The checks are 2.0's; the API (one addition below), the two writes
+and their checks (token, Origin, Host) are as before. A minor version: a large piece of work with a purpose, and the
+structure is unchanged.
 
 - **The look:** a dark, ComfyUI-like node canvas in the ClickHouse design system (as written up in
   VoltAgent/awesome-design-md, MIT): near-black surfaces, one yellow accent kept for selection and the main action,

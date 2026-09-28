@@ -171,7 +171,7 @@ ComfyUI 0.34.1의 동적 VRAM 적재기가 샘플링 노드의 스케줄을 체�
 되다가 검게 나온다). PyPI에는 없고 git으로 설치하며, entail과 같은 파이썬에 넣는다.
 
 ```bat
-python -m pip install "git+https://github.com/wwoosshh/entail@v2.0.0#subdirectory=dlc/comfyui"
+python -m pip install "git+https://github.com/wwoosshh/entail@v2.1.0#subdirectory=dlc/comfyui"
 ```
 
 (`python` 대신 위와 같이 `python_embeded\python.exe`나 `.venv\Scripts\python.exe`를 쓴다.)

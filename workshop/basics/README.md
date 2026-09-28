@@ -14,7 +14,7 @@ by name.
 It is not on PyPI; it installs from entail's repository, with entail 2.0 or later (`entail.nodes` is 2.0's):
 
 ```bash
-pip install "git+https://github.com/wwoosshh/entail@v2.0.0#subdirectory=workshop/basics"
+pip install "git+https://github.com/wwoosshh/entail@v2.1.0#subdirectory=workshop/basics"
 ```
 
 ```python
