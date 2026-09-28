@@ -28,7 +28,9 @@ so `main` stays a straight line of the commits as written.
 1. Bring the local `main` up to date (`git switch main && git pull --ff-only`) and branch off it.
 2. Work on the branch, push it and open a pull request into `main`.
 3. An **ordinary pull request** leaves `__version__` as it is. When it changes the package, it adds a line under
-   `## Unreleased` at the top of CHANGELOG.md. Merged, it waits in `main` for the next release; nothing is published.
+   `## Unreleased` at the top of CHANGELOG.md. Its description says `Closes #N` for each issue it fixes (GitHub
+   closes them when it merges) and `Refs #N` for an issue it only touches. Merged, it waits in `main` for the next
+   release; nothing is published.
 
 ## How a release reaches PyPI
 
@@ -39,8 +41,10 @@ so `main` stays a straight line of the commits as written.
 5. Merging it starts the `publish` workflow on `main`. It builds the wheel and checks that it installs, then **waits
    for the maintainer's approval** of the deployment to the `pypi` environment (*Actions → the run → Review
    deployments*). Approved, it publishes to PyPI, tags the commit `v2.3.6`, makes the GitHub release from the
-   version's CHANGELOG section, and installs the release from PyPI to try it. Rejected, nothing is published; the
-   version stays unreleased on `main` until the run is approved again (*Run workflow* on `publish`).
+   version's CHANGELOG section, installs the release from PyPI to try it, and comments on each issue the release's
+   pull requests closed: "Released in entail 2.3.6" (once; a failure here never fails the release). Rejected, nothing
+   is published; the version stays unreleased on `main` until the run is approved again (*Run workflow* on
+   `publish`).
 6. A push to `main` whose version is already tagged does nothing, so ordinary pull requests never publish. Never tag
    by hand: the workflow tags what it published.
 
