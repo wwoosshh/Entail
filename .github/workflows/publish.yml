@@ -3,7 +3,8 @@ name: publish
 # Releases what a merged release pull request put on main (RELEASING.md). On every push to main it reads the version in
 # entail/__init__.py; when that version has no tag yet, it builds and checks the wheel, publishes to PyPI once the
 # researcher approves the deployment to the `pypi` environment (its required reviewer), then tags the commit, makes the
-# GitHub release from the version's CHANGELOG section, installs the release from PyPI to try it, and says on each
+# GitHub release from the version's CHANGELOG section, installs the release from PyPI to try it (the uploaded wheel by
+# its URL and sha256 when PyPI's index lags behind the upload), and says on each
 # issue the release closes that its fix is released. A push that keeps a released version does nothing. PyPI trusts this workflow file and that environment (RELEASING.md): keep both names.
 on:
   push:
@@ -113,24 +114,15 @@ jobs:
   verify:
     needs: [plan, release]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # The upload is checked in the version's own JSON; pip installs from PyPI's index once it lists the version (up
+      # to 20 minutes), else the uploaded wheel is checked by its URL and sha256, with a warning that the index was late
       - name: Install the release from PyPI and try it
         env:
           VERSION: ${{ needs.plan.outputs.version }}
-        run: |
-          python -m venv /tmp/pypi
-          for i in $(seq 1 20); do
-            /tmp/pypi/bin/pip install -q --no-cache-dir "entail-ai==$VERSION" && break
-            echo "PyPI does not list $VERSION yet (try $i)"; sleep 30
-          done
-          test "$(/tmp/pypi/bin/python -c 'import entail; print(entail.__version__)')" = "$VERSION"
-          /tmp/pypi/bin/entail hook status
-          mkdir -p /tmp/logs
-          /tmp/pypi/bin/entail serve --dir /tmp/logs --port 8790 &
-          sleep 3
-          curl -sf -o /dev/null http://127.0.0.1:8790/
-          curl -sf -o /dev/null http://127.0.0.1:8790/api/runs
-          echo "entail-ai $VERSION installs from PyPI and its page answers." >> "$GITHUB_STEP_SUMMARY"
+        run: python .github/scripts/verify_release.py "$VERSION"
