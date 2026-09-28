@@ -266,6 +266,14 @@ def test_the_page_translates_only_rules_the_core_still_says():
     assert set(names) == {"Prediction", "LatentScale", "ModelProps", "Rotary", "Template"}, names
 
 
+def test_a_repair_leads_the_headline_in_both_languages():
+    """Field test, entail#14: a run with a repair is headlined with what entail changed, not "No mismatch found"."""
+    js = open(os.path.join(server.STATIC, "app.js"), encoding="utf-8").read()
+    for key in ("headRepaired:", "subRepaired:", "unset:"):
+        assert js.count(key) == 2, key          # the Korean and the English words
+    assert 'w("headRepaired", repaired' in js and "subResolved" not in js
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

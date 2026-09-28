@@ -23,6 +23,11 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   and where it is checked (at load, `ENTAIL=load`); each backend's evidence is a short label ("measured on vllm
   0.30.0", "read in vllm 0.30.0's code") for the properties the model declares, not a path into the research
   workspace; a model that declares neither softcap nor a sliding window gets one line instead of five rows.
+- **The page leads with what entail repaired** (#14). A run with a repair was headlined "No mismatch found", the
+  repair said last - in the field test, the repair that kept a long-context retrieval at 5 of 5 instead of 0 of 5.
+  Now the header says "entail repaired 1 value: Attention and rotary (theta unset → 500000.0)": the node and the
+  fields that changed, from what the engine had to the declared value. The run graph carries each repair's two
+  values for it.
 
 ## 2.1.1
 
