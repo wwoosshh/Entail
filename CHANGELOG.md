@@ -4,6 +4,16 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
+## Unreleased
+
+- **Declaring a value with a manifest works from the docs** (#15). A draft's empty slot shows the form of its value
+  (`"form": "{\"kind\": \"v\", \"zsnr\": true} ..."`), and a Prediction may also be written as a word (`"v"`,
+  `"v_prediction"`, `"epsilon"`, or entail's own "v-prediction with zero terminal SNR"), a LatentScale as a number;
+  a value entail cannot read makes `entail pin` say how to write it, not split the string into letters. `entail
+  infer` on a path that does not exist says so in one line instead of a traceback. ComfyUI's lines name the
+  checkpoint by its full path, so the page's declare box gives commands that run as pasted; the box also says where
+  the form is and how `ENTAIL_MANIFESTS` keeps manifests in a folder.
+
 ## 2.1.1
 
 Released 2026-09-28. Fixes from the first field test of 2.1.0 (ComfyUI, transformers and text-generation-webui, used

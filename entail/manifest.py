@@ -32,7 +32,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .facts import VOCABULARY, Certainty, Fact, Source, vocabulary_class
+from .facts import VOCABULARY, Certainty, Fact, LatentScale, Prediction, Source, vocabulary_class
 
 SCHEMA_VERSION = 1
 SIDECAR = ".entail.json"   # a manifest may also sit next to its artifact: <artifact>.entail.json
@@ -61,17 +61,57 @@ def value_to_json(value):
     return out
 
 
+# The form of each value a draft leaves empty, shown in the draft and in the messages (field test, entail#15: the draft
+# said only "value": null, and every natural word for a v-prediction ended in "Prediction has no fields ['_', 'c', ...]")
+FORMS = {"Prediction": '{"kind": "v", "zsnr": true}  (kind: eps, v, x0, flow or edm; zsnr: true, false or null)',
+         "LatentScale": '{"scale": 0.13025, "shift": null}'}
+
+
+def form_of(name):
+    """How a value of this fact is written in a manifest."""
+    if name in FORMS:
+        return FORMS[name]
+    return "{" + ", ".join(f'"{f.name}": ...' for f in dataclasses.fields(vocabulary_class(name))) + "}"
+
+
+def _from_words(name, data):
+    """A value a person may write instead of the object: a word for a Prediction ("v", "v_prediction", "eps", ...), or
+    the words entail's own record uses ("v-prediction with zero terminal SNR"); a number for a LatentScale's scale.
+    None when `data` is none of these."""
+    if name == "Prediction" and isinstance(data, str):
+        from .readers import prediction_kind
+
+        text, zsnr = data.strip(), None
+        for tail, flag in ((" with zero terminal snr", True), (" without zero terminal snr", False)):
+            if text.lower().endswith(tail):
+                text, zsnr = text[: -len(tail)], flag
+        kind = prediction_kind(text)
+        return Prediction(kind, zsnr) if kind else None
+    if name == "LatentScale" and isinstance(data, (int, float)) and not isinstance(data, bool):
+        return LatentScale(float(data))
+    return None
+
+
 def value_from_json(name, data):
     if data is None:
         return None
     cls = vocabulary_class(name)
-    known = {f.name for f in dataclasses.fields(cls)}
-    extra = sorted(set(data) - known)
+    if not isinstance(data, dict):
+        value = _from_words(name, data)
+        if value is None:
+            raise ValueError(f"manifest: {name} {json.dumps(data)} is not a value entail reads; write it as "
+                             f"{form_of(name)}")
+        return value
+    known = [f.name for f in dataclasses.fields(cls)]
+    extra = sorted(set(data) - set(known))
     if extra:
-        raise ValueError(f"manifest: {name} has no fields {extra}")
+        raise ValueError(f"manifest: {name} has no field {', '.join(extra)}; write it as {form_of(name)}")
     args = {k: tuple(tuple(x) if isinstance(x, list) else x for x in v) if isinstance(v, list) else v
             for k, v in data.items()}
-    return cls(**args)
+    try:
+        return cls(**args)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"manifest: {name} {json.dumps(data)}: {e}; write it as {form_of(name)}") from None
 
 
 # --- hashing --------------------------------------------------------------------------------------------------
@@ -124,8 +164,9 @@ def sha256_of(path):
 def to_json(m: Manifest) -> dict:
     return {"schema": SCHEMA_VERSION, "sha256": m.sha256, "file": m.file, "pinned": m.pinned,
             "fingerprint": m.fingerprint, "problems": list(m.problems),
-            "facts": [{"name": f.name, "value": value_to_json(f.value), "certainty": f.certainty.value,
-                       "evidence": list(m.evidence.get(f.name, []))} for f in m.facts]}
+            "facts": [dict({"name": f.name, "value": value_to_json(f.value), "certainty": f.certainty.value,
+                            "evidence": list(m.evidence.get(f.name, []))},
+                           **({"form": form_of(f.name)} if f.value is None else {})) for f in m.facts]}
 
 
 def from_json(data: dict, where: str) -> Manifest:

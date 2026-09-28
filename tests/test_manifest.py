@@ -1,16 +1,18 @@
 """Tests for manifests (ROADMAP M2.3): a draft names what the artifact declares and leaves slots for what it does not,
 an unpinned draft declares nothing, pinning makes reviewed facts declarations, and a manifest is found only for the
 file it describes. Run: python tests/test_manifest.py"""
+import io
 import json
 import os
 import struct
 import sys
 import tempfile
+from contextlib import redirect_stderr, redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 from entail import cli, contracts, manifest, sources  # noqa: E402
-from entail.facts import Assumed, Certainty, Layout, Prediction  # noqa: E402
+from entail.facts import Assumed, Certainty, LatentScale, Layout, Prediction  # noqa: E402
 
 
 def checkpoint(metadata=None, name="ckpt.safetensors"):
@@ -164,7 +166,7 @@ def test_bad_manifests_are_refused_with_the_reason():
     raises(lambda: manifest.from_json({**ok, "sha256": "xyz"}, "m"), "sha256 must be 64 lowercase hex digits")
     raises(lambda: manifest.from_json({**ok, "facts": [{"name": "Colour"}]}, "m"), "unknown fact name 'Colour'")
     raises(lambda: manifest.from_json({**ok, "facts": [{"name": "Prediction", "value": {"kind": "v", "speed": 1}}]},
-                                      "m"), "manifest: Prediction has no fields ['speed']")
+                                      "m"), "manifest: Prediction has no field speed; write it as {\"kind\": \"v\"")
     raises(lambda: manifest.from_json({**ok, "facts": [{"name": "Prediction", "value": {"kind": "velocity"}}]}, "m"),
            "unknown prediction kind 'velocity'")
 
@@ -178,10 +180,67 @@ def test_values_survive_json_with_their_tuples():
 def test_cli_infer_then_pin():
     p = checkpoint()
     out = os.path.join(tempfile.mkdtemp(), "draft.json")
-    assert cli.main(["infer", p, "--out", out]) == 0
+    said = io.StringIO()
+    with redirect_stdout(said):
+        assert cli.main(["infer", p, "--out", out]) == 0
+    assert "each shows the form of its value" in said.getvalue() and f"entail pin {out}" in said.getvalue()
     assert json.load(open(out, encoding="utf-8"))["pinned"] is False
     assert cli.main(["pin", out]) == 0
     assert json.load(open(out, encoding="utf-8"))["pinned"] is True
+
+
+# --- field test, entail#15: the manifest route worked only for someone who read the source ------------------------
+
+def test_a_draft_shows_the_form_of_each_empty_value():
+    data = manifest.to_json(manifest.infer(checkpoint({"modelspec.prediction_type": "v"})))
+    slots = {f["name"]: f for f in data["facts"]}
+    assert "form" not in slots["Prediction"]          # declared by the file: nothing to fill in
+    assert slots["LatentScale"]["value"] is None and slots["LatentScale"]["form"].startswith('{"scale": ')
+    empty = manifest.to_json(manifest.infer(checkpoint()))
+    [pred] = [f for f in empty["facts"] if f["name"] == "Prediction"]
+    assert pred["form"].startswith('{"kind": "v", "zsnr": true}') and "eps, v, x0, flow or edm" in pred["form"]
+
+
+def test_the_words_a_person_writes_are_read():
+    for word, value in (("v", Prediction("v")), ("v_prediction", Prediction("v")), ("V-Prediction", Prediction("v")),
+                        ("epsilon", Prediction("eps")), ("EDM", Prediction("edm")),
+                        ("v-prediction with zero terminal SNR", Prediction("v", True)),
+                        ("eps without zero terminal SNR", Prediction("eps", False))):
+        assert manifest.value_from_json("Prediction", word) == value, word
+    for value in (Prediction("v", True), Prediction("flow"), Prediction("x0", False)):   # entail's own words, back
+        assert manifest.value_from_json("Prediction", str(value)) == value, str(value)
+    assert manifest.value_from_json("LatentScale", 0.13025) == LatentScale(0.13025)
+    for name, data in (("Prediction", "velocity"), ("Prediction", ["v"]), ("Prediction", True),
+                       ("LatentScale", True), ("LatentScale", "0.13025")):
+        raises(lambda: manifest.value_from_json(name, data), f"manifest: {name} {json.dumps(data)} is not a value "
+                                                             f"entail reads; write it as {manifest.form_of(name)}")
+
+
+def test_the_cli_says_one_line_instead_of_a_traceback():
+    said = io.StringIO()
+    missing = os.path.join(tempfile.mkdtemp(), "my model.safetensors")
+    with redirect_stderr(said):
+        assert cli.main(["infer", missing, "--out", missing + ".entail.json"]) == 2
+    assert said.getvalue() == f"entail infer: no file or folder {missing}: give the model file's full path\n"
+    assert not os.path.exists(missing + ".entail.json")
+    out = os.path.join(tempfile.mkdtemp(), "draft.json")
+    assert cli.main(["infer", checkpoint(), "--out", out]) == 0
+    data = json.load(open(out, encoding="utf-8"))
+    data["facts"][0]["value"] = "velocity"               # a word entail does not read
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    before = open(out, encoding="utf-8").read()
+    said = io.StringIO()
+    with redirect_stderr(said):
+        assert cli.main(["pin", out]) == 2
+    assert said.getvalue().count("\n") == 1 and "write it as" in said.getvalue(), said.getvalue()
+    assert open(out, encoding="utf-8").read() == before  # nothing pinned
+    data["facts"][0]["value"] = "v"                      # the word the person meant
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    assert cli.main(["pin", out]) == 0
+    pinned = json.load(open(out, encoding="utf-8"))
+    assert pinned["pinned"] is True and pinned["facts"][0]["value"] == {"kind": "v", "zsnr": None}
 
 
 if __name__ == "__main__":

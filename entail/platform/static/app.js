@@ -111,7 +111,8 @@ const WORDS = {
     declareTitle: "선언해서 확인하게 하려면",
     declareBody: "이 모델의 값을 알고 있다면 매니페스트로 선언할 수 있습니다. 파일 옆에 두면 다음 실행부터 entail이 이 값을 확인합니다.",
     declareFill: "# 초안의 빈 칸을 채운 뒤",
-    declareFile: "<모델 파일>",
+    declareFile: "<모델 파일의 전체 경로>",
+    declareNote: "빈칸에 넣을 형식은 초안의 form에 적혀 있습니다(예: Prediction은 {\"kind\": \"v\", \"zsnr\": true}). 매니페스트를 모델 파일 옆에 둘 수 없으면, 확정한 파일을 <sha256>.json 이름으로 한 폴더에 모아 두고 ENTAIL_MANIFESTS로 그 폴더를 알려 줍니다.",
     declareMore: "선언하는 법 (README)",
     declareUrl: "https://github.com/wwoosshh/entail/blob/main/README.ko.md#모델-파일이-뜻을-선언하지-않을-때",
     original: "기록 원문",
@@ -296,7 +297,8 @@ const WORDS = {
     declareTitle: "To have it checked, declare it",
     declareBody: "If you know this model's value, a manifest declares it. Kept next to the file, it makes entail check the value from the next run on.",
     declareFill: "# fill in the draft's empty slots, then",
-    declareFile: "<model file>",
+    declareFile: "<the model file's full path>",
+    declareNote: "The draft's form field says how to write an empty value (a Prediction: {\"kind\": \"v\", \"zsnr\": true}). If the manifest cannot sit next to the model file, keep the pinned file as <sha256>.json in a folder and name that folder in ENTAIL_MANIFESTS.",
     declareMore: "Declaring a value (README)",
     declareUrl: "https://github.com/wwoosshh/entail#when-a-model-file-does-not-say-what-it-means",
     original: "As recorded",
@@ -1340,15 +1342,17 @@ function whereText(where) {
   return WHERE_KO.reduce((t, [en, ko]) => t.split(en).join(ko), String(where));
 }
 
-// For an unknown a manifest can settle: the commands, with the model's file when the record names it
+// For an unknown a manifest can settle: the commands, with the model's path when the record names it - as in
+// "comfyui.model_sampling (SDXL, E:\models\x.safetensors)" - and how to write a value (field test, entail#15)
 function declareEl(x) {
   const where = (x.chosen && x.chosen.source && x.chosen.source.where) || "";
-  const m = /([^\s,()]+\.(?:safetensors|ckpt|gguf))/i.exec(where);
+  const m = /\([^()]*?,\s*([^()]*?\.(?:safetensors|ckpt|gguf))\)/i.exec(where);
   const file = m ? m[1] : w("declareFile");
   const box = el("div", "declare");
   box.append(el("div", "declare-title", w("declareTitle")), el("p", "declare-body", w("declareBody")),
              el("pre", "codeblock", [`entail infer "${file}" --out "${file}.entail.json"`, w("declareFill"),
                                      `entail pin "${file}.entail.json"`].join("\n")),
+             el("p", "declare-body", w("declareNote")),
              externalLink(w("declareMore"), w("declareUrl")));
   return box;
 }
