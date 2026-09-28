@@ -165,6 +165,12 @@ entail infer model.safetensors --out model.safetensors.entail.json   # what the 
 entail pin model.safetensors.entail.json
 ```
 
+Give the model file's full path. Each empty slot in the draft says the form of its value in `form`; a
+v-prediction model with zero terminal SNR is filled in as `"value": {"kind": "v", "zsnr": true}` (`kind` is `eps`,
+`v`, `x0`, `flow` or `edm`; `zsnr` is `true`, `false` or `null`), and a latent scale as
+`"value": {"scale": 0.13025, "shift": null}`. A word such as `"v_prediction"` or `"epsilon"`, or a bare number for a
+latent scale, is read too. When a value cannot be read, `entail pin` says how to write it and changes nothing.
+
 A manifest next to the file is found by itself. Manifests kept in a folder (named `<sha256>.json`, the hash the
 draft records) are found through `ENTAIL_MANIFESTS`. Only a pinned manifest counts as a declaration.
 

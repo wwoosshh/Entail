@@ -154,10 +154,11 @@ def _state_dict_loader(orig):
 
 
 def _labelled(facts, path):
-    """The checkpoint's facts with its file name: the decisions at sampling name the model they are about, so two
+    """The checkpoint's facts with its file's path: the decisions at sampling name the model they are about, so two
     models that declare nothing are two lines, not one said once (field test, entail#2: the second model's line was
-    left off the console as a repeat of the first's)."""
-    facts.label = os.path.basename(str(path)) if path else ""
+    left off the console as a repeat of the first's), and the page can put the path in the command that declares a
+    value (entail#15: a file name alone failed where the command was pasted)."""
+    facts.label = os.path.abspath(str(path)) if path else ""
     return facts
 
 

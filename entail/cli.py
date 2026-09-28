@@ -162,12 +162,21 @@ def _hook(args):
 
 def _infer(args):
     from . import manifest
-    draft = manifest.infer(args.path)
+    if not os.path.exists(args.path):   # one line, not a traceback (field test, entail#15)
+        print(f"entail infer: no file or folder {args.path}: give the model file's full path", file=sys.stderr)
+        return 2
+    try:
+        draft = manifest.infer(args.path)
+    except (OSError, ValueError) as e:
+        print(f"entail infer: {e}", file=sys.stderr)
+        return 2
     text = json.dumps(manifest.to_json(draft), ensure_ascii=False, indent=1)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as out:
             out.write(text + "\n")
-        print(f"wrote {args.out}: {sum(x.value is None for x in draft.facts)} empty slot(s) to review")
+        empty = sum(x.value is None for x in draft.facts)
+        print(f"wrote {args.out}: {empty} empty slot(s) to review" +
+              (f" - each shows the form of its value; fill in what you know, then: entail pin {args.out}" if empty else ""))
     else:
         print(text)
     return 0
@@ -214,7 +223,11 @@ def _check(args):
 
 def _pin(args):
     from . import manifest
-    m = manifest.load(args.manifest)
+    try:
+        m = manifest.load(args.manifest)
+    except (OSError, ValueError) as e:   # a value it cannot read says how to write it (field test, entail#15)
+        print(f"entail pin: {e}", file=sys.stderr)
+        return 2
     empty = [f.name for f in m.facts if f.value is None]
     manifest.save(manifest.pin(m), args.manifest)
     print(f"pinned {args.manifest}" + (f"; still empty (stay unknown): {empty}" if empty else ""))

@@ -101,6 +101,8 @@ entail infer model.safetensors --out model.safetensors.entail.json   # 파일이
 entail pin model.safetensors.entail.json
 ```
 
+모델 파일은 전체 경로로 준다. 초안의 빈칸마다 `form`에 값을 쓰는 형식이 적혀 있다. 마지막 단계의 SNR이 0인(zero terminal SNR) v-prediction 모델이면 `"value": {"kind": "v", "zsnr": true}`로 채운다(`kind`는 `eps`, `v`, `x0`, `flow`, `edm` 가운데 하나, `zsnr`는 `true`, `false`, `null` 가운데 하나). 잠재 배율은 `"value": {"scale": 0.13025, "shift": null}`로 채운다. `"v_prediction"`, `"epsilon"` 같은 낱말이나, 잠재 배율이면 숫자 하나만 써도 읽는다. 읽을 수 없는 값이면 `entail pin`이 쓰는 법을 알려 주고 아무것도 바꾸지 않는다.
+
 파일 옆에 둔 선언 파일은 저절로 찾는다. 한 폴더에 모아 둔 선언 파일(`<sha256>.json`, 초안에 적힌 해시)은 `ENTAIL_MANIFESTS`로 찾는다. 검토 표시(pin)를 한 선언 파일만 선언으로 친다.
 
 ### 엔진의 작업 프로세스까지 닿는 방법
