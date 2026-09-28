@@ -45,8 +45,10 @@ engine compiled into the app (Ollama, LM Studio, llama.cpp) give it nothing to a
 each tool - your scripts, vLLM behind Open WebUI, ComfyUI (git, portable, Desktop), text-generation-webui, vLLM in
 Docker - is in [INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md).
 
-> **Status: 2.1.1, measured on one machine.** 2.1.1 fixes what the first field test of 2.1.0 found (clearer console
-> lines and page wording, a tokenizer folder given as a path object, doctor's engine list). 2.1.0 remade the page of
+> **Status: 2.1.2, measured on one machine.** 2.1.2 fixes what the field test of 2.1.1 found (declaring a value with
+> a manifest from the docs, `entail preflight`'s false alarms on popular models, a page that leads with what entail
+> repaired, upgrading on Windows); 2.1.1 fixed what the first field test of 2.1.0 found (clearer console lines and
+> page wording, a tokenizer folder given as a path object, doctor's engine list). 2.1.0 remade the page of
 > `entail serve` (plain words, a node canvas) and added install steps by tool
 > ([INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md)); the checks are 2.0's. 2.0 adds the
 > platform - `entail serve`, two safety modes, official DLCs and custom nodes ([The platform](#the-platform-20)) -
@@ -564,6 +566,12 @@ For 1.0 every measurement of the development milestones was run again on the fin
   1.2.0: huggingface_hub refused such snapshots as incomplete, so every hub-id load said "could not be checked"
   for Vocab and Stops; GLM-OCR by hub id on vLLM 0.30 now passes both). A model the cache does not hold at all
   is still `unknown` there.
+- **Apps that set up their own sampler** (field test of 2.1.1): the diffusers prediction repair sets up the
+  scheduler of the pipeline a v-prediction checkpoint is loaded into, and an app that builds its own sampler from
+  its own model settings can disagree with it. SD.Next already samples such a checkpoint as v-prediction; with
+  entail on, its image differs slightly from SD.Next alone ([#21](https://github.com/wwoosshh/entail/issues/21)).
+  InvokeAI registers it as epsilon; with entail on, its default sampler (DPM++ 3M) stops with an error while Euler
+  still gives noise ([#24](https://github.com/wwoosshh/entail/issues/24)).
 
 - The always-on KV contract on transformers' dynamic cache is at the edge of its target: 1.017-1.022x of an eager
   decode of Qwen3-4B, depending on how the runs are paired (target 1.02x; 1.041x before these fixes). On vLLM's

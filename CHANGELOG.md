@@ -4,7 +4,11 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
-## Unreleased
+## 2.1.2
+
+Released 2026-09-28. Fixes from the field test of 2.1.1 (issues #14, #15, #17 and #18, found using entail from the
+docs only). From this release on, each issue a release's pull requests close gets a comment naming the version
+that carries the fix (RELEASING.md).
 
 - **Declaring a value with a manifest works from the docs** (#15). A draft's empty slot shows the form of its value
   (`"form": "{\"kind\": \"v\", \"zsnr\": true} ..."`), and a Prediction may also be written as a word (`"v"`,
@@ -33,6 +37,13 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   environment without entail, so a tool started with `ENTAIL=load` runs with entail off. INSTALL now says to start
   the page as `python -m entail serve` on Windows (it holds no `entail.exe`), to close an `entail.exe` serve before
   upgrading, and how to recover (close it, delete the `~ntail*` folders in `site-packages`, install again).
+
+**Known issues** (field test of 2.1.1; both were in 2.1.1 as well)
+- The diffusers prediction repair sets up the scheduler of the pipeline a v-prediction checkpoint is loaded into,
+  and an app that builds its own sampler from its own model settings can disagree with it. SD.Next already samples
+  such a checkpoint as v-prediction; with entail on, its image differs slightly from SD.Next alone (#21). InvokeAI
+  registers it as epsilon; with entail on, its default sampler (DPM++ 3M) stops with an `IndexError` while Euler
+  still gives noise, although the console says the prediction was resolved (#24).
 
 ## 2.1.1
 
