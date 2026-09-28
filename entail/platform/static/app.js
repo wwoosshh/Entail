@@ -70,7 +70,10 @@ const WORDS = {
     subLost: (w) => `값을 잃은 곳: ${w}`,
     subClean: (n, u) => `확인한 ${n}곳은 모두 정상이었습니다. ${u}곳은 확인하지 못했으니, 결과가 이상하면 그곳부터 보세요.`,
     subOk: (n) => `확인한 ${n}곳 모두 선언된 값 그대로 쓰였습니다.`,
-    subResolved: (n) => ` 그 가운데 entail이 바로잡은 결과가 ${n}건 있습니다.`,
+    headRepaired: (n, where) => `entail이 값 ${n}개를 바로잡았습니다` + (where ? `: ${where}` : ""),
+    unset: "없음",
+    subRepaired: (n, u, r) => `확인한 ${n}곳은 바로잡은 ${r}곳까지 모두 선언된 값으로 실행됐습니다.` +
+      (u ? ` ${u}곳은 확인하지 못했으니, 결과가 이상하면 그곳부터 보세요.` : ""),
     subEmpty: "모델을 불러오거나 요청을 처리하면 결과가 나타납니다.",
     processes: (n) => `프로세스 ${n}개`,
     points: (n) => `지점 ${n}곳`,
@@ -256,7 +259,10 @@ const WORDS = {
     subLost: (w) => `Lost at: ${w}`,
     subClean: (n, u) => `All ${n} checked points held; ${u} could not be checked, so if the output looks wrong, start there.`,
     subOk: (n) => `All ${n} checked points used the declared values.`,
-    subResolved: (n) => ` entail repaired ${n} ${n === 1 ? "result" : "results"} among them.`,
+    headRepaired: (n, where) => `entail repaired ${n} ${n === 1 ? "value" : "values"}` + (where ? `: ${where}` : ""),
+    unset: "unset",
+    subRepaired: (n, u, r) => `All ${n} checked points ran with the declared values, ${r === 1 ? "the repaired one" : `the ${r} repaired`} included.` +
+      (u ? ` ${u} could not be checked, so if the output looks wrong, start there.` : ""),
     subEmpty: "Results appear once the program loads a model or serves a request.",
     processes: (n) => `${n} processes`,
     points: (n) => (n === 1 ? "1 point" : `${n} points`),
@@ -852,10 +858,37 @@ function verdict(g) {
     return { state: "broken", title: w("headSaid"), sub: String((g.located.why || [])[0] || g.located.suspects[0]) };
   }
   const intact = (loc.intact || []).length, unverified = (loc.unchecked || []).length;
-  const extra = repaired ? w("subResolved", repaired) : "";
-  if (unverified) return { state: "unknown", title: w("headClean"), sub: w("subClean", intact, unverified) + extra };
-  if (intact) return { state: repaired ? "resolved" : "pass", title: w("headOk"), sub: w("subOk", intact) + extra };
+  if (repaired) {   // lead with what entail changed: "No mismatch found" hid a repair the output hung on (entail#14)
+    const fixes = repairsText(g);
+    const where = fixes.slice(0, 2).join(", ") + (fixes.length > 2 ? ` +${fixes.length - 2}` : "");
+    return { state: "resolved", title: w("headRepaired", repaired, where), sub: w("subRepaired", intact, unverified, repaired) };
+  }
+  if (unverified) return { state: "unknown", title: w("headClean"), sub: w("subClean", intact, unverified) };
+  if (intact) return { state: "pass", title: w("headOk"), sub: w("subOk", intact) };
   return { state: "none", title: w("headEmpty"), sub: w("subEmpty") };
+}
+
+// Each repair of a launch as "<node> (<what changed>)": the fields that differ between the value the consumer had
+// and the declared one it now uses ("theta None → 500000.0"), or the two values when they are short words
+function repairsText(g) {
+  const cut = (s) => (s === "None" ? w("unset") : String(s).length > 24 ? String(s).slice(0, 21) + "…" : String(s));
+  const out = [];
+  for (const n of g.nodes) {
+    for (const r of n.repairs || []) {
+      const dv = parseValue(r.declared), cv = parseValue(r.chosen);
+      const keys = [...diffKeys(dv, cv)];
+      const had = new Map(cv ? cv.kv : []), now = new Map(dv ? dv.kv : []);
+      let what = r.name || "";
+      if (keys.length) {
+        what = keys.slice(0, 2).map((k) => `${k} ${cut(had.get(k))} → ${cut(now.get(k))}`).join(", ") +
+               (keys.length > 2 ? ", …" : "");
+      } else if (!dv && !cv && r.declared && r.chosen) {
+        what = `${r.name}: ${cut(r.chosen)} → ${cut(r.declared)}`;
+      }
+      out.push(what ? `${nodeNames(n)[0]} (${what})` : nodeNames(n)[0]);
+    }
+  }
+  return out;
 }
 
 function renderRunHead() {

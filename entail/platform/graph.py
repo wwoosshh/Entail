@@ -8,6 +8,8 @@ names belongs to one node, by the patterns in data/nodes.json (first match in th
              skipped checks, and the time spent checking (timing lines)
   decisions  what each decision said: the declared value and its source, what the consumer chose, the rule, the
              resolution, the note - where and why, as the ledger recorded it
+  repairs    in the launch's graph, each repair's fact, declared value and the value the consumer had, so a page
+             can lead with what entail changed
 The graph adds no rule: where meaning broke is record.locate's answer (LIBRARY_DESIGN.md 12), over the same lines.
 
 Record lines of version 2 carry v, t and run (record.write_json); a version-1 line has no run, so each record file's
@@ -161,7 +163,7 @@ def graph(lines: List[dict]) -> dict:
         n = per_node.get(nid)
         if n is None:
             n = per_node[nid] = {"id": nid, "state": "none", "boundaries": set(), "verdicts": {}, "checks": 0,
-                                 "passed": 0, "skipped": 0, "timed_calls": 0, "ms": 0.0, "said": 0}
+                                 "passed": 0, "skipped": 0, "timed_calls": 0, "ms": 0.0, "said": 0, "repairs": []}
         n["boundaries"].add(b)
         return n
 
@@ -170,6 +172,9 @@ def graph(lines: List[dict]) -> dict:
         s = _verdict_state(r.get("verdict"))
         n["verdicts"][s] = n["verdicts"].get(s, 0) + 1
         n["state"] = _worse(s, n["state"])
+        if s == "resolved":   # what a repair changed, so the page can lead with it (field test, entail#14)
+            n["repairs"].append({"name": r.get("name"), "declared": (r.get("declared") or {}).get("value"),
+                                 "chosen": (r.get("chosen") or {}).get("value")})
     passes: Dict[str, int] = {}
     skipped = set()
     for (_, b), counts in tally_latest.items():
@@ -221,7 +226,8 @@ def graph(lines: List[dict]) -> dict:
             placed.add(nid)
             spec = m["by_id"][nid]
             n = per_node.get(nid) or {"id": nid, "state": "none", "boundaries": set(), "verdicts": {}, "checks": 0,
-                                       "passed": 0, "skipped": 0, "timed_calls": 0, "ms": 0.0, "said": 0}
+                                       "passed": 0, "skipped": 0, "timed_calls": 0, "ms": 0.0, "said": 0,
+                                       "repairs": []}
             nodes.append(dict(n, boundaries=sorted(n["boundaries"]), ms=round(n["ms"], 3), flow=fl["id"],
                               step=spec["step"], ko=spec["ko"], en=spec["en"], custom=bool(spec.get("custom"))))
     stamps = [t for t in times if isinstance(t, (int, float))]

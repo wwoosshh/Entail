@@ -199,6 +199,23 @@ def test_an_image_launch_keeps_its_text_encoders_tokenizer_in_the_image_flow():
     assert llm["flows"][0]["nodes"][:2] == ["config", "tokenizer"], llm["flows"]
 
 
+def test_a_repair_is_carried_to_the_page():
+    """Field test, entail#14: a vLLM run whose RoPE entail repaired was headlined "No mismatch found", the repair said
+    last. The graph carries each repair's values - declared, and what the consumer had - so the page leads with it."""
+    declared = "Rotary(rope_type='llama3', theta=500000.0, factor=32.0)"
+    had = "Rotary(rope_type='llama3', theta=None, factor=32.0)"
+    lines = [{"v": 2, "t": 1.0, "run": "r", "pid": 1, "boundary": "load:vllm.config.rope_scaling",
+              "verdict": "resolved", "name": "Rotary", "declared": {"name": "Rotary", "value": declared},
+              "chosen": {"name": "Rotary", "value": had}},
+             {"v": 2, "t": 2.0, "run": "r", "pid": 1, "boundary": "load:vllm.attention", "verdict": "pass",
+              "name": "ModelProps"}]
+    g = graph.graph(lines)
+    where = graph.node_of("load:vllm.config.rope_scaling")
+    nodes = {n["id"]: n for n in g["nodes"]}
+    assert nodes[where]["repairs"] == [{"name": "Rotary", "declared": declared, "chosen": had}], nodes[where]
+    assert all(n["repairs"] == [] for nid, n in nodes.items() if nid != where), nodes
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
