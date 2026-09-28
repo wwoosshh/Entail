@@ -39,6 +39,12 @@ run goes on (it stops only if you ask it to); said to be "unknown" when nobody d
 default stand in silently. The name is the logical sense of *entail*: what a checkpoint declares must entail what
 the engine executes. (ent·**AI**·**L**: an AI library.)
 
+**Who it is for:** people who build their own AI project on a Python engine - transformers, diffusers, vLLM,
+SGLang - or on ComfyUI. entail works inside the Python process that runs the model, so apps that run models in an
+engine compiled into the app (Ollama, LM Studio, llama.cpp) give it nothing to attach to. Where to install it for
+each tool - your scripts, vLLM behind Open WebUI, ComfyUI (git, portable, Desktop), text-generation-webui, vLLM in
+Docker - is in [INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md).
+
 > **Status: 2.0.1, measured on one machine.** 2.0.1 corrects this README; its code is 2.0.0's. 2.0 adds the
 > platform - `entail serve`, two safety modes, official DLCs and custom nodes ([The platform](#the-platform-20)) -
 > around the same checks: on the 102 healthy runs it made exactly the decisions 1.3.0's frozen code made (no run
@@ -104,8 +110,9 @@ others do not.
 pip install entail-ai
 ```
 
-Install it into the same environment as your engine (vLLM, SGLang or transformers). entail has no dependencies
-of its own. The import name is `entail`. `uv pip install entail-ai` works the same way; for the latest commit,
+Install it into the same environment as your engine (vLLM, SGLang or transformers). For ComfyUI (git, portable,
+Desktop), text-generation-webui and vLLM in Docker, [INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md)
+says where that environment is. entail has no dependencies of its own. The import name is `entail`. `uv pip install entail-ai` works the same way; for the latest commit,
 `pip install "git+https://github.com/wwoosshh/entail"`.
 
 Check what it sees:

@@ -24,6 +24,12 @@ large piece of work with a purpose and the structure is unchanged.
   a side bar; on narrower windows the panels become drawers, and on a phone the flow runs top to bottom.
 - `/api/runs` also gives, per launch, the node where meaning first broke (`where`), how many nodes are in each state
   (`states`) and the flows drawn (`flows`), for the run list.
+- **Install steps by tool:** [INSTALL.md](INSTALL.md) ([INSTALL.ko.md](INSTALL.ko.md)) says where entail goes and how
+  to turn it on for your own scripts, vLLM behind Open WebUI (and in Docker), SGLang, ComfyUI (installed with git,
+  portable, Desktop) and text-generation-webui, and which of those steps were run on this project's machine and which
+  follow the tool's own source only. The page links it when there are no records yet, and from its help.
+- **Who it is for (README):** people who build their own AI project on a Python engine or on ComfyUI. Apps that run
+  models in an engine compiled into the app (Ollama, LM Studio, llama.cpp) give entail nothing to attach to.
 
 ## 2.0.1
 

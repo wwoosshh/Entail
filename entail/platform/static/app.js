@@ -180,6 +180,8 @@ const WORDS = {
     helpAboutBody: "AI 실행 스택에서 값의 뜻(저장 형식, 위치 기준, 유효 범위 같은 것)이 부품 사이를 지나며 바뀌지 않았는지 확인하는 라이브러리입니다. 이 화면은 기록 폴더를 읽기만 하고, 안전 모드와 커스텀 노드 설정 두 파일만 씁니다.",
     helpDocs: "문서 보기 (GitHub)",
     docsUrl: "https://github.com/wwoosshh/entail/blob/main/README.ko.md",
+    installGuide: "도구별 설치 안내 (GitHub)",
+    installUrl: "https://github.com/wwoosshh/entail/blob/main/INSTALL.ko.md",
   },
   en: {
     folder: "Log folder",
@@ -356,6 +358,8 @@ const WORDS = {
     helpAboutBody: "entail checks that the meaning of values (storage format, position base, valid range and the like) does not change as they pass between the parts of an AI stack. This page only reads the log folder; it writes two files there: the safe mode and which custom nodes are off.",
     helpDocs: "Documentation (GitHub)",
     docsUrl: "https://github.com/wwoosshh/entail#readme",
+    installGuide: "Install steps by tool (GitHub)",
+    installUrl: "https://github.com/wwoosshh/entail/blob/main/INSTALL.md",
   },
 };
 
@@ -869,12 +873,21 @@ function renderRunHead() {
 function renderEmpty() {
   $("runhead").replaceChildren();
   document.title = "entail";
-  if (!view.folderFound) showEmpty("folderMissing", w("noFolderTitle"), w("noFolderBody"), w("noFolderCode", view.folder));
-  else showEmpty("inbox", w("noRunsTitle"), w("noRunsBody"), w("noRunsCode"));
+  if (!view.folderFound) showEmpty("folderMissing", w("noFolderTitle"), w("noFolderBody"), w("noFolderCode", view.folder), true);
+  else showEmpty("inbox", w("noRunsTitle"), w("noRunsBody"), w("noRunsCode"), true);
   renderOverview();
 }
 
-function showEmpty(iconName, title, body, code) {
+function externalLink(text, href) {
+  const a = el("a", "text-link", text);
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.append(icon("external"));
+  return a;
+}
+
+function showEmpty(iconName, title, body, code, guide) {
   const board = $("board");
   board.replaceChildren();
   board.style.height = "";
@@ -884,6 +897,7 @@ function showEmpty(iconName, title, body, code) {
   ic.append(icon(iconName));
   card.append(ic, el("h2", "empty-title", title), el("p", "empty-body", body));
   if (code) card.append(el("pre", "codeblock", code));
+  if (guide) card.append(externalLink(w("installGuide"), w("installUrl")));
   box.replaceChildren(card);
   box.hidden = false;
 }
@@ -1481,12 +1495,9 @@ function renderHelp() {
   const ul = el("ul", "help-list");
   for (const t of w("helpGraphItems")) ul.append(el("li", "", t));
   body.append(ul, el("h3", "sec-label", w("helpAbout")), el("p", "help-p", w("helpAboutBody")));
-  const a = el("a", "text-link", w("helpDocs"));
-  a.href = w("docsUrl");
-  a.target = "_blank";
-  a.rel = "noopener noreferrer";
-  a.append(icon("external"));
-  body.append(a);
+  const links = el("div", "help-links");
+  links.append(externalLink(w("installGuide"), w("installUrl")), externalLink(w("helpDocs"), w("docsUrl")));
+  body.append(links);
 }
 
 // ---------------------------------------------------------------- start

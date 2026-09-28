@@ -694,6 +694,8 @@ details.passed .dec + .dec { margin-top: 0; }
 .help-p { font-size: 13px; line-height: 1.6; color: var(--body); }
 .text-link { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 13px; font-weight: 500; color: var(--primary); text-decoration: underline; text-underline-offset: 3px; }
 .text-link svg { width: 14px; height: 14px; }
+.help-links { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; margin-top: 4px; }
+.empty-card .text-link { margin-top: 16px; }
 
 /* ---------------------------------------------------------------- buttons, dialog, toast */
 .btn {
