@@ -1,16 +1,47 @@
 name: publish
 
-# Runs only when a GitHub release is published. PyPI must first trust this workflow (RELEASING.md).
+# Releases what a merged release pull request put on main (RELEASING.md). On every push to main it reads the version in
+# entail/__init__.py; when that version has no tag yet, it builds and checks the wheel, publishes to PyPI once the
+# researcher approves the deployment to the `pypi` environment (its required reviewer), then tags the commit, makes the
+# GitHub release from the version's CHANGELOG section and installs the release from PyPI to try it. A push that keeps
+# a released version does nothing. PyPI trusts this workflow file and that environment (RELEASING.md): keep both names.
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
 
 jobs:
-  pypi:
+  plan:
     runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        name: Is this version released yet?
+        run: |
+          version=$(python3 -c "import re; print(re.search(r'^__version__ = \"([0-9.]+)\"', open('entail/__init__.py').read(), re.M).group(1))")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$version" > /dev/null; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "v$version is already released: nothing to do." >> "$GITHUB_STEP_SUMMARY"
+          else
+            python3 .github/scripts/release_notes.py "$version" > /dev/null
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "Release $version: it goes to PyPI once the researcher approves the deployment to \`pypi\`." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,4 +49,70 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install build
       - run: python -m build
+      - name: The wheel installs, says its version and places the start-up hook
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          python -m venv /tmp/wheel
+          /tmp/wheel/bin/pip install -q dist/*.whl
+          test "$(/tmp/wheel/bin/python -c 'import entail; print(entail.__version__)')" = "$VERSION"
+          /tmp/wheel/bin/entail hook status
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  pypi:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    environment: pypi          # the researcher's approval: the job waits here until the deployment is approved
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+  release:
+    needs: [plan, pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag the commit and make the GitHub release from CHANGELOG.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          python3 .github/scripts/release_notes.py "$VERSION" > notes.md
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "entail $VERSION" --notes-file notes.md
+
+  verify:
+    needs: [plan, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the release from PyPI and try it
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          python -m venv /tmp/pypi
+          for i in $(seq 1 20); do
+            /tmp/pypi/bin/pip install -q --no-cache-dir "entail-ai==$VERSION" && break
+            echo "PyPI does not list $VERSION yet (try $i)"; sleep 30
+          done
+          test "$(/tmp/pypi/bin/python -c 'import entail; print(entail.__version__)')" = "$VERSION"
+          /tmp/pypi/bin/entail hook status
+          mkdir -p /tmp/logs
+          /tmp/pypi/bin/entail serve --dir /tmp/logs --port 8790 &
+          sleep 3
+          curl -sf -o /dev/null http://127.0.0.1:8790/
+          curl -sf -o /dev/null http://127.0.0.1:8790/api/runs
+          echo "entail-ai $VERSION installs from PyPI and its page answers." >> "$GITHUB_STEP_SUMMARY"
