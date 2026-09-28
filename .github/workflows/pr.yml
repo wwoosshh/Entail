@@ -1,0 +1,21 @@
+name: pull request
+
+# The release rule on every pull request into main (RELEASING.md): an ordinary pull request keeps the version and
+# waits for a release; a release pull request raises it by one step and dates its CHANGELOG section. The job says
+# what merging will do. main requires this check (and the tests) before a merge.
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: What merging this pull request does to the version
+        run: python .github/scripts/version_check.py "origin/${{ github.base_ref }}" HEAD
