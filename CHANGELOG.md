@@ -4,6 +4,19 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
+## Unreleased
+
+- **vLLM: the start-up path check no longer changes what a seeded run samples** (#39). vLLM 0.30's model runner v2
+  draws a seed from the worker's NumPy generator for every prompt that brings none, greedy or not, and the caller's
+  sampled requests draw theirs from the same generator next. The check's probes are greedy and brought no seed, so
+  they took one draw per probe prompt and everything the caller sampled afterwards came from other seeds, with every
+  decision a pass (the field test's TRL GRPO run with vLLM in the trainer changed from its sixth step). Each probe
+  now brings its own seed, which changes neither its tokens nor the path it takes. Measured on vLLM 0.30.0 with
+  Qwen2.5-0.5B-Instruct, 8 steps of 32 completions sampled at temperature 1 with seed 0: with 2.1.3 the probes change
+  the worker's NumPy state, with the fix no random-number state (NumPy, Python, torch, CUDA); with the engine in the
+  caller's process, as TRL's colocate mode runs it, all 8 steps match a run without entail (2.1.3: 7 of 8 differ);
+  with the engine in its own process, the 6 steps where two runs without entail agree with each other match too.
+
 ## 2.1.3
 
 Released 2026-09-29. Fixes from the field test of 2.1.2 (issues #21, #24, #26, #27 and #28, found using entail from

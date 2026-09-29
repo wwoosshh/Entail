@@ -12,6 +12,9 @@ engine is up (M19 L3.3c; path_contract.py holds the rule).
                                  its own blocks; the other story shares its prefix), against the target alone
                The prefix cache is reset afterwards, so the caller's requests find nothing the probes left. Eight
                requests in all, PROBE_TOKENS decode steps each for five of them (M19 L3.3c measured the cost).
+               Each probe brings its own seed: vLLM's model runner v2 draws one from the worker's NumPy generator for
+               every prompt without one, greedy or not, and the caller's sampled requests draw theirs from the same
+               generator next - the ten seeds drawn for the probes' prompts changed a seeded training run (issue #39).
   handles      none: a running engine cannot be given another path; a disagreement is reported (broken), and a stop
                policy refuses to serve.
 Not compared, said once as unknown: a model that does not generate (pooling), a context shorter than the probes,
@@ -60,8 +63,9 @@ def read_choice(llm):
         skippable = False
 
     def params(read_cache=False, **kw):
+        # seed: greedy needs none, but without one the engine draws one from the generator the caller's seeds come from
         base = dict(temperature=0.0, max_tokens=path_contract.PROBE_TOKENS, ignore_eos=True,
-                    logprobs=path_contract.TOP)
+                    logprobs=path_contract.TOP, seed=0)
         base.update(kw)
         if skippable:
             base["skip_reading_prefix_cache"] = not read_cache
