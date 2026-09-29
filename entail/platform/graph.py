@@ -211,6 +211,10 @@ def graph(lines: List[dict]) -> dict:
     flows = []
     for fid in present:
         names = m["flows"][fid]
+        if names.get("generic") and not any(nid in per_node for nid in names.get("generic_unless", ())):
+            # a model with nothing an LLM has - no tokenizer, request, cache ... - is not drawn as one (field test,
+            # entail#27: Docling's RT-DETR detector showed as an "LLM" flow)
+            names = names["generic"]
         members = [n for n in m["nodes"] if n["flow"] == fid and not (n.get("shared") and n["id"] not in per_node
                                                                           and fid != n["flow"])]
         shown = [n for n in members if n["id"] in per_node or n["id"] not in ("other", "user")]

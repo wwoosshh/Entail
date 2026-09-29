@@ -880,14 +880,15 @@ def rotary_held(engine: str, facts: Declared, config, policy: Optional[Policy] =
 
 def model_contracts(engine: str, model_path: Optional[str], config, loader_ties: Optional[bool],
                     policy: Optional[Policy] = None, compares_head: bool = False,
-                    tied_in_memory: Optional[bool] = None) -> List[Decision]:
+                    tied_in_memory: Optional[bool] = None, has_head: Optional[bool] = None) -> List[Decision]:
     """The contracts about the model itself, for an engine's load hook once the model is built: tie against the
-    checkpoint (`compares_head`, `tied_in_memory`: see tie), the RoPE the engine holds, and a stored layout against
+    checkpoint (`compares_head`, `tied_in_memory`: see tie; not for a model with no output embedding, `has_head`
+    False - a detector or an encoder, field test entail#27), the RoPE the engine holds, and a stored layout against
     its data (the kernel that reads it is not in the capability table yet, so that one is reported as unknown
     unless the data contradicts the declaration)."""
     facts = declared(model_path, config)
-    out = tie(engine, facts, model_path, loader_ties, policy, compares_head=compares_head,
-              tied_in_memory=tied_in_memory)
+    out = [] if has_head is False else tie(engine, facts, model_path, loader_ties, policy,
+                                           compares_head=compares_head, tied_in_memory=tied_in_memory)
     if config is not None:
         out += rotary_held(engine, facts, config, policy)
     if facts.get("Layout") and model_path:

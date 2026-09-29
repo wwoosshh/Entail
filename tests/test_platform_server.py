@@ -274,6 +274,14 @@ def test_a_repair_leads_the_headline_in_both_languages():
     assert 'w("headRepaired", repaired' in js and "subResolved" not in js
 
 
+def test_nothing_checked_is_not_said_as_all_fine():
+    """Field test, entail#27: with nothing checked the header said "all 0 checked points were fine"."""
+    js = open(os.path.join(server.STATIC, "app.js"), encoding="utf-8").read()
+    for key in ("headNothing:", "subNothing:"):
+        assert js.count(key) == 2, key
+    assert 'if (unverified && !intact) return { state: "unknown", title: w("headNothing")' in js
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

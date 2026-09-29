@@ -10,6 +10,7 @@ configs through the same transformers classes, so this one hook covers all three
 load.config_keys decides (a key neither known nor surviving by its value -> refused); load.enforce records.
 """
 import functools
+import inspect
 
 from .. import core, load, policies
 from .base import Hook
@@ -30,9 +31,10 @@ def handles():
 
 @functools.lru_cache(maxsize=None)
 def _known(cls):
-    """The fields a config class declares: the keys of a default instance's to_dict(), and the standard names the
-    class renames on the way in (`attribute_map`: GPT-2 stores hidden_size as n_embd; M12.1), or None if it cannot
-    be built."""
+    """The fields a config class declares: the keys of a default instance's to_dict(), the standard names the class
+    renames on the way in (`attribute_map`: GPT-2 stores hidden_size as n_embd; M12.1), and the parameters its
+    constructor takes by name, which it reads even when it does not keep them (RT-DETR's backbone,
+    use_timm_backbone ... build its backbone_config; field test, entail#27) - or None if it cannot be built."""
     try:
         known = set(cls().to_dict())
     except Exception:  # noqa: BLE001 - a class that cannot be built with defaults gives no answer
@@ -40,6 +42,11 @@ def _known(cls):
     renamed = getattr(cls, "attribute_map", None)
     if isinstance(renamed, dict):
         known |= set(renamed)
+    try:
+        params = inspect.signature(cls.__init__).parameters.values()
+    except (TypeError, ValueError):   # a constructor Python cannot describe: the other two sources only
+        params = ()
+    known |= {p.name for p in params if p.name != "self" and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)}
     return frozenset(known)
 
 

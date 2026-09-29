@@ -65,6 +65,38 @@ def test_the_fields_a_class_knows_include_the_names_it_renames():
     assert tc._known(Renaming) == frozenset({"n_embd", "n_layer", "hidden_size", "num_hidden_layers"})
     assert tc._known(Broken) is None
 
+    class Detector(Plain):
+        """Field test, entail#27: RT-DETR's constructor takes backbone, use_timm_backbone ... to build its
+        backbone_config and does not keep them; config.json's keys were reported as read by nothing."""
+
+        def __init__(self, backbone=None, use_timm_backbone=False, *, backbone_kwargs=None, **kwargs):
+            pass
+
+    assert tc._known(Detector) == frozenset({"n_embd", "n_layer", "backbone", "use_timm_backbone", "backbone_kwargs"})
+
+
+def test_a_model_with_no_head_gets_no_tie_decision():
+    """Field test, entail#27: Docling's RT-DETR detector got a tied-embeddings line; a model with no output embedding
+    has nothing to tie. The model's other contracts (its RoPE) still run."""
+    from types import SimpleNamespace
+    from transformers import BertConfig, LlamaConfig
+
+    emb = SimpleNamespace(weight=None)
+    assert adapter.has_head(SimpleNamespace(get_output_embeddings=lambda: None)) is False
+    assert adapter.has_head(SimpleNamespace(get_output_embeddings=lambda: emb)) is True
+    assert adapter.has_head(SimpleNamespace()) is None
+    was = core.mode()
+    core.set_mode("load")
+    try:
+        loader = lambda ds: [d for d in ds if d.contract.boundary == "load:transformers.loader"]  # noqa: E731
+        assert not loader(load.model_contracts("transformers", None, BertConfig(), True, has_head=False))
+        assert len(loader(load.model_contracts("transformers", None, BertConfig(), True))) == 1
+        rope = load.model_contracts("transformers", None, LlamaConfig(), True, has_head=False)
+        assert not loader(rope) and any("rope" in d.contract.boundary for d in rope), \
+            [d.contract.boundary for d in rope]
+    finally:
+        core.set_mode(was)
+
 
 def test_what_the_loader_left_is_read_from_the_model():
     """M11.2: after tie_weights the adapter reads whether the head shares the embedding's tensor, and only at a call

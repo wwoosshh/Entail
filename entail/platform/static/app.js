@@ -64,6 +64,8 @@ const WORDS = {
     headClean: "어긋난 곳은 찾지 못했습니다",
     headOk: "모두 정상입니다",
     headEmpty: "아직 확인한 곳이 없습니다",
+    headNothing: "확인할 수 있었던 곳이 없습니다",
+    subNothing: (u) => `살펴본 ${u}곳 모두 선언이 없거나 읽을 수 없어 확인하지 못했습니다. 괜찮다는 뜻도, 문제라는 뜻도 아닙니다. 결과가 이상하면 그곳부터 보세요.`,
     subBroken: (n) => (n > 1 ? `선언과 다른 값이 쓰인 곳이 ${n}곳 있습니다. ` : "") +
       "실행은 계속됐지만, 이 뒤의 결과는 틀렸을 수 있습니다. 노드를 누르면 무엇이 달랐는지 볼 수 있습니다.",
     subRefused: "결과를 내기 전에 멈췄으므로 틀린 결과는 나가지 않았습니다.",
@@ -253,6 +255,8 @@ const WORDS = {
     headClean: "No mismatch found",
     headOk: "All clear",
     headEmpty: "Nothing checked yet",
+    headNothing: "Nothing could be checked",
+    subNothing: (u) => `${u === 1 ? "The one point" : `All ${u} points`} entail looked at could not be checked (nothing declared them, or they could not be read): neither an all-clear nor an alarm. If the output looks wrong, start there.`,
     subBroken: (n) => (n > 1 ? `${n} points used a value other than the declared one. ` : "") +
       "The run went on, but what came after may be wrong. Click the node to see what differed.",
     subRefused: "It stopped before producing output, so no wrong output went out.",
@@ -863,6 +867,8 @@ function verdict(g) {
     const where = fixes.slice(0, 2).join(", ") + (fixes.length > 2 ? ` +${fixes.length - 2}` : "");
     return { state: "resolved", title: w("headRepaired", repaired, where), sub: w("subRepaired", intact, unverified, repaired) };
   }
+  // nothing checked at all: not "all 0 checked points were fine" (field test, entail#27)
+  if (unverified && !intact) return { state: "unknown", title: w("headNothing"), sub: w("subNothing", unverified) };
   if (unverified) return { state: "unknown", title: w("headClean"), sub: w("subClean", intact, unverified) };
   if (intact) return { state: "pass", title: w("headOk"), sub: w("subOk", intact) };
   return { state: "none", title: w("headEmpty"), sub: w("subEmpty") };
