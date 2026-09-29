@@ -24,8 +24,10 @@ English: [INSTALL.md](INSTALL.md)
 | ComfyUI 데스크톱 | 설치 폴더의 `.venv` | 사용자 환경 변수 | 설치 폴더 | 소스 확인 |
 | text-generation-webui(전체 설치) | 자체 환경(`cmd_windows.bat`) | `set ENTAIL=load`를 넣은 실행 파일 | 그 폴더 | 소스 확인 |
 | Docker의 vLLM | vLLM 이미지를 바탕으로 만든 이미지 | `ENV ENTAIL=load` | 연결한 폴더 | 소스 확인 |
+| Xinference | 서버의 환경 | `ENTAIL=load xinference-local ...`, 모델은 `--disable-virtual-env`로 띄움 | 서버를 시작한 폴더 | 실행(현장 시험) |
 
 "실행": 이 프로젝트의 장비에서 해 봤다. "소스 확인": 도구의 소스 코드대로 적었지만 여기서 돌려 보지는 않았다.
+"현장 시험": 이 안내를 따라 쓴 외부 사용자(현장 시험)가 이 프로젝트의 장비에서 돌려 봤다.
 자세한 것은 [확인한 것](#확인한-것)에 있다.
 
 셸마다 변수를 주는 법:
@@ -106,6 +108,22 @@ entail을 설치하고 `entail serve --dir ./entail_logs --open`을 돌린다.
 pip install entail-ai                # SGLang의 환경에서
 ENTAIL=load python -m sglang.launch_server --model-path Qwen/Qwen3-4B
 ```
+
+## Xinference
+
+Xinference는 기본으로 모델마다 따로 가상 환경을 만들어 그 안에서 돌린다(uv가 서버의 환경 위에 만든다). 그 환경의
+파이썬은 서버 환경의 `entail-autoinstall.pth`를 읽지 않고, 모델 프로세스는 `ENTAIL` 변수 없이 시작된다. 그래서
+entail이 모델에 닿지 않고 시작 줄만 보인다(현장 시험, #34). 모델을 따로 환경 없이 띄운다:
+
+```bash
+pip install entail-ai                # Xinference의 환경에서
+ENTAIL=load xinference-local --host 127.0.0.1 --port 9997
+xinference launch --model-name Qwen3-Instruct --model-engine transformers --disable-virtual-env ...
+```
+
+`XINFERENCE_ENABLE_VIRTUAL_ENV=0`은 같은 일을 하는 Xinference의 설정이다(여기서 돌려 보지는 않았다). 실행이 끝났는데
+그 실행의 어느 프로세스도 기록을 남기지 않았으면, 실행을 시작한 프로세스가 stderr에 그렇다고 한 줄 말한다:
+`[entail] was on, but no process of this run recorded a decision`.
 
 ## ComfyUI
 
@@ -252,6 +270,10 @@ pip가 그렇게 멈췄다면:
   `python -m entail serve`로 시작하면 두 경우 모두 끝까지 설치됐고, 화면도 계속 돌았다. 위의 복구 절차(화면
   닫기, `~ntail*` 지우기, 다시 설치)로 모듈과 `.pth`가 돌아왔다.
 - **실행, Linux(WSL2):** vLLM 0.30.0, SGLang 0.5.20, transformers 5.17.0. README의 정상 실행과 측정이다.
+- **현장 시험이 실행, Xinference 3.5.0(2026-09-29, #34):** WSL2에서 transformers 엔진과 Qwen3-4B-Instruct-2507로
+  돌렸다. 기본인 모델별 가상 환경에서는 모델 프로세스에 `ENTAIL` 변수도 시작 훅도 없었다(`/proc/<pid>/environ`으로
+  읽음). `xinference launch ... --disable-virtual-env`로 띄우면 기록에 모델 프로세스가 남았고, 설정, RoPE, 토크나이저,
+  가중치, 커널이 통과했다.
 - **실행, git으로 설치한 ComfyUI, Windows 가상 환경:** pip로 설치하고 `set ENTAIL=load`를 넣은 실행 파일로
   시작했다(예전 판 entail, 2026-09-23). 같은 폴더의 ComfyUI 0.34.1에서 어댑터를 측정했다(README).
 - **소스 확인, 여기서 돌려 보지 않음:** 포터블(파이썬에 `import site`와 pip가 들어가고, `run_nvidia_gpu.bat`이

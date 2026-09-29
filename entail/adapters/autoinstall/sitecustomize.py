@@ -12,6 +12,7 @@ change to the user's script. Nothing happens unless ENTAIL is `load` or `debug`.
 An engine is usually imported long after start-up, and patching a half-imported package is a good way to break
 it. So this waits for the exact module that defines the class to finish executing, and patches then.
 """
+import atexit
 import importlib.util
 import os
 import sys
@@ -211,6 +212,31 @@ def install_now():
                 _install(adapter)
 
 
+def _reached_nothing(folder, since, pid):
+    """At the exit of the process that started a launch: when no process of the launch recorded a decision - no
+    record file in its folder written since it began, and none in this process - one line says so. Field test,
+    entail#34: Xinference runs each model with the Python of a virtual environment of its own, which does not read
+    this environment's start-up hook, and the start line was all a user saw; silence read as "all was fine". Only
+    the process that registered it speaks (a forked child inherits the registration)."""
+    try:
+        if os.getpid() != pid:
+            return
+        ledger = getattr(sys.modules.get("entail.load"), "LEDGER", None)
+        if ledger is not None and ledger.decisions:
+            return
+        named = os.environ.get("ENTAIL_RECORD")
+        files = [named] if named else [os.path.join(folder, n) for n in
+                                       (os.listdir(folder) if os.path.isdir(folder) else []) if n.startswith("record-")]
+        if any(os.path.exists(f) and os.path.getmtime(f) >= since for f in files):
+            return
+        print(f"[entail] was on, but no process of this run recorded a decision (nothing in {folder}): nothing it "
+              f"checks ran in this program or in the processes it started. A program that runs its models with the "
+              f"Python of another environment, such as a virtual environment per model, is out of reach; INSTALL.md "
+              f"says what works", file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001 - a closing line never breaks an exit
+        pass
+
+
 def activate():
     """Watch for the target modules and patch the ones already imported. Safe to call more than once. The log folder
     is fixed here, where the program starts, so the processes an engine spawns write to the same one (M6.4)."""
@@ -226,6 +252,8 @@ def activate():
             # (field test, entail#7). On stderr, so a program whose output is read stays as it was
             print(f"[entail] on ({os.environ.get('ENTAIL')}): what it finds goes to "
                   f"{folder or 'no folder (ENTAIL_LOG_DIR=off)'}", file=sys.stderr, flush=True)
+            if folder:
+                atexit.register(_reached_nothing, folder, time.time(), os.getpid())
     except Exception:  # noqa: BLE001 - a log folder that cannot be named does not stop the checks
         pass
     mine = any(isinstance(f, _PatchAfterImport) for f in sys.meta_path)

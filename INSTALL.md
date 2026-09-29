@@ -24,9 +24,11 @@ goes to `entail_logs/` in the folder the program starts from, and `entail serve`
 | ComfyUI Desktop | `.venv` in its install folder | a user environment variable | the install folder | source read |
 | text-generation-webui (full install) | its environment (`cmd_windows.bat`) | a launcher with `set ENTAIL=load` | its folder | source read |
 | vLLM in Docker | an image built on vLLM's | `ENV ENTAIL=load` | a folder you mount | source read |
+| Xinference | the server's environment | `ENTAIL=load xinference-local ...`, models launched with `--disable-virtual-env` | the folder you start the server from | run (field test) |
 
 "run": done on this project's machine. "source read": the steps follow the tool's own source code, but were not run
-here. [What was checked](#what-was-checked) has the details.
+here. "field test": run on this project's machine by the field test (an outside user following these pages).
+[What was checked](#what-was-checked) has the details.
 
 Setting the variable, by shell:
 
@@ -106,6 +108,23 @@ To see the records, install entail on the host as well and run `entail serve --d
 pip install entail-ai                # in SGLang's environment
 ENTAIL=load python -m sglang.launch_server --model-path Qwen/Qwen3-4B
 ```
+
+## Xinference
+
+Xinference runs each model in a virtual environment of its own by default, which uv builds on top of the server's
+environment. That environment's Python does not read the server environment's `entail-autoinstall.pth`, and the model
+process is started without the `ENTAIL` variables, so entail never reaches the model and the start line is all you
+see (field test, #34). Launch the model without its own environment:
+
+```bash
+pip install entail-ai                # in Xinference's environment
+ENTAIL=load xinference-local --host 127.0.0.1 --port 9997
+xinference launch --model-name Qwen3-Instruct --model-engine transformers --disable-virtual-env ...
+```
+
+`XINFERENCE_ENABLE_VIRTUAL_ENV=0` is Xinference's own setting for the same (not run here). When a launch ends and no
+process of it recorded anything, the process that started it says so on stderr: `[entail] was on, but no process of
+this run recorded a decision`.
 
 ## ComfyUI
 
@@ -254,6 +273,10 @@ If pip stopped that way:
   above (close serve, delete `~ntail*`, reinstall) restored the module and the `.pth`.
 - **Run, Linux (WSL2):** vLLM 0.30.0, SGLang 0.5.20 and transformers 5.17.0 - the healthy runs and measurements in
   the README.
+- **Run by the field test, Xinference 3.5.0 (2026-09-29; #34):** with the transformers engine and Qwen3-4B-Instruct-2507
+  under WSL2, the default per-model virtual environment left the model process without the `ENTAIL` variables and
+  without the start-up hook (read from `/proc/<pid>/environ`); with `xinference launch ... --disable-virtual-env` the
+  records carried the model process, and the config, RoPE, tokenizer, weights and kernels passed.
 - **Run, ComfyUI installed with git, in a Windows venv:** entail installed with pip and started from a launcher with
   `set ENTAIL=load` (an earlier entail, 2026-09-23); ComfyUI 0.34.1 in that folder for the adapters' measurements
   (README).
