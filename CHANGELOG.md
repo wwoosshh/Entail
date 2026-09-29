@@ -24,8 +24,10 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   Llama: `rope_parameters.get("rope_theta", 10000)`), so the consumer is now `sglang.rotary_embedding` or
   `vllm.rotary_embedding` in their processes, and a lost `rope_theta` is spelled out: the model takes its default
   base, 10,000 for Llama on vLLM and SGLang. README's measured table names the transformers version of each row and
-  that both used the engines' offline APIs; a field test on SGLang's server with the same versions saw no drop,
-  which is not explained yet (SGLang's config code, run on CPU, does lose the value there too).
+  that both used the engines' offline APIs. Measured on SGLang's server as well (`launch_server`, the same
+  versions, each configuration on its own port): a retrieval of 5 codes from a 5.4k-token list found 5/5
+  untouched, 0/5 with the override, 5/5 with entail. The field test that saw no drop had reached one server three
+  times: the next two could not bind port 30000 and exited.
 - **A model that is not an LLM is not treated as one** (#27). Docling's layout model, the RT-DETR detector, run
   through transformers: the page drew it as an "LLM" flow, the console reported tied embeddings for a model with
   no output head, and config.json's backbone keys as read by nothing, and with nothing checked the header said

@@ -54,7 +54,7 @@ entail은 값의 뜻을 타입처럼 분명하게 만든다. 뜻을 만드는 �
 | SGLang 0.5.20, transformers 5.12.1 (`json_model_override_args`) | 161 / 200 | **106 / 200** | 161 / 200 (출력까지 같음) |
 
 - vLLM 줄은 1.0에서 다시 잰 값이고, SGLang 줄은 앞선 측정의 값이다. 둘 다 엔진의 오프라인 API(vLLM `LLM`, SGLang `Engine`)로 쟀다.
-- 같은 판의 SGLang 서버로 한 현장 시험에서는 자체 검색·산수 확인에서 떨어지지 않았다. SGLang의 설정 코드는 거기서도 값을 잃는데, 아직 설명하지 못했다([#26](https://github.com/wwoosshh/entail/issues/26)).
+- SGLang 서버(`launch_server`, 같은 판)에서 5.4k 토큰 목록에서 코드 5개를 찾는 시험은, 손대지 않으면 5/5, 덮어쓰기를 주면 0/5, entail을 켜면 5/5였다([#26](https://github.com/wwoosshh/entail/issues/26). 떨어지지 않았다던 현장 시험은 뒤의 두 서버가 같은 포트를 잡지 못해 세 번 모두 첫 서버를 쟀다).
 - 망가진 실행은 `rope_theta = 10000`을 직접 넣은 실행과 결과가 같았다.
 - Qwen3 dense 모델은 우연히 안전하다. 그 모델 파일이 빠진 값을 1,000,000으로 채우기 때문이다. Llama, Qwen3-MoE, Gemma 등의 모델 파일은 채우지 않는다.
 
