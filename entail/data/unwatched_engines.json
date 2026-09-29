@@ -1,0 +1,14 @@
+{
+  "_about": "Inference engines entail does not watch (field test, entail#38: WhisperX transcribes with CTranslate2 and MinerU runs its document model with llama.cpp, and the page only showed a side model's checks). When one of these modules finishes importing in a process with entail on, the launch records one unknown at engine:<module>.unwatched - what that engine computes is not among the results - once per process. Keys are the modules' import names, values what users call them.",
+  "version": 1,
+  "engines": {
+    "ctranslate2": "CTranslate2",
+    "onnxruntime": "ONNX Runtime",
+    "llama_cpp": "llama.cpp (llama-cpp-python)",
+    "tensorrt_llm": "TensorRT-LLM",
+    "exllamav2": "ExLlamaV2",
+    "exllamav3": "ExLlamaV3",
+    "openvino": "OpenVINO",
+    "mlx": "MLX"
+  }
+}

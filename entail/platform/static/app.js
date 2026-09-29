@@ -415,6 +415,9 @@ const DECLARABLE = new Set(["Prediction", "LatentScale", "ModelProps", "Rotary",
 const ENGINES = {
   transformers: "transformers", vllm: "vLLM", sglang: "SGLang", comfyui: "ComfyUI", diffusers: "Diffusers",
   torch: "PyTorch", triton: "Triton",
+  // engines entail does not watch (data/unwatched_engines.json): named when a run loaded one
+  ctranslate2: "CTranslate2", onnxruntime: "ONNX Runtime", llama_cpp: "llama.cpp", tensorrt_llm: "TensorRT-LLM",
+  exllamav2: "ExLlamaV2", exllamav3: "ExLlamaV3", openvino: "OpenVINO", mlx: "MLX",
 };
 // the canvas: node size (the width grows between min and max to fill a row), gaps, group padding (px)
 const GEO = { minW: 176, maxW: 240, h: 92, pill: 36, gapX: 36, gapY: 52, gapV: 40, pad: 20, head: 40, top: 22,

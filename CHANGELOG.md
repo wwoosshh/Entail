@@ -62,6 +62,20 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   field test's run in its checked list; README says which processes the hook reaches, and `entail doctor` says the
   hook reaches child processes "that run this environment's Python". Checked on the CPU: a program whose child runs
   a Python without the hook ends with the line; one whose child records a decision does not.
+- **An engine entail does not watch is named in the run** (#38). WhisperX transcribes with CTranslate2 and MinerU
+  runs its document model with llama.cpp; entail saw only their side models (a wav2vec2 aligner, a layout detector)
+  and the page said the checked points were fine, with no word about the engines that did the main work - and a
+  WhisperX run on English audio left no record at all. The start-up hook now watches the modules of the engines in
+  `entail/data/unwatched_engines.json` (CTranslate2, ONNX Runtime, llama-cpp-python, TensorRT-LLM, ExLlamaV2/V3,
+  OpenVINO, MLX): when one has finished importing (or was imported before entail was turned on), the process
+  records one `unknown` at `engine:<module>.unwatched` - "this process loaded CTranslate2 4.8.2 (ctranslate2), which
+  entail does not watch: what it computes is not among these results" - once per process. It is a statement of
+  coverage, not a check of the engine. The page draws it in a node of its own ("보지 않는 엔진", flow "entail이 보지
+  않는 곳") and names the engine in the run's title, so a run whose only record is this line is listed. Checked on
+  the CPU with a stand-in `ctranslate2` package: imported with entail on, and before `entail.enable()`, the line is
+  printed and recorded, and the page's API lists the run as `unknown` with the engine `ctranslate2`. None of these
+  engines is installed here, so no real one was imported; MinerU's own llama.cpp package was not checked for its
+  module name. The flow's name and the "0 checked" wording the issue also mentions were fixed in 2.1.3 (#27).
 
 ## 2.1.3
 

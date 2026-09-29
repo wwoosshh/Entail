@@ -202,6 +202,21 @@ def test_a_launch_that_recorded_nothing_says_so_at_exit():
             os.environ["ENTAIL_RECORD"] = keep
 
 
+def test_the_engines_entail_does_not_watch_are_noted_when_imported():
+    """Field test, entail#38: WhisperX's CTranslate2 and MinerU's llama.cpp did the main work unmentioned. With entail
+    on, their modules are in the table, each with the one entry that notes them."""
+    import sys
+
+    if os.path.dirname(HERE) not in sys.path:
+        sys.path.insert(0, os.path.dirname(HERE))
+    mod = _load()
+    assert "ctranslate2" not in mod.TARGETS, "off: nothing added"
+    mod.add_unwatched()
+    mod.add_unwatched()
+    for module in ("ctranslate2", "onnxruntime", "llama_cpp"):
+        assert mod.TARGETS[module] == ["entail.unwatched:noted"], (module, mod.TARGETS.get(module))
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
