@@ -45,9 +45,12 @@ engine compiled into the app (Ollama, LM Studio, llama.cpp) give it nothing to a
 each tool - your scripts, vLLM behind Open WebUI, ComfyUI (git, portable, Desktop), text-generation-webui, vLLM in
 Docker - is in [INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md).
 
-> **Status: 2.1.2, measured on one machine.** 2.1.2 fixes what the field test of 2.1.1 found (declaring a value with
-> a manifest from the docs, `entail preflight`'s false alarms on popular models, a page that leads with what entail
-> repaired, upgrading on Windows); 2.1.1 fixed what the first field test of 2.1.0 found (clearer console lines and
+> **Status: 2.1.3, measured on one machine.** 2.1.3 fixes what the field test of 2.1.2 found (diffusers' prediction
+> decided where the pipeline samples, so apps that set up their own sampler are left alone; RoPE lines that name the
+> engine and the writer; models that are not LLMs no longer drawn as one), and the field test's open findings are in
+> [Known gaps](#known-gaps). 2.1.2 fixed what the field test of 2.1.1 found (declaring a value with a manifest from
+> the docs, `entail preflight`'s false alarms on popular models, a page that leads with what entail repaired,
+> upgrading on Windows); 2.1.1 fixed what the first field test of 2.1.0 found (clearer console lines and
 > page wording, a tokenizer folder given as a path object, doctor's engine list). 2.1.0 remade the page of
 > `entail serve` (plain words, a node canvas) and added install steps by tool
 > ([INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md)); the checks are 2.0's. 2.0 adds the
@@ -570,6 +573,15 @@ For 1.0 every measurement of the development milestones was run again on the fin
   1.2.0: huggingface_hub refused such snapshots as incomplete, so every hub-id load said "could not be checked"
   for Vocab and Stops; GLM-OCR by hub id on vLLM 0.30 now passes both). A model the cache does not hold at all
   is still `unknown` there.
+- **Found in the field test of 2.1.2, not fixed yet:** with vLLM inside a trainer (TRL GRPO, colocate mode), the
+  start-up path check's probe requests change the training run from its sixth step although every decision passes
+  ([#39](https://github.com/wwoosshh/entail/issues/39); `ENTAIL_NO_PATHS=1` avoids it); SGLang's KV contract says
+  `broken` once when requests join a request that is decoding, with right outputs
+  ([#36](https://github.com/wwoosshh/entail/issues/36)); a serving app's own chat template is `broken` even when it
+  renders the same prompt ([#35](https://github.com/wwoosshh/entail/issues/35)), and an engine's own choices are
+  called the user's ([#37](https://github.com/wwoosshh/entail/issues/37)); Xinference's per-model virtual
+  environments are not reached ([#34](https://github.com/wwoosshh/entail/issues/34)); a run where entail saw only a
+  side model does not say what it did not watch ([#38](https://github.com/wwoosshh/entail/issues/38)).
 - **Apps that sample in a loop of their own** (field test of 2.1.1): diffusers' prediction is decided when the
   pipeline samples, so a program that runs the model in a sampling loop of its own, with a scheduler it builds
   from its own model settings (InvokeAI), is not repaired: entail does not see that scheduler, says so once as
