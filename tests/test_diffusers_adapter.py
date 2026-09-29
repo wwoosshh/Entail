@@ -45,19 +45,38 @@ class Module:
 
 
 class UNet:
-    """named_modules() of a model with two LoRA-able layers, and the PEFT config a loaded adapter leaves."""
+    """named_modules() of a model with two LoRA-able layers, and the PEFT config a loaded adapter leaves; called as
+    torch calls a module: its forward pre-hooks first."""
 
     def __init__(self):
         self.layers = {"down.0.to_q": Module(), "down.0.to_k": Module()}
         self.peft_config = {}
+        self.pre_hooks = {}
 
     def named_modules(self):
         return list(self.layers.items())
+
+    def register_forward_pre_hook(self, hook):
+        key = object()
+        self.pre_hooks[key] = hook
+        return types.SimpleNamespace(remove=lambda: self.pre_hooks.pop(key, None))
+
+    def __call__(self, x):
+        for hook in list(self.pre_hooks.values()):
+            hook(self, (x,))
+        return x
 
 
 class DiffusionPipeline:
     def __init__(self, scheduler=None, vae=None):
         self.scheduler, self.vae, self.unet = scheduler, vae, UNet()
+
+    def __call__(self, prompt="", steps=3):
+        """A pipeline's sampling: the scheduler it holds, and the denoiser at each step."""
+        self.sampled_with = dict(self.scheduler.config)
+        for _ in range(steps):
+            self.unet(prompt)
+        return self.sampled_with
 
     @classmethod
     def from_pretrained(cls, path, **kwargs):
@@ -202,28 +221,71 @@ def test_handles_rebuild_the_scheduler_and_set_the_vae_scale():
 
 # --- the hooks -------------------------------------------------------------------------------------------------------
 
+def v_file():
+    return checkpoint({}, keys=("model.diffusion_model.input_blocks.0.0.weight", "v_pred", "ztsnr"))  # I04's markers
+
+
 def test_a_file_that_declares_v_is_no_longer_sampled_as_eps():
-    path = checkpoint({}, keys=("model.diffusion_model.input_blocks.0.0.weight", "v_pred", "ztsnr"))  # I04's markers
+    """Decided where the pipeline samples: the load leaves its scheduler as diffusers set it up, and the call samples
+    with the declared prediction (entail#21, #24: a scheduler changed at the load reached programs that set up their
+    own)."""
+    path = v_file()
     pipe, printed = run(lambda: SDXLPipeline.from_single_file(path))
-    assert pipe.scheduler.config["prediction_type"] == "v_prediction"
-    assert pipe.scheduler.config["rescale_betas_zero_snr"] is True
-    assert "resolved at load:diffusers.prediction" in printed
+    assert pipe.scheduler.config["prediction_type"] == "epsilon" and "diffusers.prediction" not in printed, printed
     assert "unknown at load:diffusers.latent_scale" in printed, "a single file states no latent scale"
+    used, printed = run(lambda: pipe("a cat"))
+    assert used["prediction_type"] == "v_prediction" and used["rescale_betas_zero_snr"] is True, used
+    assert "resolved at load:diffusers.prediction" in printed, printed
+    assert "the scheduler: Scheduler, prediction_type 'epsilon', rescale_betas_zero_snr False" in printed, printed
+    _, printed = run(lambda: pipe("a cat"))
+    assert printed == "", "the next call samples with the rebuilt scheduler: a pass, not said"
     off = SDXLPipeline.from_single_file(path)   # entail off: what diffusers does by itself
-    assert off.scheduler.config["prediction_type"] == "epsilon"
+    assert off("a cat")["prediction_type"] == "epsilon"
+
+
+def test_a_program_that_already_samples_as_declared_is_left_alone():
+    """Field test, entail#21: SD.Next sets up v itself after the load, and the scheduler entail had rebuilt at the load
+    changed its images. Now the call finds the program's own scheduler as declared: a pass, and it is not replaced."""
+    pipe, _ = run(lambda: SDXLPipeline.from_single_file(v_file()))
+    theirs = Scheduler(prediction_type="v_prediction", rescale_betas_zero_snr=True, timestep_spacing="trailing")
+    pipe.scheduler = theirs
+    used, printed = run(lambda: pipe("a cat"))
+    assert printed == "" and pipe.scheduler is theirs and used == theirs.config, (printed, used)
+
+
+def test_a_program_with_its_own_sampling_loop_is_told_nothing_was_changed():
+    """Field test, entail#24: InvokeAI builds its sampler from its own model settings (epsilon) and runs the model in
+    a loop of its own. The scheduler entail rebuilt at the load never reached that sampling and left its zero-SNR
+    schedule behind, and Invoke's default sampler stopped. Now nothing is changed, and it is said once."""
+    pipe, _ = run(lambda: SDXLPipeline.from_single_file(v_file()))
+    theirs = Scheduler.from_config(pipe.scheduler.config, prediction_type="epsilon")   # built from the pipeline's
+    _, printed = run(lambda: [pipe.unet("step") for _ in range(3)])
+    lines = [ln for ln in printed.splitlines() if "diffusers.prediction" in ln]
+    assert len(lines) == 1 and lines[0].startswith("[entail] unknown at load:diffusers.prediction"), printed
+    assert "in the program's own sampling loop" in lines[0] and "nothing was changed" in lines[0], lines[0]
+    assert "diffusers.sampler uses unknown" in lines[0], "what that loop samples with is not read, so not judged"
+    assert "InvokeAI: the model's settings" in lines[0], lines[0]
+    assert pipe.scheduler.config == {"prediction_type": "epsilon", "rescale_betas_zero_snr": False}, "left as it was"
+    assert theirs.config["rescale_betas_zero_snr"] is False, "no zero-SNR schedule under the program's epsilon"
+    assert not pipe.unet.pre_hooks, "said once: the hook is gone"
 
 
 def test_a_scheduler_the_caller_passed_is_reported_not_replaced():
     path = checkpoint({"modelspec.prediction_type": "v"})   # fd-m7's declaration
     mine = Scheduler(prediction_type="epsilon", rescale_betas_zero_snr=False)
     pipe, printed = run(lambda: SDXLPipeline.from_single_file(path, scheduler=mine))
-    assert pipe.scheduler is mine and "broken at load:diffusers.prediction" in printed and "not overridden" in printed
+    assert "diffusers.prediction" not in printed, printed
+    used, printed = run(lambda: pipe("a cat"))
+    assert pipe.scheduler is mine and used["prediction_type"] == "epsilon", used
+    assert "broken at load:diffusers.prediction" in printed and "not overridden" in printed, printed
     os.environ["ENTAIL_ON_BROKEN"] = "stop"
     try:
-        run(lambda: SDXLPipeline.from_single_file(path, scheduler=mine))
-        raise AssertionError("the strict policy stops")
+        pipe2, _ = run(lambda: SDXLPipeline.from_single_file(path, scheduler=Scheduler(prediction_type="epsilon")))
+        run(lambda: pipe2("a cat"))
+        raise AssertionError("the strict policy stops, before the pipeline samples")
     except core.RoleError as e:
         assert "refused at load:diffusers.prediction" in str(e)
+        assert not hasattr(pipe2, "sampled_with"), "stopped before any sampling"
     finally:
         os.environ.pop("ENTAIL_ON_BROKEN", None)
 
@@ -261,7 +323,8 @@ def test_a_pipeline_from_the_hub_is_checked_from_the_local_cache_or_reported():
         pipe, printed = run(lambda: SDXLPipeline.from_pretrained("someone/some-model", revision="v2"))
         assert asked == [{"repo_id": "someone/some-model", "revision": "v2", "cache_dir": None,
                           "local_files_only": True}], asked
-        assert "resolved at load:diffusers.prediction" in printed and pipe.scheduler.config["prediction_type"] == "v_prediction"
+        used, printed = run(lambda: pipe("a cat"))
+        assert "resolved at load:diffusers.prediction" in printed and used["prediction_type"] == "v_prediction"
         assert da.local_snapshot(d, {}) is None and da.local_snapshot(3, {}) is None   # a folder is used as itself
 
         def not_cached(**kw):

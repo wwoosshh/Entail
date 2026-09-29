@@ -4,6 +4,20 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
+## Unreleased
+
+- **diffusers: the prediction is decided where the pipeline samples, not at the load** (#24, #21). entail rebuilt
+  the pipeline's scheduler right after `from_single_file`, and programs that set up a sampler of their own after
+  the load got a repair that did not fit them: SD.Next already samples a v-prediction checkpoint as v, and its
+  images changed (#21); InvokeAI builds its sampler from its own model settings (epsilon), so the repair never
+  reached its sampling, said "resolved" anyway, and left a zero-terminal-SNR schedule under Invoke's epsilon, on
+  which its default sampler (DPM++ 3M) stopped with an `IndexError` (#24). Now the load leaves the scheduler as
+  diffusers set it up; the pipeline's call is where the scheduler it samples with is compared and, when it differs,
+  rebuilt (a plain `pipe(...)` gets the same repair as before, and a program that set it up as declared is left
+  alone); a program that runs the model in a sampling loop of its own gets one `unknown` line - the declared
+  prediction, "nothing was changed", and where to set it (InvokeAI: the model's settings). A non-pass line names
+  the scheduler and its `prediction_type` and `rescale_betas_zero_snr`.
+
 ## 2.1.2
 
 Released 2026-09-28. Fixes from the field test of 2.1.1 (issues #14, #15, #17 and #18, found using entail from the

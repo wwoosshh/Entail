@@ -6,6 +6,10 @@ make it use something else; the rules are the core's (load.prediction, load.late
                (loaders/single_file_utils.py) - so a file that declares v is sampled as eps (fd-m7, market I04).
                DiffusionPipeline.from_pretrained, for a local diffusers folder: its scheduler_config and vae/config.json
                are the declaration.
+               The prediction is decided where the model samples, not at the load (field test, entail#21, #24): the
+               pipeline class's __call__ (the scheduler it is about to sample with; rebuilt there when it differs),
+               and a one-time forward pre-hook on its denoiser for a program that runs the model in a sampling loop of
+               its own (InvokeAI): said as unknown there, nothing changed.
                DiffusionPipeline.__setattr__ for "vae" on a pipeline already built: a VAE put in later. A VAE file read
                on its own is taken for Stable Diffusion 1.5's, because the two VAEs have the same keys (fd-vae).
                load_lora_weights of every LoRA loader mixin in loaders/lora_pipeline.py, and peft's
@@ -21,8 +25,10 @@ make it use something else; the rules are the core's (load.prediction, load.late
 A pipeline from the Hub is not read (only local files and folders are): reported as not checked.
 """
 import contextvars
+import functools
 import importlib
 import os
+import weakref
 
 from .. import core, load, policies, readers
 from ..facts import LatentScale, Prediction
@@ -32,6 +38,9 @@ engine = "diffusers"
 versions = "0.40.0"
 _ORIG = {}
 _HANDED = contextvars.ContextVar("entail_diffusers_lora", default=None)   # this load: [(model, keys, unexpected)]
+_STATE = weakref.WeakKeyDictionary()   # pipeline -> its prediction check, waiting for where the pipeline samples
+_IN_CALL = contextvars.ContextVar("entail_diffusers_call", default=False)   # inside a pipeline's own __call__
+_INHERITED = object()   # a __call__ the pipeline class inherited: uninstall removes the wrapper instead of restoring
 
 
 def hooks():
@@ -124,21 +133,110 @@ def handles(pipe):
 # --- the contracts at each hook -------------------------------------------------------------------------------------
 
 def _check_pipeline(pipe, path, kwargs, where):
-    """After a pipeline was built from a local file or folder: its prediction and its VAE's scale against what the
-    file or folder declares; the declarations stay with the pipeline for a VAE put in later."""
+    """After a pipeline was built from a local file or folder: its VAE's scale against what the file or folder
+    declares, now; its prediction where it samples. The declarations stay with the pipeline, for a VAE put in later
+    and for the sampling."""
     facts = load.declared(path)
     load.remember(pipe, facts)
-    policy = policies.current()
-    decisions = []
-    sched = getattr(pipe, "scheduler", None)
-    if sched is not None:
-        decisions += load.prediction(engine, "diffusers.scheduler", facts, read_choice("prediction", sched),
-                                     explicit="scheduler" in kwargs or "prediction_type" in kwargs,
-                                     can_switch=("eps", "v", "x0"), policy=policy, where=where)
     if getattr(pipe, "vae", None) is not None:
-        decisions += _vae_decisions(pipe, facts, policy, where)
-    load.enforce(decisions)
+        decisions = _vae_decisions(pipe, facts, policies.current(), where)
+        load.enforce(decisions)
+        load.resolve(decisions, handles(pipe))
+    if getattr(pipe, "scheduler", None) is not None:
+        explicit = "scheduler" in kwargs or "prediction_type" in kwargs
+        _await_sampling(pipe, where, pipe.scheduler if explicit else None)
+
+
+def _await_sampling(pipe, where, explicit):
+    """Decide the prediction where the pipeline samples, not at the load. A program may set up a sampler of its own
+    after the load: SD.Next already samples a v checkpoint as v, and a scheduler entail rebuilt at the load changed
+    its images (field test, entail#21); InvokeAI builds its sampler from its own model settings, so a scheduler
+    rebuilt at the load never reached the sampling but left its zero-SNR schedule under Invoke's epsilon, and the
+    default sampler stopped (entail#24). `explicit`: the scheduler the caller passed at the load (never replaced)."""
+    state = {"where": where, "explicit": explicit, "hook": None}
+    _STATE[pipe] = state
+    _wrap_call(type(pipe))
+    denoiser = next((m for m in (getattr(pipe, "unet", None), getattr(pipe, "transformer", None))
+                     if hasattr(m, "register_forward_pre_hook")), None)
+    if denoiser is None:
+        return
+    ref = weakref.ref(pipe)
+
+    def own_loop(module, args):
+        """The denoiser's first forward outside the pipeline's call: a sampling loop of the program's own."""
+        owner = ref()
+        if owner is None or _IN_CALL.get():
+            return None
+        _unhook(_STATE.get(owner))
+        if _active():
+            load.safely("load:diffusers.prediction", "diffusers.sampler", "Prediction",
+                        lambda: _decide_own_loop(owner))
+        return None
+
+    state["hook"] = denoiser.register_forward_pre_hook(own_loop)
+
+
+def _unhook(state):
+    handle = state.pop("hook", None) if state else None
+    if handle is not None:
+        handle.remove()
+
+
+def _set_up(sched):
+    cfg = getattr(sched, "config", None) or {}
+    return (f"the scheduler: {type(sched).__name__}, prediction_type {cfg.get('prediction_type')!r}, "
+            f"rescale_betas_zero_snr {cfg.get('rescale_betas_zero_snr')!r}")
+
+
+def _decide_call(pipe, state):
+    """At a pipeline call: the scheduler it is about to sample with, against the declaration. One set up for another
+    prediction is rebuilt for the declared one before the call; the one the caller passed at the load is reported,
+    not replaced."""
+    _unhook(state)
+    sched = getattr(pipe, "scheduler", None)
+    if sched is None:
+        return
+    decisions = load.prediction(engine, "diffusers.scheduler", load.remembered(pipe) or load.Declared(),
+                                read_choice("prediction", sched), explicit=sched is state["explicit"],
+                                can_switch=("eps", "v", "x0"), policy=policies.current(), where=state["where"],
+                                note=_set_up(sched))
+    load.enforce(decisions, once_for=sched)
     load.resolve(decisions, handles(pipe))
+
+
+def _decide_own_loop(pipe):
+    """The model ran in the program's own sampling loop, with a scheduler entail does not see: the declaration is
+    said, and nothing is changed."""
+    state = _STATE.get(pipe) or {}
+    note = ("the model ran outside the call of the pipeline it was loaded with - in the program's own sampling loop, "
+            "or another pipeline made from its parts - whose scheduler entail does not see; nothing was changed. If "
+            "the images come out as noise or washed out, set the program's prediction type for this model to the "
+            "declared one (InvokeAI: the model's settings)")
+    load.enforce(load.prediction(engine, "diffusers.sampler", load.remembered(pipe) or load.Declared(), None,
+                                 can_switch=(), policy=policies.current(), where=state.get("where", ""), note=note))
+
+
+def _wrap_call(cls):
+    """The pipeline class's __call__, wrapped once: each pipeline class defines its own sampling. A call inside a
+    call (a pipeline that runs another) is decided by the outer one."""
+    if (cls, "__call__") in _ORIG or not callable(getattr(cls, "__call__", None)):
+        return
+    orig = cls.__call__
+    _ORIG[(cls, "__call__")] = cls.__dict__.get("__call__", _INHERITED)
+
+    @functools.wraps(orig)
+    def __call__(self, *a, **kw):
+        state = _STATE.get(self) if _active() and not _IN_CALL.get() else None
+        if state is None:
+            return orig(self, *a, **kw)
+        load.safely("load:diffusers.prediction", "diffusers.scheduler", "Prediction", lambda: _decide_call(self, state))
+        token = _IN_CALL.set(True)
+        try:
+            return orig(self, *a, **kw)
+        finally:
+            _IN_CALL.reset(token)
+
+    cls.__call__ = __call__
 
 
 def _vae_decisions(pipe, facts, policy, where):
@@ -330,7 +428,13 @@ def _adapters(pipe):
 def uninstall():
     n = 0
     for (owner, attr), orig in list(_ORIG.items()):
-        setattr(owner, attr, orig)
+        if orig is _INHERITED:
+            delattr(owner, attr)
+        else:
+            setattr(owner, attr, orig)
         n += 1
     _ORIG.clear()
+    for state in list(_STATE.values()):
+        _unhook(state)
+    _STATE.clear()
     return n
