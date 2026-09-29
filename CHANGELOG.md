@@ -4,7 +4,11 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
-## Unreleased
+## 2.1.4
+
+Released 2026-09-30. Fixes from the field test of 2.1.3 (issues #34 to #39, found using entail from the docs
+only). The vLLM and SGLang fixes were measured on the GPU, the others on the CPU, through the engines' own code
+where it is installed here; TRL, Xinference and the DeepSeek-OCR server themselves were not re-run.
 
 - **vLLM: the start-up path check no longer changes what a seeded run samples** (#39). vLLM 0.30's model runner v2
   draws a seed from the worker's NumPy generator for every prompt that brings none, greedy or not, and the caller's
@@ -77,6 +81,15 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   printed and recorded, and the page's API lists the run as `unknown` with the engine `ctranslate2`. None of these
   engines is installed here, so no real one was imported; MinerU's own llama.cpp package was not checked for its
   module name. The flow's name and the "0 checked" wording the issue also mentions were fixed in 2.1.3 (#27).
+
+**Known issues** (open)
+- `import unsloth` alone writes an old RoPE name on a LlamaConfig Unsloth builds in code, and entail says it
+  resolved it (#28). Since 2.1.3 the line names the writer and says the config was built in code, not read from a
+  model file; whether a config no model file declares should be repaired at all is still open.
+- A template the user's own code passes is `broken` when its prompt differs from the declared template's, while
+  tokenizer build settings the user's own code gives are `unknown` (#37): a user's `legacy=False` is often the
+  fix for a legacy tokenizer file, and entail cannot tell which side is right. The two rules differ on purpose
+  for now.
 
 ## 2.1.3
 
