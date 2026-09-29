@@ -8,7 +8,8 @@ rules, and is therefore refused here:
     (the request contract, M5.3),
     policies.current,
     core.mode, readers.rotary_of / config_dict / prediction_kind / lora_modules / is_text_module / lora_base (to turn
-    what it read into a fact value, M6.2), facts (fact classes), base (Hook). Not caps, contracts, sources or
+    what it read into a fact value, M6.2) and readers.caller (who asked for a value, issue #37), facts (fact
+    classes), base (Hook). Not caps, contracts, sources or
     preflight: they hold tables, verdicts and precedence.
   - raising RoleError itself: stopping is load.enforce's, on a blocking decision.
   - a module-level table (a dict, list, set or tuple literal of more than three entries): tables are data files.
@@ -41,7 +42,8 @@ ALLOWED = {"load": None, "kv_contract": None, "epochs": None, "identity_contract
            # the two safety modes (product track P3): which optimizations to turn off is decided there
            "safe_mode": None,
            "policies": {"current"}, "core": {"mode"},
-           "readers": {"rotary_of", "config_dict", "prediction_kind", "lora_modules", "is_text_module", "lora_base"},
+           "readers": {"rotary_of", "config_dict", "prediction_kind", "lora_modules", "is_text_module", "lora_base",
+                       "caller"},
            "facts": None, "base": {"Hook"},
            # the definitions of engine functions that carry none (M19 L3): what a function computes, not a rule
            "definitions": None}

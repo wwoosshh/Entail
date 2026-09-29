@@ -26,7 +26,9 @@ the difference lies: a probe that differs only after a declared token, exactly a
 it, is the folder's own disagreement (`sources_disagree`, unknown, the flag recorded as the conflicting source);
 a probe that differs elsewhere, such as text that starts with whitespace, is `broken` as with any folder, because
 every declaration the folder holds gives the same ids there. A difference the user's own build settings explain
-(legacy=, add_prefix_space=, ... given to from_pretrained) is the user's choice (`user_choice`, unknown). No repair
+(legacy=, add_prefix_space=, ... given to from_pretrained) is the user's choice (`user_choice`, unknown); the same
+settings passed by an engine's or app's own code (SGLang retries a generic tokenizer with use_fast=False) are not
+the user's, and the difference is broken with who set them (issue #37). No repair
 is offered: a decision names the class the engine built and the first probe that differs, so the user can load the
 declared tokenizer directly. Nothing here reads a device; an error inside entail never breaks the engine (the
 adapters run this under load.safely).
@@ -425,12 +427,12 @@ def _short(ids: List[int], n: int = 12) -> str:
 
 
 def check(boundary: str, consumer: str, path: str, tokenizer, where: str, policy=None, owner=None,
-          record: bool = True, user_kwargs: Optional[dict] = None) -> list:
+          record: bool = True, user_kwargs: Optional[dict] = None, set_by: Optional[str] = None) -> list:
     """Decide the tokenizer the engine built (`tokenizer`: anything with encode(text, add_special_tokens=False) and
     convert_tokens_to_ids) against the folder's declared tokenizer, run. Returns the decisions; with `record` they
     are also recorded through load.enforce (the run goes on, or stops where the policy says). `user_kwargs`: the
-    build settings the user gave from_pretrained (legacy, add_prefix_space, ...): a difference they explain is the
-    user's choice, not the engine's fault."""
+    build settings given to from_pretrained (legacy, add_prefix_space, ...): a difference they explain is the
+    user's choice, not the engine's fault - unless `set_by` names the installed package whose code gave them."""
     from . import load, policies
     from .contracts import RULES, Contract, Decision, Verdict, unrepaired
     from .facts import Certainty, Fact, Source, Tokenization
@@ -442,12 +444,15 @@ def check(boundary: str, consumer: str, path: str, tokenizer, where: str, policy
     decisions = []
 
     def mismatch(rule, declared, held, note):
-        """A difference: the user's own build settings explain it (unknown, user_choice), else broken."""
-        if chosen_by_user:
-            asked = ", ".join(f"{k}={v!r}" for k, v in sorted(chosen_by_user.items()))
+        """A difference: the user's own build settings explain it (unknown, user_choice), else broken - with the
+        settings and who set them, when an engine's or app's code did."""
+        asked = ", ".join(f"{k}={v!r}" for k, v in sorted(chosen_by_user.items()))
+        if chosen_by_user and not set_by:
             return Decision(contract, "Tokenization", Verdict.UNKNOWN, RULES["user_choice"], declared=declared,
                             chosen=held, note=f"{note}; the tokenizer was built with {asked} given by the user, "
                                               f"which is the user's choice against the file")
+        if chosen_by_user:
+            note = f"{note}; the tokenizer was built with {asked}, set by {set_by}, not by the user"
         verdict, blocking = unrepaired(policy, "Tokenization")
         return Decision(contract, "Tokenization", verdict, RULES[rule], declared=declared, chosen=held,
                         blocking=blocking, note=note)

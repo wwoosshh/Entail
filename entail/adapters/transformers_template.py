@@ -10,6 +10,8 @@ without any decision).
                (get_chat_template: a template passed in, a named one, "tool_use" when tools are given, or the
                default) - and whether the caller passed it; per earlier assistant turn, whether its reasoning reaches
                the template (a reasoning_content, reasoning or thinking field, or a <think> block in its content).
+               A template passed in is the user's choice when the user's own code passed it; an installed package's
+               code (readers.caller) is named instead (issue #37: Xinference passes its own).
   handles      none: nothing repairs a template. One that is not the declared one is reported (broken) and the call
                goes on; where the policy stops, the call raises before anything is rendered.
 request_contract decides the template and the reasoning history, once per call. A template of another text than the
@@ -18,7 +20,7 @@ renders the same prompt unless an earlier assistant turn has a <think> block), s
 to render the call again - with the template it names, untokenized - and the template the tokenizer holds. A
 processor's apply_chat_template (multimodal models) is not hooked.
 """
-from .. import core, policies, request_contract
+from .. import core, policies, readers, request_contract
 from .base import Hook
 
 engine = "transformers"
@@ -87,7 +89,10 @@ def _decide(tokenizer, conversation, tools, chat_template, render=None):
         request_contract.history(HISTORY, CONSUMER, facts, read_choice("turns", messages),
                                  "the conversation given to apply_chat_template", policy)
     text, named = read_choice("template", tokenizer, chat_template, tools)
+    function, package = readers.caller() if named else ("", None)
     how = "passed to apply_chat_template" if named else "the tokenizer's own"
+    if package:
+        how, named = f"passed to apply_chat_template by {package} ({function})", False
     other = "; a named template other than the default" if text is None else ""
     request_contract.template(TEMPLATE, CONSUMER, facts, text, named, f"transformers chat template, {how}{other}",
                               policy, render=render, held=held.get("default") if isinstance(held, dict) else held)

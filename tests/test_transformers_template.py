@@ -169,13 +169,53 @@ def test_off_mode_decides_nothing():
 
 
 def test_sglang_s_own_conversation_template_is_reported():
-    """SGLang renders with a conversation template of its own name (--chat-template chatml), not the model's."""
+    """SGLang renders with a conversation template of its own name, not the model's: the user's choice when
+    --chat-template named it, SGLang's when it chose one from the model path by itself (issue #37: DeepSeek-OCR's
+    'deepseek-ocr' was called named by --chat-template)."""
     with Hooked() as h:
-        serving = SimpleNamespace(template_manager=SimpleNamespace(chat_template_name="chatml"),
-                                  tokenizer_manager=SimpleNamespace(model_path=h.folder, tokenizer=h.tok))
-        quiet(lambda: sglang_serve._decide(serving))
+        def serving(arg):
+            return SimpleNamespace(template_manager=SimpleNamespace(chat_template_name="chatml"),
+                                   tokenizer_manager=SimpleNamespace(model_path=h.folder, tokenizer=h.tok,
+                                                                     server_args=SimpleNamespace(chat_template=arg)))
+        quiet(lambda: sglang_serve._decide(serving("chatml")))
         d, = h.made()
         assert d.verdict is Verdict.BROKEN and d.rule == RULES["user_choice"] and "'chatml'" in str(d.chosen.source), d
+        assert "named by --chat-template" in d.chosen.source.where
+        quiet(lambda: sglang_serve._decide(serving(None)))
+        d = h.made()[-1]
+        assert d.verdict is Verdict.BROKEN and d.rule == RULES["no_resolution"] and d.chosen.source.kind == "engine", d
+        assert "chosen by SGLang from the model path (no --chat-template given)" in d.chosen.source.where
+
+
+def installed(name, code):
+    """A module installed the way pip installs one (<tmp>/site-packages/<name>/__init__.py), imported."""
+    import importlib
+
+    site = os.path.join(tempfile.mkdtemp(prefix="entail_site_"), "site-packages")
+    os.makedirs(os.path.join(site, name))
+    with open(os.path.join(site, name, "__init__.py"), "w", encoding="utf-8") as f:
+        f.write(code)
+    sys.path.insert(0, site)
+    try:
+        return importlib.import_module(name)
+    finally:
+        sys.path.remove(site)
+
+
+def test_a_template_an_installed_package_passes_is_its_choice_not_the_users():
+    """Issue #37: Xinference passes its own template to apply_chat_template; the person running it passed nothing,
+    and entail called it the user's choice. A template an installed package's code passes is named as that
+    package's (the engine's side); one the user's own code passes stays the user's (the tests above)."""
+    app = installed("entail_fake_app", "def render(tok, conversation, template):\n"
+                                       "    return tok.apply_chat_template(conversation, chat_template=template, "
+                                       "tokenize=False)\n")
+    with Hooked() as h:
+        assert quiet(lambda: app.render(h.tok, ASK, OTHER)) == "[user] hi there"
+        d, = h.made()
+        assert d.verdict is Verdict.BROKEN and d.rule == RULES["no_resolution"] and d.chosen.source.kind == "engine", d
+        assert "passed to apply_chat_template by entail_fake_app (entail_fake_app.render)" in d.chosen.source.where
+        quiet(lambda: app.render(h.tok, ASK, "{# the app's copy #}" + DECLARED))
+        assert len(h.made()) == 1, "the same prompt passes, whoever passed the template (#35)"
 
 
 if __name__ == "__main__":

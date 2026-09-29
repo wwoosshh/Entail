@@ -38,6 +38,20 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   a declared template the tokenizer does not hold, is compared by its text as before. Checked on Qwen3-4B's own
   template (CPU): a copy that differs by a comment passes on all five shapes tried; a copy that opens the system turn
   it writes for tools differently is `broken` on the tool shape only. Xinference itself was not re-run.
+- **A choice an engine's or app's code makes is named as theirs, not the user's** (#37). SGLang retries a tokenizer
+  transformers built as a generic one with `use_fast=False`, SGLang picks a conversation template from the model
+  path when no `--chat-template` is given, and Xinference passes its own chat template; entail called all three the
+  user's choice ("given by the user", "named by --chat-template", the page's "사용자 코드"), and the tokenizer's
+  "user's choice" was `unknown` while 9 of 10 probe texts encoded differently. entail now looks at who made the call
+  (`readers.caller`: the first caller outside transformers, huggingface_hub, tokenizers and entail, and whether its
+  file is in a site-packages or dist-packages folder). Build settings or a template an installed package's code
+  passed are named with that package and function and decided as the engine's side: a tokenizer that encodes
+  differently is `broken` ("built with use_fast=False, set by sglang (...), not by the user"), a template is held to
+  the declaration like any the engine picks (and to its prompt, #35). SGLang's conversation template is the user's
+  only when `--chat-template` named it. What the user's own code passes is the user's choice as before. Checked
+  through SGLang 0.5.20's own retry code on the CPU with Phi-3.5-mini's folder, where the slow tokenizer encodes
+  differently from `tokenizer.json`: 2.1.3 said `unknown`, "given by the user"; now `broken`, "set by sglang
+  (sglang.srt.utils.hf_transformers.tokenizer._load_tokenizer_by_declared_class)".
 
 ## 2.1.3
 

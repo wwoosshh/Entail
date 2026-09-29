@@ -9,8 +9,10 @@ vocab_contract reads the folder (tokenizer files, config vocab_size, embedding r
 resolved to its local cache folder (load.local_folder); nothing is downloaded here.
 M18.1: the built tokenizer is also run against the folder's declared tokenizer on fixed probe texts
 (tokenizer_contract): a tokenizer built from the right file by the wrong class passes the size check and fails this.
+Build settings given to from_pretrained are the user's choice only when the user's own code gave them: an engine's
+or app's code (readers.caller: an installed package) is named instead (issue #37: SGLang's use_fast=False).
 """
-from .. import core, tokenizer_contract, vocab_contract
+from .. import core, readers, tokenizer_contract, vocab_contract
 from .base import Hook
 
 engine = "transformers"
@@ -71,9 +73,11 @@ def _decide(name, kwargs, tokenizer):
     # degenerate one-token tokenizer, about which Vocab already says unknown)
     if tokenizer_contract.has_declaration(folder):
         user = {k: kwargs[k] for k in tokenizer_contract.USER_KWARGS if k in kwargs}
+        function, package = readers.caller() if user else ("", None)
+        by = f"{package} ({function})" if package else None
         load.safely(BOUNDARY_IDS, CONSUMER, "Tokenization",
                     lambda: tokenizer_contract.check(BOUNDARY_IDS, CONSUMER, folder, tokenizer, where, owner=folder,
-                                                     user_kwargs=user))
+                                                     user_kwargs=user, set_by=by))
 
 
 def install():
