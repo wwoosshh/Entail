@@ -141,6 +141,31 @@ def test_the_line_names_the_engine_that_reads_it():
                 del sys.modules[present]
 
 
+def test_the_line_says_who_wrote_it_and_what_the_config_came_from():
+    """Field test, entail#28: `import unsloth` alone wrote rope_scaling on a LlamaConfig Unsloth built in code, and the
+    line gave only "LlamaConfig.rope_scaling written after the config was built". It now names the writer - the first
+    caller outside transformers and entail - and whether the config came from a model file."""
+    from transformers import LlamaConfig
+
+    linear = {"rope_type": "linear", "factor": 4.0}
+    cfg = LlamaConfig(rope_theta=500000.0, rope_scaling=dict(linear))
+    with _On() as on:
+        cfg.rope_scaling = dict(linear)
+        fixes = on.new()
+    assert len(fixes) == 1, fixes
+    where = fixes[0].declared.source.where
+    assert "by " in where and "test_the_line_says_who_wrote_it_and_what_the_config_came_from" in where, where
+    assert "(the config was built in code, not read from a model file)" in where, where
+    if _have("Llama-3.2-3B-Instruct"):
+        from transformers import AutoConfig
+
+        cfg = AutoConfig.from_pretrained(MODELS["Llama-3.2-3B-Instruct"])
+        with _On() as on:
+            cfg.rope_scaling = {"rope_type": "linear", "factor": 2.0}
+            fixes = on.new()
+        assert f"(the config was read from {MODELS['Llama-3.2-3B-Instruct']})" in fixes[0].declared.source.where
+
+
 def test_the_same_value_stated_again_is_quiet():
     """vLLM's patch_rope_parameters writes config.rope_theta back with the value it just read."""
     from transformers import AutoConfig

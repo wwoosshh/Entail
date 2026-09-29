@@ -33,6 +33,12 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   adapter, engine self-check) is drawn as a "Model" flow; the tie decision is skipped for a model without an output
   embedding; a key the config class's constructor takes by name counts as taken (RT-DETR's `backbone`,
   `use_timm_backbone` ... build its `backbone_config`); and a run where nothing could be checked says so.
+- **A RoPE repair says who wrote the old name, and what the config came from** (#28). With entail on, `import
+  unsloth` alone printed a repair of a `LlamaConfig`'s lost `theta`, and the line said only "LlamaConfig.rope_scaling
+  written after the config was built": the user could not place a config they never loaded. The line now names
+  the first caller outside transformers, huggingface_hub and entail, and whether the config was read from a model
+  file ("... written after the config was built by unsloth_zoo.… (the config was built in code, not read from a
+  model file)").
 
 ## 2.1.2
 

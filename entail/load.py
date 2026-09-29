@@ -610,17 +610,18 @@ def config_keys(engine: str, scopes: Sequence[tuple], where: str, policy: Option
 
 
 def rotary_write(engine: str, owner: str, key: str, meant, as_engine, scope: str = "",
-                 policy: Optional[Policy] = None, config=None, reader: str = "") -> List[Decision]:
+                 policy: Optional[Policy] = None, config=None, reader: str = "", origin: str = "") -> List[Decision]:
     """An old RoPE name (rope_theta, rope_scaling) written on a config after it was built. `meant` is the Rotary the
     write means - what config.json means by the same key - and `as_engine` the Rotary the model will read after the
     engine performs the write as it does. fd-rope: rope_scaling given at launch drops rope_theta -> resolved by
     writing it where the model reads it, as config.json would. With `config`, the meaning is remembered on that
     object as the user's declaration (declare_on), so the load contracts later compare against it, not the files.
     `reader`: the engine whose model reads the setting, when it is not `engine` - vLLM and SGLang apply their
-    overrides through transformers' config and run their own model code (field test, entail#26)."""
+    overrides through transformers' config and run their own model code (field test, entail#26). `origin`: who wrote
+    it and what the config came from, as the adapter could tell (field test, entail#28)."""
     at = f"[{scope}]" if scope else ""
-    declared_fact = Fact("Rotary", meant, Source("user", f"{owner}.{key} written after the config was built, read as "
-                                                         f"config.json reads it"), Certainty.DECLARED)
+    declared_fact = Fact("Rotary", meant, Source("user", f"{owner}.{key} written after the config was built{origin}, "
+                                                         f"read as config.json reads it"), Certainty.DECLARED)
     if config is not None and not scope:
         declare_on(config, declared_fact)
     chosen = Fact("Rotary", as_engine, Source("engine", f"{owner}.rope_parameters{at} after the write as {engine} "

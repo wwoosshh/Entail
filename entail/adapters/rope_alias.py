@@ -212,13 +212,30 @@ LOST_THETA = ("without rope_theta, the model that reads these settings takes its
               "vLLM and SGLang (measured)")
 
 
+def _origin(cfg):
+    """Who wrote the old name - the first caller outside transformers, huggingface_hub and entail - and whether the
+    config was read from a model file: `import unsloth` alone wrote rope_scaling on a LlamaConfig Unsloth built in
+    code, and the line did not say whose it was (field test, entail#28)."""
+    skip = ("transformers", "huggingface_hub", "entail", "copy", "dataclasses", "functools")
+    frame, caller = sys._getframe(1), ""
+    while frame is not None:
+        mod = frame.f_globals.get("__name__") or ""
+        if not mod.startswith(skip):
+            caller = f"{mod}.{frame.f_code.co_name}"
+            break
+        frame = frame.f_back
+    path = getattr(cfg, "_name_or_path", "") or ""
+    made = f"read from {path}" if path else "built in code, not read from a model file"
+    return (f" by {caller}" if caller else "") + f" (the config was {made})"
+
+
 def _decide(cfg, key, value):
     """The value to store for this write: unchanged, or converted as config.json would (load.rotary_write decides)."""
     plan = read_choice(cfg, key, value)
     if plan is None:
         return value
     policy = policies.current()
-    reader = _reader()
+    reader, origin = _reader(), _origin(cfg)
     boundary, consumer, owner = f"load:{engine}.config.{key}", f"{reader}.rotary_embedding", type(cfg).__name__
     if "unplaced" in plan:
         load.enforce([load.cannot_check(boundary, consumer, "Rotary", f"{owner}.{key}: {plan['unplaced']}", policy,
@@ -230,7 +247,8 @@ def _decide(cfg, key, value):
             decisions.append(load.cannot_check(boundary, consumer, "Rotary", "; ".join(plan["problems"]) or
                                                "not representable in vocabulary v1", policy, meaning_changing=True))
             continue
-        got = load.rotary_write(engine, owner, key, meant, as_engine, scope, policy, config=cfg, reader=reader)
+        got = load.rotary_write(engine, owner, key, meant, as_engine, scope, policy, config=cfg, reader=reader,
+                                origin=origin)
         if getattr(as_engine, "theta", 0) is None and meant.theta is not None:
             got = [d if d.verdict.value == "pass" else dataclasses.replace(d, note=LOST_THETA) for d in got]
         decisions += got
