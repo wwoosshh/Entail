@@ -25,6 +25,8 @@ TARGETS = {
     "transformers.modeling_utils": ["entail.adapters.transformers_adapter", "entail.adapters.transformers_stops"],
     "sglang.srt.model_executor.model_runner": ["entail.adapters.sglang_adapter"],
     "sglang.srt.managers.schedule_batch": ["entail.adapters.sglang_cache_contract"],
+    # ... and the batches in flight per request, which the tokens the KV check expects depend on (issue #36)
+    "sglang.srt.managers.scheduler": ["entail.adapters.sglang_cache_contract:install_inflight"],
     "vllm.model_executor.model_loader.utils": ["entail.adapters.vllm_layout", "entail.adapters.vllm_loader",
                                                "entail.adapters.vllm_pairing",
                                                "entail.adapters.vllm_kernel_reference"],
