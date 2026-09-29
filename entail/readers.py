@@ -11,6 +11,9 @@ and, for what an engine already holds (M6.1):
                 reads the header and sets the metadata aside): the same facts as the safetensors reader
   lora_modules  the modules a LoRA carries weights for, from its tensor names (Coverage of a LoRA: what it is given
                 to change); lora_base says what its metadata names as the model it was trained on, for a message
+and, for who asked for a value at a call (issue #37):
+  caller        the first caller outside the libraries a call goes through, and the installed package it belongs
+                to - a build setting or a template an engine's or app's own code passed is not the user's choice
 
 Rules every reader follows:
   - A fact is emitted only for what the artifact states; nothing is filled in from defaults.
@@ -25,6 +28,7 @@ import json
 import os
 import re
 import struct
+import sys
 from dataclasses import dataclass, field
 from typing import List
 
@@ -418,6 +422,33 @@ class HfTemplate:
             r.problems.append(f"{entry[0]} differs from {files[0][0]}, which transformers reads first; the entry "
                               f"is not what runs")
         return r
+
+
+_THROUGH = ("transformers", "huggingface_hub", "tokenizers", "entail", "copy", "dataclasses", "functools", "contextlib",
+            "abc")
+
+
+def caller(through=_THROUGH):
+    """Who made the call this runs in: (module.function of the first frame whose top-level package is not one the
+    call goes through, the installed package that frame belongs to or None). A frame is an installed package's when
+    its file lies in a site-packages or dist-packages folder, named by the folder under it (so `python -m
+    sglang.launch_server`, whose module is __main__, is still sglang); anything else - a script, a notebook, a
+    module of the user's project, an editable install - is the user's own code (None). Issue #37: SGLang passes
+    use_fast=False and Xinference its own chat template, and entail called both the user's choice."""
+    frame = sys._getframe(1)
+    while frame is not None:
+        mod = frame.f_globals.get("__name__") or ""
+        if mod.split(".")[0] not in through:
+            path = (frame.f_code.co_filename or "").replace("\\", "/")
+            package = None
+            for marker in ("/site-packages/", "/dist-packages/"):
+                if marker in path:
+                    package = path.split(marker, 1)[1].split("/", 1)[0]
+                    package = package[:-3] if package.endswith(".py") else package
+                    break
+            return f"{mod}.{frame.f_code.co_name}", package
+        frame = frame.f_back
+    return "", None
 
 
 def same_template(a, b):

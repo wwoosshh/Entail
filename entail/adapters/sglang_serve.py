@@ -6,7 +6,8 @@ its own conversation templates instead of the model's (LIBRARY_DESIGN.md 4.6, 4.
                template. A model's jinja template goes through the tokenizer's apply_chat_template and is decided
                there (transformers_template).
   read_choice  the template it renders with: a text that stands for the named conversation template, which is not
-               the declared one; named by --chat-template, the user's choice.
+               the declared one, and whether --chat-template named it (the user's choice) or SGLang chose it from
+               the model path (issue #37: DeepSeek-OCR's 'deepseek-ocr' was called named by --chat-template).
   handles      none: nothing repairs a template; the render goes on, reported (broken), or stops where the policy
                stops.
 request_contract decides the template, once per request.
@@ -29,12 +30,13 @@ def hooks():
 
 
 def read_choice(kind, *args):
-    """  "template", serving -> (a text that stands for the conversation template SGLang renders with, True: named by
-                                --chat-template)"""
+    """  "template", serving -> (a text that stands for the conversation template SGLang renders with, whether
+                                --chat-template named it)"""
     if kind == "template":
         serving, = args
         name = getattr(getattr(serving, "template_manager", None), "chat_template_name", None)
-        return f"SGLang conversation template {name!r}", True
+        arg = getattr(getattr(getattr(serving, "tokenizer_manager", None), "server_args", None), "chat_template", None)
+        return f"SGLang conversation template {name!r}", bool(arg)
     raise ValueError(f"sglang_serve.read_choice: unknown kind {kind!r}")
 
 
@@ -48,8 +50,8 @@ def _decide(serving):
     held = getattr(getattr(manager, "tokenizer", None), "chat_template", None)
     facts = request_contract.declared(model, held.get("default") if isinstance(held, dict) else held)
     text, named = read_choice("template", serving)
-    request_contract.template(TEMPLATE, CONSUMER, facts, text, named, f"{text}, named by --chat-template",
-                              policies.current())
+    how = "named by --chat-template" if named else "chosen by SGLang from the model path (no --chat-template given)"
+    request_contract.template(TEMPLATE, CONSUMER, facts, text, named, f"{text}, {how}", policies.current())
 
 
 def decide_logprobs(response):

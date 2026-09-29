@@ -282,6 +282,24 @@ def test_a_users_own_build_setting_is_the_users_choice():
     assert "legacy=False given by the user" in ds[0].note and "leading spaces" in ds[0].note
 
 
+def test_build_settings_an_engines_code_gave_are_not_the_users_choice():
+    """Issue #37: SGLang retries a tokenizer transformers built as a generic one with use_fast=False; the person
+    running it gave nothing, and entail called the difference the user's choice (unknown) while 9 of 10 probe texts
+    encoded differently. Settings an installed package's code gave (the adapter names it: readers.caller) are that
+    package's: broken, with the settings and who set them."""
+    if Tokenizer is None:
+        print("ok skipped (no tokenizers library)")
+        return
+    d, tok = folder()
+    core.set_mode("load")
+    tokenizer_contract.reset(B)
+    by = "sglang (sglang.srt.utils.hf_transformers.tokenizer._resolve_tokenizers_backend)"
+    with redirect_stdout(io.StringIO()):
+        ds = tokenizer_contract.check(B, C, d, Engine(tok, shift=3), "t", user_kwargs={"use_fast": False}, set_by=by)
+    assert len(ds) == 1 and ds[0].verdict is Verdict.BROKEN and ds[0].rule != RULES["user_choice"], ds
+    assert f"built with use_fast=False, set by {by}, not by the user" in ds[0].note, ds[0].note
+
+
 def test_the_files_padding_and_truncation_are_not_applied_by_the_reference():
     """M18.1 review, finding 5: tokenizer.json can carry padding and truncation, which an engine's encode()
     removes; the reference clears them too. BPE dropout (a training-time setting) is not compared."""
