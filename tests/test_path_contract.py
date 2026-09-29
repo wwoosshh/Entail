@@ -123,9 +123,9 @@ def test_check_records_pass_and_broken():
 
 class SamplingParams:
     def __init__(self, temperature=1.0, max_tokens=16, ignore_eos=False, logprobs=None, prompt_logprobs=None,
-                 skip_reading_prefix_cache=False):
+                 skip_reading_prefix_cache=False, seed=None):
         self.max_tokens, self.logprobs, self.prompt_logprobs = max_tokens, logprobs, prompt_logprobs
-        self.skip_reading_prefix_cache = skip_reading_prefix_cache
+        self.skip_reading_prefix_cache, self.seed = skip_reading_prefix_cache, seed
 
 
 def _next(ctx):
@@ -140,14 +140,15 @@ def _dist(ctx, chosen=None):
 class FakeLLM:
     """Greedy: the next token is a function of the context, confidently. `bug` makes one path say otherwise:
     "batched" (step 2 of a batched request), "decode" (the decode path at step 3), "cache" (a request that read the
-    prefix cache, at step 1)."""
+    prefix cache, at step 1). Like vLLM's model runner v2, it draws a seed for each request that brings none, greedy
+    or not, from the generator the caller's sampled requests draw theirs from (`drawn` counts them)."""
 
     def __init__(self, bug=None, caching=True, runner="generate", max_len=4096):
         self.bug, self.warm = bug, set()
         self.llm_engine = SimpleNamespace(
             model_config=SimpleNamespace(model="fake/model", runner_type=runner, max_model_len=max_len),
             vllm_config=SimpleNamespace(cache_config=SimpleNamespace(enable_prefix_caching=caching)))
-        self.calls = 0
+        self.calls = self.drawn = 0
 
     def reset_prefix_cache(self):
         self.warm.clear()
@@ -157,6 +158,7 @@ class FakeLLM:
         outs = []
         warm = set(self.warm)              # blocks computed in this batch are not read by it (as an engine's step)
         for p in prompts:
+            self.drawn += sp.seed is None
             ids = p["prompt_token_ids"] if isinstance(p, dict) else [ord(c) % 90 + 3 for c in p[:60]]
             read = not sp.skip_reading_prefix_cache and tuple(ids[:30]) in warm
             self.warm.add(tuple(ids[:30]))
@@ -199,6 +201,18 @@ def test_a_healthy_engine_passes_all_three_pairs():
     assert [d.verdict for d in ds] == [Verdict.PASS] * 3, ds
     assert [d.chosen.value.paths for d in ds] == ["decode_prefill", "alone_batched", "cold_cache"]
     assert not llm.warm, "the prefix cache is reset after the probes"
+
+
+def test_the_probes_draw_nothing_from_the_engines_generator():
+    """Issue #39: vLLM draws a seed for every request without one from the worker's NumPy generator, and a seeded
+    trainer's sampled requests draw theirs from it next; each probe brings its own, so the draws the caller gets are
+    the ones it would get without entail."""
+    from entail.adapters import vllm_paths as vp
+
+    vp.reset()
+    llm = FakeLLM()
+    decided(lambda: _with_fake_vllm(lambda: vp.decide(llm)))
+    assert llm.calls == 8 and llm.drawn == 0, (llm.calls, llm.drawn)
 
 
 def test_each_disagreeing_path_is_named():
