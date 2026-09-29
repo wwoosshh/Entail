@@ -52,6 +52,16 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   through SGLang 0.5.20's own retry code on the CPU with Phi-3.5-mini's folder, where the slow tokenizer encodes
   differently from `tokenizer.json`: 2.1.3 said `unknown`, "given by the user"; now `broken`, "set by sglang
   (sglang.srt.utils.hf_transformers.tokenizer._load_tokenizer_by_declared_class)".
+- **A launch in which nothing was recorded says so; Xinference in INSTALL** (#34). Xinference runs each model with
+  the Python of a virtual environment of its own by default; that Python does not read the server environment's
+  start-up hook and the model process gets no `ENTAIL` variables, so entail never reached the model, and its start
+  line was all a user saw. Now, when a launch ends and no process of it recorded a decision (no record file in its
+  folder written since it began), the process that started it says so on stderr: `[entail] was on, but no process
+  of this run recorded a decision ...` (only that process, on a normal exit; `ENTAIL_QUIET=start` leaves it out with
+  the start line). INSTALL (en, ko) has a Xinference section - launch models with `--disable-virtual-env` - and the
+  field test's run in its checked list; README says which processes the hook reaches, and `entail doctor` says the
+  hook reaches child processes "that run this environment's Python". Checked on the CPU: a program whose child runs
+  a Python without the hook ends with the line; one whose child records a decision does not.
 
 ## 2.1.3
 

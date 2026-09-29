@@ -156,12 +156,50 @@ def test_turning_on_says_so_once_per_launch_on_stderr():
             mod.activate()
         assert err.getvalue() == "", err.getvalue()
     finally:
+        import atexit
+
+        atexit.unregister(mod._reached_nothing)      # the launch these activations named ends with the test
         sys.meta_path[:] = keep_meta
         for k, v in keep.items():
             if v is None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+def test_a_launch_that_recorded_nothing_says_so_at_exit():
+    """Field test, entail#34: under Xinference's per-model virtual environments the model process never ran entail,
+    and the start line was all there was. At the exit of the process that started the launch, a launch with no record
+    written since it began says so in one line on stderr; one with a record, or a forked child, says nothing."""
+    import io
+    import tempfile
+    import time
+    from contextlib import redirect_stderr
+
+    mod = _load()
+    folder = os.path.join(tempfile.mkdtemp(), "entail_logs")    # never made: nothing reached it
+    keep = os.environ.pop("ENTAIL_RECORD", None)
+    try:
+        since = time.time()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            mod._reached_nothing(folder, since, os.getpid())
+        assert err.getvalue().startswith("[entail] was on, but no process of this run recorded a decision"), err
+        assert folder in err.getvalue() and "INSTALL.md" in err.getvalue()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            mod._reached_nothing(folder, since, os.getpid() + 1)          # a forked child: not its line
+        assert err.getvalue() == "", err.getvalue()
+        os.makedirs(folder)
+        with open(os.path.join(folder, "record-2026-09-30.jsonl"), "w", encoding="utf-8") as f:
+            f.write("{}\n")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            mod._reached_nothing(folder, since - 1, os.getpid())
+        assert err.getvalue() == "", "a record of this launch: nothing to say"
+    finally:
+        if keep is not None:
+            os.environ["ENTAIL_RECORD"] = keep
 
 
 if __name__ == "__main__":

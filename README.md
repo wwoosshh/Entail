@@ -86,7 +86,8 @@ Docker - is in [INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL
   folders (`tokenizer_ids.json`, `vocab_sources.json`) and the page's two settings (`safe_mode.json`, `nodes.json`).
   `ENTAIL_LOG_DIR=off` writes nothing; `ENTAIL_LOG_DIR=<folder>` moves it. At start one line on stderr says entail is
   on and where it writes. `ENTAIL_QUIET=unknown` keeps the non-blocking `unknown` lines off the console,
-  `ENTAIL_QUIET=start` that first line (both: `unknown,start`).
+  `ENTAIL_QUIET=start` that first line and the closing line of a launch that recorded nothing (both:
+  `unknown,start`).
 - The adapters hook internal functions of the engine versions they were measured on, listed below. On another
   version an adapter that cannot install says so once (`could not install ...`) and stays out; the rest run.
   `entail doctor` prints what is installed and what would hook.
@@ -188,7 +189,10 @@ draft records) are found through `ENTAIL_MANIFESTS`. Only a pinned manifest coun
 vLLM and SGLang run the model in processes they start themselves. `pip install` puts one file,
 `entail-autoinstall.pth`, into site-packages; Python reads it at every start-up. Its single line checks the
 environment and does nothing unless `ENTAIL` is set. `entail hook status|install|uninstall` shows or manages it
-(an editable install does not place it — run `entail hook install`).
+(an editable install does not place it — run `entail hook install`). A process that runs the Python of another
+environment does not read the file: Xinference's per-model virtual environments are out of reach unless the model is
+launched with `--disable-virtual-env` ([INSTALL.md](INSTALL.md#xinference)). When a launch ends and no process of it
+recorded anything, the process that started it says so in one line on stderr.
 
 ## The platform (2.0)
 
@@ -627,7 +631,7 @@ For 1.0 every measurement of the development milestones was run again on the fin
 | `ENTAIL_ONLY` | e.g. `rope_alias,sglang_adapter` | install only these adapters |
 | `ENTAIL_SKIP` | e.g. `comfyui:install_nodes` | leave out these entries (a bare name leaves out the whole adapter), to measure the rest without them |
 | `ENTAIL_VERBOSE` | `1` | print each adapter as it is installed |
-| `ENTAIL_QUIET` | `unknown`, `start` (comma-separated) | `unknown`: keep non-blocking `unknown` decisions off the console; they stay in the log and the record, and the console says so once per process. `start`: leave out the line that says entail is on |
+| `ENTAIL_QUIET` | `unknown`, `start` (comma-separated) | `unknown`: keep non-blocking `unknown` decisions off the console; they stay in the log and the record, and the console says so once per process. `start`: leave out the line that says entail is on, and the closing line of a launch that recorded nothing |
 | `ENTAIL_SOURCE` | `1` | also compare loaded weights with the checkpoint file (vLLM, a little I/O at start-up) |
 | `ENTAIL_NO_PATHS` | `1` | vLLM: leave out the start-up comparison of the engine's own paths (most of entail's load cost there) |
 | `ENTAIL_PATHS` | `1` | SGLang: run the start-up comparison of the engine's own paths (off by default: its probes would be SGLang's first prefills) |

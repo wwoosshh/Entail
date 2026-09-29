@@ -91,7 +91,7 @@ def _targets():
 def doctor(_args):
     print(f"entail {__version__}  python {platform.python_version()}  ({sys.executable})")
     state, p = hook.status()
-    note = {"installed": "ENTAIL=load reaches child processes",
+    note = {"installed": "ENTAIL=load reaches the child processes that run this environment's Python",
             "absent": "run `entail hook install` (editable installs do not place it)",
             "different": "the file exists but is not the one this version writes; run `entail hook install`"}[state]
     print(f"start-up hook: {state}  {p}\n  {note}")
