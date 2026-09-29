@@ -26,6 +26,13 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   base, 10,000 for Llama on vLLM and SGLang. README's measured table names the transformers version of each row and
   that both used the engines' offline APIs; a field test on SGLang's server with the same versions saw no drop,
   which is not explained yet (SGLang's config code, run on CPU, does lose the value there too).
+- **A model that is not an LLM is not treated as one** (#27). Docling's layout model, the RT-DETR detector, run
+  through transformers: the page drew it as an "LLM" flow, the console reported tied embeddings for a model with
+  no output head, and config.json's backbone keys as read by nothing, and with nothing checked the header said
+  "all 0 checked points were fine". Now a launch with none of an LLM's stages (tokenizer, request, response, cache,
+  adapter, engine self-check) is drawn as a "Model" flow; the tie decision is skipped for a model without an output
+  embedding; a key the config class's constructor takes by name counts as taken (RT-DETR's `backbone`,
+  `use_timm_backbone` ... build its `backbone_config`); and a run where nothing could be checked says so.
 
 ## 2.1.2
 

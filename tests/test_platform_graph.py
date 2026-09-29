@@ -216,6 +216,21 @@ def test_a_repair_is_carried_to_the_page():
     assert all(n["repairs"] == [] for nid, n in nodes.items() if nid != where), nodes
 
 
+def test_a_model_without_llm_stages_is_not_drawn_as_an_llm():
+    """Field test, entail#27: Docling's RT-DETR detector, run through transformers, showed as an "LLM" flow. A launch
+    whose LLM-flow stages are only the ones every transformers model has (config, weights, attention) gets the
+    neutral name; one with a tokenizer, a request, a cache ... keeps "LLM"."""
+    detector = [{"v": 2, "t": 1.0, "run": "r", "pid": 1, "boundary": "load:transformers.config", "verdict": "unknown",
+                 "name": "Coverage"},
+                {"v": 2, "t": 2.0, "run": "r", "pid": 1, "boundary": "load:transformers.loader", "verdict": "unknown",
+                 "name": "ModelProps"}]
+    g = graph.graph(detector)
+    assert [(f["id"], f["en"], f["ko"]) for f in g["flows"]] == [("llm", "Model", "모델")], g["flows"]
+    llm = graph.graph(detector + [{"v": 2, "t": 3.0, "run": "r", "pid": 1, "boundary": "load:transformers.tokenizer",
+                                   "verdict": "pass", "name": "Tokenization"}])
+    assert [(f["id"], f["en"]) for f in llm["flows"]] == [("llm", "LLM")], llm["flows"]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

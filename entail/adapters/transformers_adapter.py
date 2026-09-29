@@ -103,6 +103,16 @@ def tied_in_memory(model):
     return w_out is w_in or w_out.data_ptr() == w_in.data_ptr()
 
 
+def has_head(model):
+    """Whether the model has an output embedding that could be tied to its input embedding: a detector or an encoder
+    has none, and a tie decision says nothing about it (field test, entail#27: Docling's RT-DETR got a tied-embeddings
+    line); None when it cannot be read."""
+    try:
+        return model.get_output_embeddings() is not None
+    except Exception:  # noqa: BLE001 - a model without the accessor: not known
+        return None
+
+
 def weights_there(model, args, kwargs):
     """Whether this tie_weights call is the one with the weights: from_pretrained's, which passes missing_keys after
     loading (transformers 5.17 modeling_utils), or any call on a model whose parameters are not on the meta device
@@ -127,7 +137,8 @@ def _install_tie(PreTrainedModel):
             def decide():
                 load.enforce(load.model_contracts(engine, getattr(config, "_name_or_path", None), config,
                                                   loader_ties(config), policies.current(),
-                                                  compares_head=compares_head, tied_in_memory=tied_in_memory(self)))
+                                                  compares_head=compares_head, tied_in_memory=tied_in_memory(self),
+                                                  has_head=has_head(self)))
 
             load.safely(f"load:{engine}.loader", f"{engine}.loader", "ModelProps", decide)
         return out
