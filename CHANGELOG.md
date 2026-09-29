@@ -70,7 +70,8 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   OpenVINO, MLX): when one has finished importing (or was imported before entail was turned on), the process
   records one `unknown` at `engine:<module>.unwatched` - "this process loaded CTranslate2 4.8.2 (ctranslate2), which
   entail does not watch: what it computes is not among these results" - once per process. It is a statement of
-  coverage, not a check of the engine. The page draws it in a node of its own ("보지 않는 엔진", flow "entail이 보지
+  coverage, not a check of the engine, and never stops a run (not in debug mode either: it runs inside the program's
+  import). The page draws it in a node of its own ("보지 않는 엔진", flow "entail이 보지
   않는 곳") and names the engine in the run's title, so a run whose only record is this line is listed. Checked on
   the CPU with a stand-in `ctranslate2` package: imported with entail on, and before `entail.enable()`, the line is
   printed and recorded, and the page's API lists the run as `unknown` with the engine `ctranslate2`. None of these
