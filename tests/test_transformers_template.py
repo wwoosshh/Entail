@@ -22,16 +22,19 @@ from entail.contracts import RULES, Verdict  # noqa: E402
 DECLARED = "{% for m in messages %}<|{{ m['role'] }}|>{{ m['content'] }}{% endfor %}"
 OTHER = "{% for m in messages %}[{{ m['role'] }}] {{ m['content'] }}{% endfor %}"
 ASK = [{"role": "user", "content": "hi there"}]
+# a model's template that writes a line per role and content, and an app's copy that drops earlier reasoning
+LINES = "{% for m in messages %}<|{{ m['role'] }}|>\n{{ m['content'] }}\n{% endfor %}"
+LINES_DROP = "{% for m in messages %}<|{{ m['role'] }}|>\n{{ m['content'].split('</think>')[-1] }}\n{% endfor %}"
 
 
-def tokenizer_folder():
+def tokenizer_folder(template=DECLARED):
     from tokenizers import Tokenizer, models, pre_tokenizers
     from transformers import PreTrainedTokenizerFast
 
     tok = Tokenizer(models.WordLevel({"[UNK]": 0, "hi": 1, "there": 2}, unk_token="[UNK]"))
     tok.pre_tokenizer = pre_tokenizers.Whitespace()
     fast = PreTrainedTokenizerFast(tokenizer_object=tok, unk_token="[UNK]")
-    fast.chat_template = DECLARED
+    fast.chat_template = template
     d = tempfile.mkdtemp(prefix="entail_template_")
     fast.save_pretrained(d)
     return d
@@ -40,8 +43,8 @@ def tokenizer_folder():
 class Hooked:
     """The hook installed, entail on, fresh counts; everything undone afterwards."""
 
-    def __init__(self, mode="load"):
-        self.mode = mode
+    def __init__(self, mode="load", template=DECLARED):
+        self.mode, self.template = mode, template
 
     def __enter__(self):
         from transformers import AutoTokenizer
@@ -49,7 +52,7 @@ class Hooked:
         tt.install()
         request_contract.reset()
         core.set_mode(self.mode)
-        self.folder = tokenizer_folder()
+        self.folder = tokenizer_folder(self.template)
         self.tok = AutoTokenizer.from_pretrained(self.folder)
         self.n = len(load.LEDGER.decisions)
         return self
@@ -84,6 +87,38 @@ def test_a_template_passed_in_that_is_not_the_declared_one_is_reported_and_the_c
         assert text == "[user] hi there", text
         d, = h.made()
         assert d.verdict is Verdict.BROKEN and d.rule == RULES["user_choice"] and d.chosen.source.kind == "user", d
+
+
+def test_a_template_of_its_own_that_renders_the_same_prompt_passes():
+    """Issue #35: Xinference passes its own copy of the model's template to apply_chat_template. Held to the prompt it
+    renders for the request, not to its text: the same prompt is what the request means, and the render goes on."""
+    with Hooked() as h:
+        text = quiet(lambda: h.tok.apply_chat_template(ASK, chat_template="{# the app's copy #}" + DECLARED,
+                                                       tokenize=False))
+        assert text == "<|user|>hi there", text
+        s = request_contract.stats(tt.TEMPLATE)
+        assert s["checks"] == 1 and s["passed"] == {"template": 1} and not h.made(), (s, h.made())
+        ids = quiet(lambda: h.tok.apply_chat_template(ASK, chat_template="{# the app's copy #}" + DECLARED))
+        assert request_contract.stats(tt.TEMPLATE)["passed"] == {"template": 2} and not h.made(), ids
+
+
+def test_a_template_of_its_own_is_broken_where_its_prompt_parts_from_the_declared_one():
+    """The app's copy differs on one kind of conversation only: an earlier assistant turn with a <think> block, which
+    the copy drops and the model's template keeps (Xinference's Qwen3 template, #35). The line says where the prompts
+    part; a template the caller passed stays the caller's choice, and the call goes on with it."""
+    conv = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "<think>r</think>b"},
+            {"role": "user", "content": "c"}]
+    with Hooked(template=LINES) as h:
+        quiet(lambda: h.tok.apply_chat_template(ASK, chat_template=LINES_DROP, tokenize=False))
+        assert not h.made(), "one user turn: the same prompt"
+        text = quiet(lambda: h.tok.apply_chat_template(conv, chat_template=LINES_DROP, tokenize=False))
+        assert text == "<|user|>\na\n<|assistant|>\nb\n<|user|>\nc\n", text
+        d, = h.made()
+        assert d.verdict is Verdict.BROKEN and d.rule == RULES["user_choice"] and d.chosen.source.kind == "user", d
+        assert "the prompts part at line 4: the declared template's '<think>r</think>b', this one's 'b'" in \
+            d.chosen.source.where, d.chosen.source.where
+        batch = quiet(lambda: h.tok.apply_chat_template([ASK, conv], chat_template=LINES_DROP, tokenize=False))
+        assert len(batch) == 2 and "conversation 2, line 4" in h.made()[-1].chosen.source.where
 
 
 def test_where_the_policy_stops_the_call_is_refused_before_it_renders():

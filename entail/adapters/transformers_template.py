@@ -12,8 +12,11 @@ without any decision).
                the template (a reasoning_content, reasoning or thinking field, or a <think> block in its content).
   handles      none: nothing repairs a template. One that is not the declared one is reported (broken) and the call
                goes on; where the policy stops, the call raises before anything is rendered.
-request_contract decides the template and the reasoning history, once per call. A processor's apply_chat_template
-(multimodal models) is not hooked.
+request_contract decides the template and the reasoning history, once per call. A template of another text than the
+declared one is held to the prompt it renders (issue #35: Xinference passes its own copy of Qwen3's template, which
+renders the same prompt unless an earlier assistant turn has a <think> block), so the hook gives the contract a way
+to render the call again - with the template it names, untokenized - and the template the tokenizer holds. A
+processor's apply_chat_template (multimodal models) is not hooked.
 """
 from .. import core, policies, request_contract
 from .base import Hook
@@ -75,7 +78,7 @@ def handles():
     return {}
 
 
-def _decide(tokenizer, conversation, tools, chat_template):
+def _decide(tokenizer, conversation, tools, chat_template, render=None):
     model = str(getattr(tokenizer, "name_or_path", "") or "")
     held = getattr(tokenizer, "chat_template", None)
     facts = request_contract.declared(model, held.get("default") if isinstance(held, dict) else held)
@@ -87,7 +90,21 @@ def _decide(tokenizer, conversation, tools, chat_template):
     how = "passed to apply_chat_template" if named else "the tokenizer's own"
     other = "; a named template other than the default" if text is None else ""
     request_contract.template(TEMPLATE, CONSUMER, facts, text, named, f"transformers chat template, {how}{other}",
-                              policy)
+                              policy, render=render, held=held.get("default") if isinstance(held, dict) else held)
+
+
+def _renderer(orig, tokenizer, conversation, args, kwargs):
+    """This call rendered again, untokenized: template text (None: the one the call names) -> the prompt."""
+    import inspect
+
+    def render(template=None):
+        bound = inspect.signature(orig).bind(tokenizer, conversation, *args, **kwargs)
+        bound.arguments.update(tokenize=False, return_assistant_tokens_mask=False)
+        if template is not None:
+            bound.arguments["chat_template"] = template
+        return orig(*bound.args, **bound.kwargs)
+
+    return render
 
 
 def install():
@@ -102,7 +119,8 @@ def install():
         if core.mode() in ("load", "debug") and not request_contract.decided_elsewhere():
             tools = kwargs.get("tools", args[0] if len(args) > 0 else None)
             chat_template = kwargs.get("chat_template", args[2] if len(args) > 2 else None)
-            request_contract.guarded(TEMPLATE, CONSUMER, _decide, self, conversation, tools, chat_template)
+            request_contract.guarded(TEMPLATE, CONSUMER, _decide, self, conversation, tools, chat_template,
+                                     _renderer(orig, self, conversation, args, kwargs))
         return orig(self, conversation, *args, **kwargs)
 
     PreTrainedTokenizerBase.apply_chat_template = apply_chat_template

@@ -8,7 +8,9 @@ server does with one request; the rules are here, and they run once per request,
   template  the chat template the request is rendered with, against the declared one. A template the request or the
             server's command line names is the user's choice: never overridden, and broken when it contradicts the
             declaration. One the engine picked by itself (a processor's, a fallback) is broken too: no resolution is
-            registered
+            registered. Where the adapter can render the request again and the engine holds the declared template,
+            a template of another text is held to the prompt: the same prompt as the declared template's for this
+            request passes, and a different one is broken with where the two prompts part (issue #35)
   history   declared keep: every earlier assistant turn reaches the template with its reasoning (market L13: an
             OpenAI-compatible integration dropped it; Tau² 87 -> 64). A turn the adapter cannot read leaves the
             verdict unknown
@@ -198,13 +200,55 @@ def _skip(boundary: str) -> list:
 
 
 def template(boundary: str, consumer: str, facts, text: Optional[str], explicit: bool, where: str,
-             policy=None) -> list:
+             policy=None, render=None, held: Optional[str] = None) -> list:
     """The chat template a request is rendered with (its text; None when the adapter cannot name it) against the
-    declared one. `explicit`: the request or the server's command line named it, the user's choice."""
+    declared one. `explicit`: the request or the server's command line named it, the user's choice. `render`, when
+    the adapter can render this request again: template text (None: the one used) -> the prompt; `held`: the template
+    the engine holds for the model. When `held` is the declared template and the one used is another text, the two
+    prompts are compared instead of the two texts."""
     contract = Contract(boundary, consumer, ("Template",), ("Template",))
-    return _settle(boundary, "template", decide(contract, {"Template": _projected(facts, "chat_template_sha256")},
-                                                {"Template": _chosen_template(text, explicit, where)},
+    declared_facts = _projected(facts, "chat_template_sha256")
+    chosen = _chosen_template(text, explicit, where)
+    if render is not None and text is not None and held and held != text:
+        shas = {f.value.chat_template_sha256 for f in declared_facts if f.value is not None}
+        if _sha(held) in shas and _sha(text) not in shas:
+            chosen = _rendered(chosen, held, render, where) or chosen
+    return _settle(boundary, "template", decide(contract, {"Template": declared_facts}, {"Template": chosen},
                                                 policy or policies.current()))
+
+
+def _rendered(chosen: Fact, held: str, render, where: str) -> Optional[Fact]:
+    """The chosen Template told by this request's prompts (issue #35): the declared template's prompt and the one
+    used. The same prompt: the declared template's hash, from a template of its own; another: the template used, with
+    where the prompts part. None when either cannot render the request (the texts are compared then)."""
+    try:
+        want, got = render(held), render(None)
+    except Exception:  # noqa: BLE001 - a template that cannot render this request says nothing about its prompt
+        return None
+    own = chosen.value.chat_template_sha256[:12]
+    if want == got:
+        return Fact("Template", Template(chat_template_sha256=_sha(held)),
+                    Source(chosen.source.kind, f"{where}: a template of its own (sha256 {own}...) that renders this "
+                                               f"request's prompt as the declared template does"), Certainty.VERIFIED)
+    return Fact("Template", chosen.value, Source(chosen.source.kind, f"{where}; {_parting(want, got)}"),
+                chosen.certainty)
+
+
+def _parting(want, got) -> str:
+    """Where two renders of a request part: the conversation (a batch renders several), the line, and a few characters
+    of each from the first that differs."""
+    which = ""
+    if isinstance(want, (list, tuple)) and isinstance(got, (list, tuple)):
+        i = next((k for k, (a, b) in enumerate(zip(want, got)) if a != b), min(len(want), len(got)))
+        which = f"conversation {i + 1}, "
+        want, got = (want[i] if i < len(want) else ""), (got[i] if i < len(got) else "")
+    a, b = str(want).split("\n"), str(got).split("\n")
+    n = next((k for k, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+    x, y = (a[n] if n < len(a) else "(nothing)"), (b[n] if n < len(b) else "(nothing)")
+    c = next((k for k, (p, q) in enumerate(zip(x, y)) if p != q), min(len(x), len(y)))
+    cut = max(0, c - 20)
+    return (f"the prompts part at {which}line {n + 1}: the declared template's {x[cut:c + 40]!r}, this one's "
+            f"{y[cut:c + 40]!r}")
 
 
 def history(boundary: str, consumer: str, facts, turns: Sequence[Optional[bool]], where: str, policy=None) -> list:
