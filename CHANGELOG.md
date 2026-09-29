@@ -16,6 +16,18 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   the worker's NumPy state, with the fix no random-number state (NumPy, Python, torch, CUDA); with the engine in the
   caller's process, as TRL's colocate mode runs it, all 8 steps match a run without entail (2.1.3: 7 of 8 differ);
   with the engine in its own process, the 6 steps where two runs without entail agree with each other match too.
+- **SGLang: the KV check no longer says `broken` for a request that others joined** (#36). SGLang's overlap
+  scheduler (its default) prepares a decode step before it processes the last batch's result, so the token that
+  batch sampled is not in the request's `output_ids` yet, and the check counted one such token for every request. A
+  request whose decoding a prefill of other requests interrupted has none pending - its result was processed in
+  between - and was said to hold one slot too few ("holds 280 KV slots but the sequence has 281 tokens"), once per
+  such request; with `--disable-overlap-schedule` nothing is ever pending, and every request was reported. The
+  adapter now counts, per request, the batches launched with it whose results are not processed yet (it wraps the
+  scheduler's `run_batch` and `process_batch_result`, which every event loop goes through) and expects exactly that
+  many tokens beyond `output_ids`, so a slot short is still caught. Measured on SGLang 0.5.20 with Llama 3.2 3B,
+  three rounds of a 300-token generation joined by three short requests and then three requests one after another:
+  2.1.3 recorded 4 `broken` with the overlap scheduler and 16 (every request) without it, the fix 0 and 0. The field
+  test's case (DeepSeek-OCR, the first request's first decode) fits the same pattern; it was not re-run here.
 
 ## 2.1.3
 
