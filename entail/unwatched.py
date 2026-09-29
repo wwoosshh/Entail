@@ -30,6 +30,8 @@ def noted() -> int:
     """Record the unwatched engines imported in this process that are not noted yet. Returns how many were noted
     now. Called by the start-up hook when one of their modules has finished importing (and when entail is turned
     on after it was imported), so it looks at every engine of the table, not only the one just imported."""
+    from dataclasses import replace
+
     from . import load, policies
 
     decisions = []
@@ -40,9 +42,12 @@ def noted() -> int:
         _NOTED.add(module)
         version = getattr(mod, "__version__", None)
         what = f"{label} {version}" if isinstance(version, str) else label
-        decisions.append(load.cannot_check(BOUNDARY.format(module=module), module, "Coverage",
-                                           f"this process loaded {what} ({module}), which entail does not watch: "
-                                           f"what it computes is not among these results", policies.current()))
+        d = load.cannot_check(BOUNDARY.format(module=module), module, "Coverage",
+                              f"this process loaded {what} ({module}), which entail does not watch: what it "
+                              f"computes is not among these results", policies.current())
+        # never blocking, not even in debug mode: this runs inside the program's import, where a stop would break
+        # the import instead of saying more (the hook would report it as an adapter that could not install)
+        decisions.append(replace(d, blocking=False))
     if decisions:
         load.enforce(decisions)
     return len(decisions)

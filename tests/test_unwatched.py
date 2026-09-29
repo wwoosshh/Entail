@@ -15,15 +15,16 @@ from entail.contracts import RULES, Verdict  # noqa: E402
 from entail.platform import graph  # noqa: E402
 
 
-def noted(**modules):
-    """unwatched.noted() with stand-in modules in sys.modules; (how many, the decisions, what it printed)."""
+def noted(mode="load", **modules):
+    """unwatched.noted() with stand-in modules in sys.modules, in `mode`; (how many, the decisions, what it
+    printed)."""
     was = {n: sys.modules.get(n) for n in modules}
     for n, version in modules.items():
         m = types.ModuleType(n)
         if version is not None:
             m.__version__ = version
         sys.modules[n] = m
-    core.set_mode("load")
+    core.set_mode(mode)
     k = len(load.LEDGER.decisions)
     out = io.StringIO()
     try:
@@ -51,6 +52,10 @@ def test_an_engine_entail_does_not_watch_is_said_once_per_process():
     assert "unknown at engine:ctranslate2.unwatched" in printed, printed
     n, ds, _ = noted(ctranslate2="4.8.2")
     assert n == 0 and ds == [], "once per process"
+    unwatched.reset()
+    n, ds, _ = noted(mode="debug", ctranslate2="4.8.2")   # debug stops at an unknown, not inside the import
+    assert n == 1 and not ds[0].blocking, ds
+    unwatched.reset()
 
 
 def test_every_engine_of_the_table_present_is_said_and_nothing_else():
