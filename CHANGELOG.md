@@ -4,7 +4,12 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
-## Unreleased
+## 2.1.3
+
+Released 2026-09-29. Fixes from the field test of 2.1.2 (issues #21, #24, #26, #27 and #28, found using entail from
+the docs only). The release's own check now tells a failed upload from PyPI's index being late: it confirms the
+upload in the version's JSON, waits for the index, and otherwise checks the uploaded wheel by its URL and sha256
+(RELEASING.md).
 
 - **diffusers: the prediction is decided where the pipeline samples, not at the load** (#24, #21). entail rebuilt
   the pipeline's scheduler right after `from_single_file`, and programs that set up a sampler of their own after
@@ -41,6 +46,22 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   the first caller outside transformers, huggingface_hub and entail, and whether the config was read from a model
   file ("... written after the config was built by unsloth_zoo.… (the config was built in code, not read from a
   model file)").
+
+**Known issues** (field test of 2.1.2, open)
+- A training run with vLLM inside the trainer (TRL GRPO, `vllm_mode="colocate"`) changes from its sixth step
+  when entail is on, deterministically, with every decision a pass: the start-up path check's probe requests
+  leave something behind in the engine the trainer then samples from (#39). `ENTAIL_NO_PATHS=1` skips the check
+  and the run is then identical to one without entail.
+- SGLang: `broken at container:sglang.prepare_for_decode` ("holds N KV slots but the sequence has N+1 tokens")
+  once when new requests join a request that is decoding; the outputs are right. Reproduced with Llama 3.2 3B
+  text requests in every overlapping round and never with the same requests one after another (#36).
+- A serving app's own chat template is reported `broken` on every request even when it renders the same prompt
+  (Xinference, #35), and choices an engine makes in its own code are called the user's (SGLang's `use_fast=False`
+  and conversation template, Xinference's template; #37).
+- Xinference's per-model virtual environments are not reached: the start line is all there is. Its
+  `--disable-virtual-env` (or `XINFERENCE_ENABLE_VIRTUAL_ENV=0`) runs the model where entail is (#34).
+- When entail watches only a side model (WhisperX's alignment model, MinerU's layout detector), nothing says that
+  the main engine - CTranslate2, llama.cpp - was not looked at (#38).
 
 ## 2.1.2
 
