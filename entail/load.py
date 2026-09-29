@@ -610,12 +610,14 @@ def config_keys(engine: str, scopes: Sequence[tuple], where: str, policy: Option
 
 
 def rotary_write(engine: str, owner: str, key: str, meant, as_engine, scope: str = "",
-                 policy: Optional[Policy] = None, config=None) -> List[Decision]:
+                 policy: Optional[Policy] = None, config=None, reader: str = "") -> List[Decision]:
     """An old RoPE name (rope_theta, rope_scaling) written on a config after it was built. `meant` is the Rotary the
     write means - what config.json means by the same key - and `as_engine` the Rotary the model will read after the
     engine performs the write as it does. fd-rope: rope_scaling given at launch drops rope_theta -> resolved by
     writing it where the model reads it, as config.json would. With `config`, the meaning is remembered on that
-    object as the user's declaration (declare_on), so the load contracts later compare against it, not the files."""
+    object as the user's declaration (declare_on), so the load contracts later compare against it, not the files.
+    `reader`: the engine whose model reads the setting, when it is not `engine` - vLLM and SGLang apply their
+    overrides through transformers' config and run their own model code (field test, entail#26)."""
     at = f"[{scope}]" if scope else ""
     declared_fact = Fact("Rotary", meant, Source("user", f"{owner}.{key} written after the config was built, read as "
                                                          f"config.json reads it"), Certainty.DECLARED)
@@ -625,7 +627,8 @@ def rotary_write(engine: str, owner: str, key: str, meant, as_engine, scope: str
                                                         f"performs it"), Certainty.VERIFIED) if as_engine is not None \
         else Fact("Rotary", None, Source("engine", f"{owner}.rope_parameters{at}"), Certainty.UNKNOWN)
     convert = Resolution("write the old name where the model reads it, as config.json would", "rope_write_as_file")
-    contract = Contract(f"load:{engine}.config.{key}{at}", f"{engine}.rotary_embedding", ("Rotary",), ("Rotary",))
+    contract = Contract(f"load:{engine}.config.{key}{at}", f"{reader or engine}.rotary_embedding", ("Rotary",),
+                        ("Rotary",))
     return decide(contract, {"Rotary": declared_fact}, {"Rotary": chosen}, policy, resolutions={"Rotary": [convert]})
 
 

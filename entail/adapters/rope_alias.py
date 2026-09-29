@@ -28,6 +28,7 @@ attribute itself), and configs whose rope_parameters has not been built yet (the
 import copy
 import dataclasses
 import functools
+import sys
 
 from .. import core, load, policies
 from ..readers import rotary_of
@@ -194,13 +195,31 @@ def handles(cfg, key, plan):
     return {"rope_write_as_file": write_as_file}
 
 
+def _reader():
+    """The engine whose model reads the RoPE settings in this process. vLLM and SGLang apply their overrides through
+    this write on transformers' config and then run their own model code, which reads rope_parameters as
+    transformers' does (SGLang 0.5.20's Llama: rope_parameters.get("rope_theta", 10000)); a user asked whether
+    "resolved" meant their engine or only transformers' config object (field test, entail#26)."""
+    for name in ("sglang", "vllm"):
+        if name in sys.modules:
+            return name
+    return engine
+
+
+# What a model does when a write has left rope_parameters without rope_theta (field test, entail#26: "theta None"
+# did not say it). Measured: vLLM 0.30 and SGLang 0.5.20 run Llama 3.2 then exactly as with an explicit 10,000.
+LOST_THETA = ("without rope_theta, the model that reads these settings takes its default base: 10,000 for Llama on "
+              "vLLM and SGLang (measured)")
+
+
 def _decide(cfg, key, value):
     """The value to store for this write: unchanged, or converted as config.json would (load.rotary_write decides)."""
     plan = read_choice(cfg, key, value)
     if plan is None:
         return value
     policy = policies.current()
-    boundary, consumer, owner = f"load:{engine}.config.{key}", f"{engine}.rotary_embedding", type(cfg).__name__
+    reader = _reader()
+    boundary, consumer, owner = f"load:{engine}.config.{key}", f"{reader}.rotary_embedding", type(cfg).__name__
     if "unplaced" in plan:
         load.enforce([load.cannot_check(boundary, consumer, "Rotary", f"{owner}.{key}: {plan['unplaced']}", policy,
                                         meaning_changing=True)])
@@ -211,7 +230,10 @@ def _decide(cfg, key, value):
             decisions.append(load.cannot_check(boundary, consumer, "Rotary", "; ".join(plan["problems"]) or
                                                "not representable in vocabulary v1", policy, meaning_changing=True))
             continue
-        decisions += load.rotary_write(engine, owner, key, meant, as_engine, scope, policy, config=cfg)
+        got = load.rotary_write(engine, owner, key, meant, as_engine, scope, policy, config=cfg, reader=reader)
+        if getattr(as_engine, "theta", 0) is None and meant.theta is not None:
+            got = [d if d.verdict.value == "pass" else dataclasses.replace(d, note=LOST_THETA) for d in got]
+        decisions += got
     done = load.resolve(decisions, handles(cfg, key, plan))
     load.enforce(decisions)
     return done.get("rope_write_as_file", value)

@@ -115,6 +115,32 @@ def test_without_entail_the_value_is_lost():
         rope_alias.uninstall()
 
 
+def test_the_line_names_the_engine_that_reads_it():
+    """Field test, entail#26: under SGLang the line said "transformers.rotary_embedding uses Rotary(theta=None)", and
+    a user could not tell whether SGLang would compute with the wrong base. SGLang's and vLLM's own model code reads
+    the setting, so the line names the engine running here, and says what a lost rope_theta turns into."""
+    from transformers import LlamaConfig
+
+    llama3 = {"rope_type": "llama3", "factor": 32.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
+              "original_max_position_embeddings": 8192}
+    for present, reader in ((None, "transformers"), ("sglang", "sglang"), ("vllm", "vllm")):
+        added = present is not None and present not in sys.modules
+        if added:
+            sys.modules[present] = type(sys)(present)   # an engine imported in this process
+        try:
+            cfg = LlamaConfig(rope_theta=500000.0, rope_scaling=dict(llama3))
+            with _On() as on:
+                cfg.rope_scaling = dict(llama3)          # the model's own value, given again after the build
+                fixes = on.new()
+            assert cfg.rope_parameters["rope_theta"] == 500000.0
+            assert [d.contract.consumer for d in fixes] == [f"{reader}.rotary_embedding"], fixes
+            assert fixes[0].contract.boundary == "load:transformers.config.rope_scaling", fixes[0].contract.boundary
+            assert "10,000 for Llama on vLLM and SGLang" in fixes[0].note, fixes[0].note
+        finally:
+            if added:
+                del sys.modules[present]
+
+
 def test_the_same_value_stated_again_is_quiet():
     """vLLM's patch_rope_parameters writes config.rope_theta back with the value it just read."""
     from transformers import AutoConfig

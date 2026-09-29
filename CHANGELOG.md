@@ -17,6 +17,15 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   alone); a program that runs the model in a sampling loop of its own gets one `unknown` line - the declared
   prediction, "nothing was changed", and where to set it (InvokeAI: the model's settings). A non-pass line names
   the scheduler and its `prediction_type` and `rescale_betas_zero_snr`.
+- **A RoPE repair names the engine that reads the value** (#26). The line for an old RoPE name written after the
+  config was built said `transformers.rotary_embedding uses Rotary(theta=None)` under SGLang too, and a user could
+  not tell whether SGLang would have computed with the wrong base. vLLM and SGLang apply their overrides through
+  this write and then run their own model code, which reads `rope_parameters` as transformers' does (SGLang 0.5.20's
+  Llama: `rope_parameters.get("rope_theta", 10000)`), so the consumer is now `sglang.rotary_embedding` or
+  `vllm.rotary_embedding` in their processes, and a lost `rope_theta` is spelled out: the model takes its default
+  base, 10,000 for Llama on vLLM and SGLang. README's measured table names the transformers version of each row and
+  that both used the engines' offline APIs; a field test on SGLang's server with the same versions saw no drop,
+  which is not explained yet (SGLang's config code, run on CPU, does lose the value there too).
 
 ## 2.1.2
 
