@@ -28,6 +28,16 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   three rounds of a 300-token generation joined by three short requests and then three requests one after another:
   2.1.3 recorded 4 `broken` with the overlap scheduler and 16 (every request) without it, the fix 0 and 0. The field
   test's case (DeepSeek-OCR, the first request's first decode) fits the same pattern; it was not re-run here.
+- **A chat template of another text is held to the prompt it renders** (#35). Xinference passes its own copy of the
+  model's chat template to `apply_chat_template`, and entail compared the two texts: `broken` on every request (30 of
+  30 in the field test), though for five of the six conversation shapes the field test tried the two render the same
+  prompt. When the tokenizer holds the declared template and the call names another, entail now renders the call
+  with both (untokenized, with the call's own arguments) and compares the prompts: the same prompt passes, and a
+  different one is `broken` with where the prompts part - the line and a few characters of each, e.g. `the prompts
+  part at line 2: the declared template's '# Tools', this one's '# app'`. A template that cannot render the call, or
+  a declared template the tokenizer does not hold, is compared by its text as before. Checked on Qwen3-4B's own
+  template (CPU): a copy that differs by a comment passes on all five shapes tried; a copy that opens the system turn
+  it writes for tools differently is `broken` on the tool shape only. Xinference itself was not re-run.
 
 ## 2.1.3
 
