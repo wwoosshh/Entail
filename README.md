@@ -110,9 +110,10 @@ Llama-3.2-3B-Instruct, greedy, GSM8K (first 500 on vLLM, first 200 on SGLang):
 
 The vLLM row was measured again on 1.0; the SGLang row is from the earlier measurement. Both used the engines'
 offline APIs (vLLM's `LLM`, SGLang's `Engine`). The degraded runs are identical to an explicit `rope_theta = 10000`.
-A field test on SGLang's server with the same versions saw no drop on its own retrieval and arithmetic checks,
-although SGLang's config code does lose the value there too; that is not explained yet
-([#26](https://github.com/wwoosshh/entail/issues/26)). Outputs stay fluent; the answers are wrong.
+On SGLang's server (`launch_server`, the same versions) a retrieval of 5 codes from a 5.4k-token list found 5 of 5
+untouched, 0 of 5 with the override, and 5 of 5 with entail
+([#26](https://github.com/wwoosshh/entail/issues/26); a field test that had seen no drop had reached one server
+three times, because the next two could not bind the same port). Outputs stay fluent; the answers are wrong.
 Qwen3 dense models happen to be safe because those model files fill in 1,000,000; Llama, Qwen3-MoE, Gemma and
 others do not.
 
