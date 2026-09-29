@@ -121,8 +121,22 @@ def add_dlcs():
         print(f"[entail] could not look up DLCs: {type(e).__name__}: {e}", flush=True)
 
 
+def add_unwatched():
+    """The inference engines entail does not watch (data/unwatched_engines.json; field test, entail#38): noted, once
+    per process, when their module has finished importing (entail/unwatched.py)."""
+    try:
+        from entail import unwatched
+        for module in unwatched.engines():
+            entries = TARGETS.setdefault(module, [])
+            if "entail.unwatched:noted" not in entries:
+                entries.append("entail.unwatched:noted")
+    except Exception as e:  # noqa: BLE001 - a table that cannot be read never stops the host program
+        print(f"[entail] could not read the engines entail does not watch: {type(e).__name__}: {e}", flush=True)
+
+
 if os.environ.get("ENTAIL", "off") in ("load", "debug"):
     add_dlcs()
+    add_unwatched()
 # ENTAIL_ONLY=rope_alias,sglang_adapter installs just those adapters (to measure one of them on its own).
 if os.environ.get("ENTAIL_ONLY"):
     _only = {s.strip() for s in os.environ["ENTAIL_ONLY"].split(",") if s.strip()}

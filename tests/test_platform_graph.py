@@ -38,6 +38,7 @@ KNOWN = {
     "load:comfyui.checkpoint": "checkpoint", "load:comfyui.prediction": "prediction",
     "load:diffusers.latent_scale": "vae", "load:comfyui.latent_scale": "vae", "load:diffusers.lora": "image_lora",
     "load:comfyui.lora": "image_lora", "boundary:attention.q": "user",
+    "engine:ctranslate2.unwatched": "unwatched",
 }
 
 

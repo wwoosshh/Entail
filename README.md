@@ -41,7 +41,10 @@ the engine executes. (ent·**AI**·**L**: an AI library.)
 
 **Who it is for:** people who build their own AI project on a Python engine - transformers, diffusers, vLLM,
 SGLang - or on ComfyUI. entail works inside the Python process that runs the model, so apps that run models in an
-engine compiled into the app (Ollama, LM Studio, llama.cpp) give it nothing to attach to. Where to install it for
+engine compiled into the app (Ollama, LM Studio, llama.cpp) give it nothing to attach to. A Python program that
+loads an engine entail does not watch (CTranslate2 under faster-whisper, ONNX Runtime, llama.cpp's Python binding
+and a few more; `entail/data/unwatched_engines.json`) gets one `unknown` line for it, so a run is not read as fully
+checked when the main work ran there. Where to install it for
 each tool - your scripts, vLLM behind Open WebUI, ComfyUI (git, portable, Desktop), text-generation-webui, vLLM in
 Docker - is in [INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md).
 

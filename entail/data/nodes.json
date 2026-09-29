@@ -5,6 +5,7 @@
     "llm": {"ko": "LLM", "en": "LLM", "generic": {"ko": "모델", "en": "Model"},
             "generic_unless": ["tokenizer", "request", "response", "cache", "adapter", "self_check"]},
     "image": {"ko": "이미지 생성", "en": "Image generation"},
+    "outside": {"ko": "entail이 보지 않는 곳", "en": "Not watched by entail"},
     "user": {"ko": "사용자 코드", "en": "User code"}
   },
   "nodes": [
@@ -36,6 +37,8 @@
      "patterns": ["^load:(comfyui|diffusers)\\.latent_scale"]},
     {"id": "image_lora", "flow": "image", "step": 4, "ko": "LoRA", "en": "LoRA",
      "patterns": ["^load:(comfyui|diffusers)\\.lora"]},
+    {"id": "unwatched", "flow": "outside", "step": 1, "ko": "보지 않는 엔진", "en": "Engines entail does not watch",
+     "patterns": ["^engine:"]},
     {"id": "user", "flow": "user", "step": 1, "ko": "사용자 코드의 경계", "en": "Boundaries in user code",
      "patterns": ["^boundary:"]},
     {"id": "other", "flow": "user", "step": 9, "ko": "기타", "en": "Other",
