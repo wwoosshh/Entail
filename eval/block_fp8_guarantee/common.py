@@ -57,7 +57,7 @@ def bf16_to_f64(u16):
 
 def ulp_out(t, dtype):
     """One unit in the last place of the output dtype at |t| (float64)."""
-    p, tiny = {"bfloat16": (8, 2.0 ** -133), "float16": (11, 2.0 ** -24)}[dtype]
+    p, tiny = {"bfloat16": (8, 2.0 ** -133), "float16": (11, 2.0 ** -24), "float32": (24, 2.0 ** -149)}[dtype]
     a = np.abs(t)
     with np.errstate(divide="ignore"):
         e = np.floor(np.log2(np.where(a > 0, a, 1.0)))
@@ -253,7 +253,8 @@ def _patched_source(kind):
     """vLLM's own kernel source with one misread in it, active when the device flag Mut is non-zero."""
     from vllm.model_executor.layers.quantization.utils import fp8_utils
 
-    src = inspect.getsource(fp8_utils._w8a8_triton_block_scaled_mm.fn)
+    k = fp8_utils._w8a8_triton_block_scaled_mm
+    src = inspect.getsource((k.original if isinstance(k, Launcher) else k).fn)
     src = src[src.index("def "):]
     src = src.replace("def _w8a8_triton_block_scaled_mm(", f"def _mut_{kind}(", 1)
     assert "    Bs,\n" in src

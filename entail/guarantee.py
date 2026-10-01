@@ -28,12 +28,12 @@ The pieces:
               checksums, and the scales must be positive and finite. A kernel output within tolerance everywhere is
               delivered (normal); otherwise the reference's output is (repaired); integrity, scale or reference
               failures refuse (blocked). One host synchronisation per call decides it.
-  graphs      inside a CUDA graph capture the same checks are captured: the output is selected element by element
-              between the kernel and the reference on the device, and a failed integrity or scale check poisons the
-              output with NaN; after every replay the replay hook reads the sites' flags and refuses the replay
-              (raises before its outputs are handed on) when one failed, and before a replay it refuses when a
-              weight the graph reads was re-issued, moved or written since capture. Python is not assumed to run at
-              replay: only what was captured runs there.
+  graphs      inside a CUDA graph capture the same checks are captured: the kernel's output, or the reference's
+              when one value is beyond the tolerance, is chosen on the device, and a failed integrity or scale
+              check poisons the output with NaN; after every replay the replay hook reads the sites' flags and
+              refuses the replay (raises before its outputs are handed on) when one failed, and before a replay it
+              refuses when a weight the graph reads was re-issued, moved or written since capture. Python is not
+              assumed to run at replay: only what was captured runs there.
   records     one JSON line per decision (guarantee-<date>.jsonl in the log folder, or ENTAIL_GUARANTEE_RECORD):
               plan, contract and environment fingerprints, producers and consumer, values and epochs, the checks,
               the tolerance, the number of elements compared, the path before and after a repair, the permit and
@@ -64,6 +64,7 @@ ACTIVATION_PRODUCER = "vllm.model_executor.layers.quantization.utils.fp8_utils:p
 WEIGHT_PRODUCER = ("vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel:"
                    "Fp8BlockScaledMMLinearKernel.process_weights_after_loading")
 REQUIRED_HOOKS = (ACTIVATION_PRODUCER, WEIGHT_PRODUCER, CONSUMER)
+GRAPH_HOOK = "torch.cuda.graphs:CUDAGraph.capture_begin/capture_end/replay"   # required only inside a capture
 ROLES = ("activation", "activation_scale", "weight", "weight_scale")
 OUTCOMES = ("normal_delivered", "repaired_delivered", "blocked", "error")
 _P = 2147483647            # the checksum's modulus (2^31 - 1)
@@ -747,13 +748,13 @@ def _captured(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0):
     graph = getattr(_CAPTURE, "graph", None)
     if not p.graphs:
         _refuse(rec, "unsupported", "CUDA graph capture is outside the plan", t0)
-    if graph is None:
-        _refuse(rec, "unsupported", "a capture this profile was not told about (torch.cuda.CUDAGraph.capture_begin "
-                                    "not hooked): its replays could not be checked", t0)
+    if graph is None or GRAPH_HOOK not in _INSTALLED:
+        _refuse(rec, "hook", "a capture this profile was not told about (torch.cuda.CUDAGraph.capture_begin not "
+                             "hooked): its replays could not be checked", t0)
     k = kernel(A, B, As, Bs, list(block), out_dtype)
     r, ok, status = _verify(k, A, B, As, Bs, block, out_dtype, issues)
     bad = (status[1] + status[2] + status[3]) > 0
-    out = torch.where(ok.reshape(k.shape), k, r.to(out_dtype).reshape(k.shape))
+    out = torch.where(status[0] > 0, r.to(out_dtype).reshape(k.shape), k)   # one value beyond: all the reference
     out = torch.where(bad, torch.full_like(out, float("nan")), out)
     flags = torch.zeros(6, dtype=torch.int64, device=A.device)
     flags.copy_(status)
@@ -764,7 +765,8 @@ def _captured(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0):
     if entry is None or entry[0]() is not graph:
         entry = _GRAPHS[id(graph)] = (weakref.ref(graph), [])
     entry[1].append(site)
-    rec.update({"outcome": "captured", "path_after": "kernel or reference, chosen on the device per value",
+    rec.update({"outcome": "captured", "path_after": "the kernel's output, or the reference's when one value is "
+                                                     "beyond the tolerance, chosen on the device",
                 "permit": None, "delivered": False,
                 "note": "decided at each replay by the replay hook"})
     _count("captured_sites")
@@ -814,8 +816,7 @@ def after_replay(graph) -> None:
             _count(f"blocked_{kind}")
             blocked = blocked or (kind, rec)
         elif viol:
-            rec.update({"outcome": "repaired_delivered", "path_after": "reference for the values beyond the "
-                                                                         "tolerance, chosen on the device",
+            rec.update({"outcome": "repaired_delivered", "path_after": "reference (chosen on the device)",
                         "permit": rec["call"], "delivered": True})
             _count("repaired_delivered")
         else:

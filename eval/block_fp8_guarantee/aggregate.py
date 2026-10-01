@@ -114,6 +114,8 @@ def judge_case(out_root, case):
                            for s in r["steps"]]
         if case["group"] == "defect":
             ds = [o for s, o in zip(r["steps"], outs) if o is not None and defective(s, case)]
+            if sum(1 for s in case["steps"] if defective(s, case)) > len(ds):
+                ds.append("unknown")         # a defective step that never ran
             if "wrong_escaped" in ds:
                 verdict = "wrong_escaped"
             elif "error" in ds:
@@ -131,6 +133,8 @@ def judge_case(out_root, case):
             m["verdict"] = verdict
         elif case["group"] == "normal":
             bad = [o for o in outs if o is not None and o != "normal_delivered"]
+            planned = sum(1 for s in case["steps"] if s["op"] not in ("capture", "reload"))
+            seen = sum(1 for o in outs if o is not None)
             same = None
             if z is not None and runs["offA"][1] is not None and lab != "offA":
                 za = runs["offA"][1]
@@ -142,6 +146,8 @@ def judge_case(out_root, case):
                 m["verdict"] = "error"
             elif "blocked" in outs:
                 m["verdict"] = "wrong_refusal"
+            elif seen < planned:
+                m["verdict"] = "unknown"        # a planned step never ran (a capture failed): not a pass
             elif bad:
                 m["verdict"] = "changed_without_need" if "repaired_delivered" in bad else "unknown"
             else:
