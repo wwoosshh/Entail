@@ -177,10 +177,9 @@ def install_weights():
 
 
 def install_graphs():
-    try:
-        import torch
-        G = torch.cuda.CUDAGraph
-    except Exception:  # noqa: BLE001
+    mod = sys.modules.get("torch.cuda.graphs")     # installed while torch.cuda is still importing: read the class
+    G = getattr(mod, "CUDAGraph", None) if mod is not None else None   # from its own module, not torch.cuda
+    if G is None:
         return 0
     if getattr(G.replay, "__entail_guarantee__", False):
         return 0
@@ -209,6 +208,7 @@ def install_graphs():
         fn.__entail_guarantee__ = True
         _WRAPPED[(G, name)] = getattr(G, name)
         setattr(G, name, fn)
+    guarantee.installed(guarantee.GRAPH_HOOK)
     return 1
 
 

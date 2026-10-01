@@ -155,7 +155,8 @@ def main(case_path, mode, out_dir):
                 wraw[li] = (common.to_np(layers[li].weight), common.to_np(layers[li].weight_scale_inv))
                 record_step(step, None, None, None, None, None, li, {"rng_same": rng0 == common.rng_state()})
                 continue
-            x = common.make_input(step["M"], K, step["seed"], step.get("dist", "normal"), dtype=torch.bfloat16
+            rows = step["M"] if "M" in step else int(graph["x"].shape[0])
+            x = common.make_input(rows, K, step["seed"], step.get("dist", "normal"), dtype=torch.bfloat16
                                   if case["out"] != "float32" else torch.float32)
             try:
                 if op == "call":
@@ -176,8 +177,9 @@ def main(case_path, mode, out_dir):
                     s = torch.cuda.Stream()
                     s.wait_stream(torch.cuda.current_stream())
                     with torch.cuda.stream(s):
-                        for _ in range(2):
-                            kernel.apply_weights(layers[li], graph["x"])
+                        for _ in range(2):     # as an engine warms up: every op the graph holds, cuBLAS too
+                            _w = kernel.apply_weights(layers[li], graph["x"])
+                            _w = _w.clone().float() @ W2
                     torch.cuda.current_stream().wait_stream(s)
                     produced.clear()
                     graph["g"] = torch.cuda.CUDAGraph()

@@ -83,14 +83,14 @@ def stand_ins(mode="faithful", **kw):
     return fu, bk
 
 
-def weight(N, K, seed, spread=True):
-    """fp8 weight [N, K] with a block scale per 128x128 block; blocks of very different size when `spread`."""
+def weight(N, K, seed, spread=True, bn=BN, bk=BK):
+    """fp8 weight [N, K] with a block scale per bn x bk block; blocks of very different size when `spread`."""
     gen = torch.Generator().manual_seed(seed)
     w = torch.randn((N, K), generator=gen)
     if spread:
         w = w * torch.exp(torch.randn((N // BN, K // BK), generator=gen) * 1.5).repeat_interleave(BN, 0) \
             .repeat_interleave(BK, 1)
-    wb = w.reshape(N // BN, BN, K // BK, BK)
+    wb = w.reshape(N // bn, bn, K // bk, bk)
     s = (wb.abs().amax(dim=(1, 3)) / 448.0).clamp_min(1e-10)
     q = (wb / s[:, None, :, None]).clamp(-448, 448).reshape(N, K).to(FP8)
     return q, s.contiguous()
@@ -234,7 +234,7 @@ def main():
 
     # 11. the activation's storage issued again before the consumer read it
     A, As = fu.per_token_group_quant_fp8(act(), BK)
-    g.issue_activation(A, As, BK)              # someone issued the same storage again
+    g.issue_activation(A[:], As[:], BK)        # another value issued in the same storage (a reused buffer)
     refused(lambda: fu.w8a8_triton_block_scaled_mm(A, l1.weight, As, l1.weight_scale_inv, [128, 128],
                                                    torch.bfloat16), "epoch")
     print("ok re-issued storage refused")
