@@ -104,7 +104,10 @@ def from_env(environ: Optional[Mapping[str, str]] = None) -> Policy:
         if not sep:
             raise ValueError(f"ENTAIL_FACT_POLICY: expected Name=setting, got {item!r}")
         overrides.append((name.strip(), setting.strip()))
-    return Policy(mode=env.get("ENTAIL", "off"), on_mismatch=env.get("ENTAIL_POLICY", "resolve"),
+    mode = env.get("ENTAIL", "off")
+    if mode == "guarantee":       # the guarantee profile (guarantee.py) runs alone: the other checks stay off
+        mode = "off"
+    return Policy(mode=mode, on_mismatch=env.get("ENTAIL_POLICY", "resolve"),
                   on_broken=env.get("ENTAIL_ON_BROKEN", "report"),
                   on_unknown_meaning_changing=env.get("ENTAIL_UNKNOWN", "report"),
                   on_unknown_other=env.get("ENTAIL_UNKNOWN_OTHER", "report"),
