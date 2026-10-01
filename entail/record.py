@@ -49,7 +49,7 @@ def log_dir() -> Optional[str]:
     d = os.environ.get("ENTAIL_LOG_DIR")
     if d:
         return None if d.strip().lower() == "off" else d
-    if os.environ.get("ENTAIL") not in ("load", "debug"):
+    if os.environ.get("ENTAIL") not in ("load", "debug", "guarantee"):
         return None
     d = os.path.join(os.getcwd(), LOG_DIR_NAME)
     os.environ["ENTAIL_LOG_DIR"] = d

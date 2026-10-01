@@ -137,6 +137,17 @@ def add_unwatched():
 if os.environ.get("ENTAIL", "off") in ("load", "debug"):
     add_dlcs()
     add_unwatched()
+# ENTAIL=guarantee (ROADMAP M19 L5.4a; entail/guarantee.py): the required guarantee profile for the block FP8 matmul,
+# alone - its producers, its consumer and the CUDA graph hooks, and no other adapter, DLC or note.
+GUARANTEE_TARGETS = {
+    "vllm.model_executor.layers.quantization.utils.fp8_utils":
+        ["entail.adapters.vllm_block_fp8_guarantee:install_fp8_utils"],
+    "vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel":
+        ["entail.adapters.vllm_block_fp8_guarantee:install_weights"],
+    "torch.cuda.graphs": ["entail.adapters.vllm_block_fp8_guarantee:install_graphs"],
+}
+if os.environ.get("ENTAIL", "off") == "guarantee":
+    TARGETS = dict(GUARANTEE_TARGETS)
 # ENTAIL_ONLY=rope_alias,sglang_adapter installs just those adapters (to measure one of them on its own).
 if os.environ.get("ENTAIL_ONLY"):
     _only = {s.strip() for s in os.environ["ENTAIL_ONLY"].split(",") if s.strip()}
@@ -240,7 +251,7 @@ def _reached_nothing(folder, since, pid):
             return
         named = os.environ.get("ENTAIL_RECORD")
         files = [named] if named else [os.path.join(folder, n) for n in
-                                       (os.listdir(folder) if os.path.isdir(folder) else []) if n.startswith("record-")]
+                                       (os.listdir(folder) if os.path.isdir(folder) else []) if n.startswith(("record-", "guarantee-"))]
         if any(os.path.exists(f) and os.path.getmtime(f) >= since for f in files):
             return
         print(f"[entail] was on, but no process of this run recorded a decision (nothing in {folder}): nothing it "
@@ -281,7 +292,7 @@ def activate():
     install_now()
 
 
-if os.environ.get("ENTAIL", "off") in ("load", "debug"):
+if os.environ.get("ENTAIL", "off") in ("load", "debug", "guarantee"):
     activate()
 
 
