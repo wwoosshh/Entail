@@ -93,7 +93,7 @@ class Plan:
     out_dtypes: Tuple[str, ...] = ("bfloat16", "float16")
     ulps: float = 1.0                  # units in the last place of the output dtype at each value (the cast)
     c_acc: float = 2.0 ** -11          # times sum over K blocks of |a_blk| |b_blk| (the accumulation)
-    budget_bytes: int = 1 << 30        # transient bytes the check may hold
+    budget_bytes: int = 2 << 30        # transient bytes the check may hold (an engine profile run: 8192 x 19456)
     budget_ms: Optional[float] = None  # wall time one eager check may take (None: no limit)
     chunk_bytes: int = 64 << 20        # rows of the weight dequantised at once by the reference
     graphs: bool = True                # CUDA graphs captured from eager code: checks captured with the call
@@ -531,8 +531,9 @@ def _admit(A, B, As, Bs, block_size, output_dtype, rec, t0):
     if tuple(int(x) for x in Bs.shape) != (-(-N // block[0]), -(-K // block[1])):
         _refuse(rec, "contract", f"Bs {tuple(Bs.shape)} is not one scale per {block[0]}x{block[1]} block of B "
                                  f"{N}x{K}", t0)
-    rows = max(block[0], (p.chunk_bytes // max(1, K * 4)) // block[0] * block[0])
-    need = 4 * (3 * M * K + 2 * min(rows, N) * K + 5 * M * N) + 4 * (M * K + N * K)   # reference, checksums
+    # the dequantised activation (twice, while it is made), the reference's output, two chunks of work tensors, and
+    # the checksums' 64-bit words (twice the bytes of each operand, twice while weighted)
+    need = 8 * M * K + M * N * (2 if out in ("bfloat16", "float16") else 4) + 2 * p.chunk_bytes + 4 * (M * K + N * K)
     rec["budget"] = {"bytes": need, "limit": p.budget_bytes}
     if need > p.budget_bytes:
         _refuse(rec, "budget", f"the check needs about {need} transient bytes, the plan allows {p.budget_bytes}", t0)
@@ -596,30 +597,60 @@ def ulp(x, dtype):
     return torch.where(x == 0, torch.full_like(x, tiny), u.clamp_min(tiny))
 
 
-def _verify(k, A, B, As, Bs, block, out_dtype, issues):
-    """On the device, no synchronisation: (r, ok, status). ok: element-wise |kernel - reference| within the
-    tolerance; status (int64 [6]): values beyond it, reference values not finite, operands whose bytes differ from
-    their issue (a bit each: A, As, B, Bs), scales not positive and finite, kernel values not finite, the largest
-    ratio to the tolerance x 2^20 (rounded)."""
+def _columns(M, K, gn, p) -> int:
+    """Weight rows (output columns) checked at once: bounded by the weight chunk (dequantised, K x 4 bytes a row)
+    and by the [M, columns] float32 work tensors of the comparison; a multiple of the block."""
+    by_b = p.chunk_bytes // max(1, K * 4)
+    by_r = p.chunk_bytes // max(1, M * 4 * 6)
+    return max(gn, min(by_b, by_r) // gn * gn)
+
+
+def _check(k, A, B, As, Bs, block, out_dtype, issues):
+    """On the device, no synchronisation, a chunk of output columns at a time (memory bounded by the plan's
+    chunk_bytes; every value of the output is compared): (ref, status). ref: the reference's output in the output
+    dtype, [M, N]. status (int64 [6]): values beyond the tolerance, reference values not finite, operands whose
+    bytes differ from their issue (a bit each: A, As, B, Bs), scales not positive and finite, kernel values not
+    finite, the largest ratio to the tolerance x 2^20 (rounded)."""
     import torch
 
     p = plan()
-    M, N = int(A.numel() // A.shape[-1]), int(B.shape[0])
-    r, S = reference(A, B, As, Bs, block)
-    kf = k.reshape(M, N).to(torch.float32)
-    tol = p.ulps * ulp(r, out_dtype) + p.c_acc * S
-    diff = (kf - r).abs()
-    ok = (diff <= tol) & torch.isfinite(kf) & torch.isfinite(r)
-    bits = torch.zeros((), dtype=torch.int64, device=A.device)
+    gn, gk = int(block[0]), int(block[1])
+    K = int(A.shape[-1])
+    M, N, nb = A.numel() // K, int(B.shape[0]), K // gk
+    dev = A.device
+    a = A.reshape(M, nb, gk).to(torch.float32) * As.reshape(M, nb).to(torch.float32)[:, :, None]
+    an = a.norm(dim=2)
+    a = a.reshape(M, K)
+    kk = k.reshape(M, N)
+    ref = torch.empty((M, N), dtype=out_dtype, device=dev)
+    z = torch.zeros((), dtype=torch.int64, device=dev)
+    viol, rbad, kbad = z.clone(), z.clone(), z.clone()
+    ratio = torch.zeros((), dtype=torch.float32, device=dev)
+    cols = _columns(M, K, gn, p)
+    with _Precision():
+        for n0 in range(0, N, cols):
+            n1 = min(N, n0 + cols)
+            s = Bs[n0 // gn: -(-n1 // gn)].to(torch.float32).repeat_interleave(gn, dim=0)[: n1 - n0]
+            b = B[n0:n1].to(torch.float32).reshape(n1 - n0, nb, gk) * s[:, :, None]
+            r = a @ b.reshape(n1 - n0, K).T
+            tol = p.ulps * ulp(r, out_dtype) + p.c_acc * (an @ b.norm(dim=2).T)
+            del b
+            kf = kk[:, n0:n1].to(torch.float32)
+            diff = (kf - r).abs()
+            rfin, kfin = torch.isfinite(r), torch.isfinite(kf)
+            viol += (~((diff <= tol) & kfin & rfin)).sum()
+            rbad += (~rfin).sum()
+            kbad += (~kfin).sum()
+            ratio = torch.maximum(ratio, torch.where(torch.isfinite(diff), diff / tol.clamp_min(1e-38),
+                                                     torch.zeros_like(diff)).amax())
+            ref[:, n0:n1] = r.to(out_dtype)
+    bits = z.clone()
     for i, (x, name) in enumerate(((A, "A"), (As, "As"), (B, "B"), (Bs, "Bs"))):
         bits = bits + (checksum(x) != issues[name].checksum).to(torch.int64) * (1 << i)
     sbad = (~((As > 0) & torch.isfinite(As)).all()) | (~((Bs > 0) & torch.isfinite(Bs)).all())
-    ratio = torch.where(torch.isfinite(diff), diff / tol.clamp_min(1e-38), torch.zeros_like(diff)).amax() \
-        if diff.numel() else torch.zeros((), device=A.device)
-    status = torch.stack([(~ok).sum().to(torch.int64), (~torch.isfinite(r)).sum().to(torch.int64), bits,
-                          sbad.to(torch.int64), (~torch.isfinite(kf)).sum().to(torch.int64),
+    status = torch.stack([viol, rbad, bits, sbad.to(torch.int64), kbad,
                           (ratio.clamp_max(2.0 ** 40) * 2.0 ** 20).round().to(torch.int64)])
-    return r, ok, status
+    return ref, status
 
 
 def _capturing() -> bool:
@@ -669,7 +700,7 @@ def gate(kernel, A, B, As, Bs, block_size, output_dtype=None, consumer: str = CO
         raise
     t2 = time.perf_counter()
     try:
-        r, _ok, status = _verify(k, A, B, As, Bs, block, out_dtype, issues)
+        ref, status = _check(k, A, B, As, Bs, block, out_dtype, issues)
         st = [int(x) for x in status.tolist()]
     except Exception as e:  # noqa: BLE001
         _count("checker_errors")
@@ -695,7 +726,7 @@ def gate(kernel, A, B, As, Bs, block_size, output_dtype=None, consumer: str = CO
     if p.budget_ms is not None and (t3 - t0) * 1e3 > p.budget_ms:
         _refuse(rec, "budget", f"the check took {(t3 - t0) * 1e3:.3f} ms, the plan allows {p.budget_ms} ms", t0)
     if viol:
-        out = r.to(out_dtype).reshape(*A.shape[:-1], N)
+        out = ref.reshape(*A.shape[:-1], N)
         rec.update({"outcome": "repaired_delivered", "path_after": "reference",
                     "recheck": {"reference_finite": True, "shape": list(out.shape), "dtype": _dt(out)},
                     "reason": f"{viol} of {M * N} kernel values beyond the tolerance (largest ratio "
@@ -752,9 +783,9 @@ def _captured(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0):
         _refuse(rec, "hook", "a capture this profile was not told about (torch.cuda.CUDAGraph.capture_begin not "
                              "hooked): its replays could not be checked", t0)
     k = kernel(A, B, As, Bs, list(block), out_dtype)
-    r, ok, status = _verify(k, A, B, As, Bs, block, out_dtype, issues)
+    ref, status = _check(k, A, B, As, Bs, block, out_dtype, issues)
     bad = (status[1] + status[2] + status[3]) > 0
-    out = torch.where(status[0] > 0, r.to(out_dtype).reshape(k.shape), k)   # one value beyond: all the reference
+    out = torch.where(status[0] > 0, ref.reshape(k.shape), k)   # one value beyond: all the reference
     out = torch.where(bad, torch.full_like(out, float("nan")), out)
     flags = torch.zeros(6, dtype=torch.int64, device=A.device)
     flags.copy_(status)

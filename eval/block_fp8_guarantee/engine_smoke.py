@@ -136,9 +136,77 @@ def main(out_root, model):
         results.append(row)
         print(json.dumps(row, default=str), flush=True)
     common.write_json(os.path.join(out_root, "smoke_runs.json"), results)
+    compare(out_root)
+
+
+def compare(out_root):
+    """Off against the guarantee profile, per configuration: greedy (cold and warm cache) and seeded outputs equal
+    token for token and in their top-5 log-probabilities; the RNG digests before and after each generate equal; the
+    warm greedy run equal to the cold one (the prefix cache). Unseeded sampling is recorded, not compared."""
+    import glob
+
+    import common
+
+    rows = {}
+    for d in sorted(glob.glob(os.path.join(out_root, "*_*_*"))):
+        p = os.path.join(d, "result.json")
+        if not os.path.exists(p):
+            continue
+        with open(p, encoding="utf-8") as f:
+            r = json.load(f)
+        rows.setdefault(r["config"], []).append((os.path.basename(d), r))
+    out = {}
+    for config, runs in rows.items():
+        c = out[config] = {"runs": [n for n, _ in runs]}
+        offs = [r for n, r in runs if r["mode"] == "off" and "runs" in r]
+        gs = [r for n, r in runs if r["mode"] == "guarantee"]
+        for r in gs:
+            if "start_error" in r:
+                c["guarantee_start_error"] = r["start_error"]
+        if len(offs) >= 2:
+            c["offA_vs_offB"] = _cmp(offs[0], offs[1])
+        if offs and gs and "runs" in gs[0]:
+            c["off_vs_guarantee"] = _cmp(offs[0], gs[0])
+            c["guarantee_warm_equals_cold"] = _same_outputs(gs[0], "greedy_cold", "greedy_warm")
+            c["guarantee_entail"] = {k: v for k, v in gs[0].get("entail", {}).items() if not isinstance(v, (list,))}
+    common.write_json(os.path.join(out_root, "compare.json"), out)
+    print(json.dumps(out, indent=1, default=str)[:4000])
+
+
+def _run(r, label):
+    return next((x for x in r["runs"] if x["label"] == label), None)
+
+
+def _same_outputs(r, a, b):
+    x, y = _run(r, a), _run(r, b)
+    return bool(x and y and x["outputs"] and y["outputs"] and [o["ids"] for o in x["outputs"]] ==
+                [o["ids"] for o in y["outputs"]])
+
+
+def _cmp(r1, r2):
+    res = {}
+    for label in ("greedy_cold", "greedy_warm", "seeded", "unseeded"):
+        x, y = _run(r1, label), _run(r2, label)
+        if not x or not y or not x["outputs"] or not y["outputs"]:
+            res[label] = {"missing": True, "errors": [x and x["error"], y and y["error"]]}
+            continue
+        ids = sum(1 for a, b in zip(x["outputs"], y["outputs"]) if a["ids"] == b["ids"])
+        dmax = 0.0
+        for a, b in zip(x["outputs"], y["outputs"]):
+            for la, lb in zip(a["logprobs"], b["logprobs"]):
+                for k in set(la) & set(lb):
+                    dmax = max(dmax, abs(la[k] - lb[k]))
+        res[label] = {"same_ids": f"{ids}/{len(x['outputs'])}", "max_logprob_diff": dmax,
+                      "rng_before_same": x["rng_before"] == y["rng_before"],
+                      "rng_after_same": x["rng_after"] == y["rng_after"],
+                      "rng_untouched_in_run": [x["rng_before"] == x["rng_after"], y["rng_before"] == y["rng_after"]]}
+    return res
 
 
 if __name__ == "__main__":
+    if sys.argv[1] == "--compare":
+        compare(sys.argv[2])
+        sys.exit(0)
     if sys.argv[1] == "--one":
         one(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
     else:
