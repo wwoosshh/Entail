@@ -2,8 +2,9 @@
 
 split: dev (fixed seeds) or holdout (seeds from the freeze manifest's hash; --freeze is then required).
 Modes per case: off A, off B (two fresh off runs: is off stable), load (entail as it ships, ENTAIL=load), guarantee
-(ENTAIL=guarantee). entail installs itself through its start-up hook (adapters/autoinstall on PYTHONPATH), the way it
-does for a user. Every run's stdout, stderr and exit code are kept.
+(ENTAIL=guarantee, the numeric guarantee) and, from v3 (L5.4c), structure (ENTAIL=structure, the structural check
+experiment - reported apart, never as the guarantee). entail installs itself through its start-up hook
+(adapters/autoinstall on PYTHONPATH), the way it does for a user. Every run's stdout, stderr and exit code are kept.
 """
 import argparse
 import json
@@ -17,7 +18,7 @@ sys.path.insert(0, HERE)
 import cases as C  # noqa: E402
 import common  # noqa: E402
 
-MODES = (("offA", "off"), ("offB", "off"), ("load", "load"), ("guarantee", "guarantee"))
+MODES = (("offA", "off"), ("offB", "off"), ("load", "load"), ("guarantee", "guarantee"), ("structure", "structure"))
 
 
 def run_one(case, label, mode, out_root, freeze=None, plan_path=None):
@@ -31,7 +32,7 @@ def run_one(case, label, mode, out_root, freeze=None, plan_path=None):
     env["PYTHONPATH"] = os.pathsep.join([common.ENTAIL_ROOT, auto, HERE] + ([env["PYTHONPATH"]] if
                                                                              env.get("PYTHONPATH") else []))
     env["ENTAIL_LOG_DIR"] = os.path.join(out_dir, "entail_logs")
-    env["ENTAIL_GUARANTEE_RECORD"] = os.path.join(out_dir, "guarantee.jsonl")
+    env["ENTAIL_GUARANTEE_RECORD"] = os.path.join(out_dir, f"{mode}.jsonl")
     env["ENTAIL_QUIET"] = "start"
     if plan_path:
         env["ENTAIL_GUARANTEE_PLAN"] = plan_path

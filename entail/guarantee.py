@@ -29,15 +29,25 @@ The pieces:
               delivered (normal); otherwise the reference's output is (repaired); integrity, scale or reference
               failures refuse (blocked). One host synchronisation per call decides it.
   graphs      inside a CUDA graph capture the same checks are captured: the kernel's output, or the reference's
-              when one value is beyond the tolerance, is chosen on the device, and a failed integrity or scale
-              check poisons the output with NaN; after every replay the replay hook reads the sites' flags and
-              refuses the replay (raises before its outputs are handed on) when one failed, and before a replay it
-              refuses when a weight the graph reads was re-issued, moved or written since capture. Python is not
-              assumed to run at replay: only what was captured runs there.
+              when one value is beyond the tolerance, is chosen on the device. A failed integrity, scale or reference
+              check has no right value to hand on: the gate's flags are copied to pinned host memory and a device
+              assertion stops the graph there, so the graph's next operation never runs (L5.4c; until 2026-10-03
+              the output was poisoned with NaN, which the next operation read before the replay was refused). After
+              every replay the replay hook reads the flags (from the host copy, which survives the stop) and
+              refuses the replay when one failed; the process's CUDA context is lost with the stop, as an engine
+              is stopped by an eager refusal. Before a replay it refuses when a weight the graph reads was
+              re-issued, moved or written since capture. Python is not assumed to run at replay: only what was
+              captured runs there.
   records     one JSON line per decision (guarantee-<date>.jsonl in the log folder, or ENTAIL_GUARANTEE_RECORD):
               plan, contract and environment fingerprints, producers and consumer, values and epochs, the checks,
               the tolerance, the number of elements compared, the path before and after a repair, the permit and
               whether the value was delivered.
+
+ENTAIL=structure is not this guarantee: it is the structural check experiment (ROADMAP M19 L5.4b/L5.4c, check
+"static"). The producers' issues and the admission are the same; the consumer's launch goes ahead only when the
+kernel's own IR is proven to compute the contract (kernel_ir.py), otherwise the reference's output is handed on.
+Nothing of the call's numbers is checked and the arithmetic is trusted, so its outcomes (kernel_delivered,
+reference_delivered) carry no permit, and its records (structure-<date>.jsonl) say profile block_fp8_structure.
 
 Not covered (refused, never passed): torch.compile tracing (the producers' hooks do not run in compiled code, so the
 consumer sees no issue), UE8M0 scales, block sizes, dtypes and layouts outside the plan, expert parallel and
@@ -57,6 +67,8 @@ from typing import Optional, Tuple
 from . import core
 
 PROFILE = "block_fp8"
+STRUCTURE_PROFILE = "block_fp8_structure"      # ENTAIL=structure: the structural check experiment, not a guarantee
+MODES = {"guarantee": "output", "structure": "static"}   # the ENTAIL value -> the only check it runs
 CONTRACT = "block_fp8_mm/1"
 BOUNDARY = "guarantee:block_fp8_mm"
 CONSUMER = "vllm.model_executor.layers.quantization.utils.fp8_utils:w8a8_triton_block_scaled_mm"
@@ -68,6 +80,8 @@ TRITON_HOOK = "triton.runtime.jit:JITFunction.run"   # required by check "static
 GRAPH_HOOK = "torch.cuda.graphs:CUDAGraph.capture_begin/capture_end/replay"   # required only inside a capture
 ROLES = ("activation", "activation_scale", "weight", "weight_scale")
 OUTCOMES = ("normal_delivered", "repaired_delivered", "blocked", "error")
+STRUCTURE_OUTCOMES = ("kernel_delivered", "reference_delivered", "blocked", "error")
+GRAPH_GATES = 4096         # gates one captured graph may hold (their flags' pinned host copies are made beforehand)
 _P = 2147483647            # the checksum's modulus (2^31 - 1)
 _CW = 1024                 # words per checksum row
 
@@ -125,13 +139,32 @@ class Plan:
 _FINGERPRINTS = {}         # id(plan) -> (plan, sha256 of its JSON): read at every call, computed once
 
 
+def mode() -> str:
+    """"guarantee" (ENTAIL=guarantee: the numeric guarantee, check "output") or "structure" (ENTAIL=structure: the
+    structural check experiment, check "static"). A harness or a test that calls in without either is the guarantee."""
+    m = os.environ.get("ENTAIL", "")
+    return m if m in MODES else "guarantee"
+
+
+def profile() -> str:
+    return PROFILE if mode() == "guarantee" else STRUCTURE_PROFILE
+
+
+def _default_plan() -> Plan:
+    if mode() == "structure":
+        return Plan(name="vllm-0.30-triton-dense-block-fp8-structure", check="static", integrity="epoch",
+                    records="changes")
+    return Plan()
+
+
 def _plan_from_env() -> Plan:
     path = os.environ.get("ENTAIL_GUARANTEE_PLAN")
     if not path:
-        return Plan()
+        return _default_plan()
     with open(path, encoding="utf-8") as f:
         raw = json.load(f)
-    raw = raw.get("plan", raw)
+    # a freeze manifest holds the guarantee's plan ("plan") and the structural experiment's ("structure_plan")
+    raw = raw.get(f"{mode()}_plan") or raw.get("plan", raw)
     known = Plan.__dataclass_fields__
     kw = {k: v for k, v in raw.items() if k in known}
     for k in ("blocks",):
@@ -140,7 +173,9 @@ def _plan_from_env() -> Plan:
     for k in ("value_dtypes", "scale_dtypes", "out_dtypes", "trusted"):
         if k in kw:
             kw[k] = tuple(kw[k])
-    return Plan(**kw)
+    import dataclasses
+
+    return dataclasses.replace(_default_plan(), **kw)
 
 
 _PLAN = None
@@ -160,7 +195,7 @@ def set_plan(p: Optional[Plan]) -> None:
 
 
 def active() -> bool:
-    return os.environ.get("ENTAIL", "off") == "guarantee"
+    return os.environ.get("ENTAIL", "off") in MODES
 
 
 # --- issues: what the producers hand over -----------------------------------------------------------------------------
@@ -447,7 +482,7 @@ def _record_path() -> Optional[str]:
     from . import record
 
     folder = record.log_dir()
-    return os.path.join(folder, f"guarantee-{time.strftime('%Y-%m-%d')}.jsonl") if folder else None
+    return os.path.join(folder, f"{mode()}-{time.strftime('%Y-%m-%d')}.jsonl") if folder else None
 
 
 def _write(line: dict) -> None:
@@ -456,7 +491,7 @@ def _write(line: dict) -> None:
         return
     from . import record
 
-    full = {"v": 1, "t": round(time.time(), 3), "run": record.run_id(), "pid": os.getpid(), "profile": PROFILE}
+    full = {"v": 1, "t": round(time.time(), 3), "run": record.run_id(), "pid": os.getpid(), "profile": profile()}
     full.update(line)
     if isinstance(full.get("issues"), dict):
         full["issues"] = {k: (v.brief() if isinstance(v, Issue) else v) for k, v in full["issues"].items()}
@@ -465,8 +500,8 @@ def _write(line: dict) -> None:
 
 def _base(call: int) -> dict:
     p = plan()
-    return {"kind": "guarantee_call", "call": call, "plan": p.name, "plan_fp": p.fingerprint(), "contract": p.contract,
-            "env_fp": environment()["fingerprint"], "consumer": CONSUMER, "boundary": BOUNDARY}
+    return {"kind": f"{mode()}_call", "call": call, "plan": p.name, "plan_fp": p.fingerprint(),
+            "contract": p.contract, "env_fp": environment()["fingerprint"], "consumer": CONSUMER, "boundary": BOUNDARY}
 
 
 def _refuse(rec: dict, kind: str, why: str, t0: float):
@@ -709,6 +744,10 @@ def gate(kernel, A, B, As, Bs, block_size, output_dtype=None, consumer: str = CO
     rec["consumer"] = consumer
     rec["path_before"] = "kernel"
     _count("calls")
+    if plan().check != MODES[mode()]:
+        _refuse(rec, "plan", f"the plan's check {plan().check!r} is not what ENTAIL={mode()} runs "
+                             f"({MODES[mode()]!r}): the structural check (static) is an experiment, not the guarantee",
+                t0)
     try:
         A, B, As, Bs, block, issues = _admit(A, B, As, Bs, block_size, output_dtype, rec, t0)
     except Refused:
@@ -718,10 +757,11 @@ def gate(kernel, A, B, As, Bs, block_size, output_dtype=None, consumer: str = CO
         _refuse(rec, "checker", f"admission raised {type(e).__name__}: {e}", t0)
     out_dtype = output_dtype or torch.float16
     if A.numel() == 0:
-        rec.update({"outcome": "normal_delivered", "permit": call, "delivered": True, "elements": 0,
-                    "path_after": "kernel", "note": "no token: nothing to compare"})
+        outcome = "normal_delivered" if mode() == "guarantee" else "kernel_delivered"
+        rec.update({"outcome": outcome, "permit": call if mode() == "guarantee" else None, "delivered": True,
+                    "elements": 0, "path_after": "kernel", "note": "no token: nothing to compare"})
         _write(rec)
-        _count("normal_delivered")
+        _count(outcome)
         return kernel(A, B, As, Bs, list(block), out_dtype)
     if plan().check == "static":
         return _static(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0)
@@ -788,26 +828,46 @@ def permit_of(t) -> Optional[dict]:
 # --- CUDA graphs ------------------------------------------------------------------------------------------------------
 
 class _Site:
-    """One gate captured in a graph: the weights it reads (checked on the host before each replay) and its flags
-    (written on the device at each replay)."""
+    """One gate captured in a graph: the weights it reads (checked on the host before each replay), its flags
+    (written on the device at each replay) and their pinned host copy (written on the device before its stop check,
+    readable after a stop)."""
 
-    def __init__(self, call, rec, issues, B, Bs, flags):
-        self.call, self.rec, self.flags = call, rec, flags
+    def __init__(self, call, rec, issues, B, Bs, flags, host=None):
+        self.call, self.rec, self.flags, self.host = call, rec, flags, host
         self.B, self.Bs = weakref.ref(B), weakref.ref(Bs)
         self.issues = issues
 
 
 _GRAPHS = {}               # id(graph) -> (weakref to graph, [sites])
+_HOSTS = {}                # id(graph) -> (weakref to graph, pinned int64 [GRAPH_GATES, 6], gates used)
 _CAPTURE = threading.local()
 
 
 def capture_begin(graph) -> None:
     _CAPTURE.graph = graph
+    if mode() == "guarantee" and plan().check == "output":
+        # pinned host memory is made before the capture starts (an allocation while capturing is not safe)
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                _HOSTS[id(graph)] = [weakref.ref(graph),
+                                     torch.full((GRAPH_GATES, 6), -1, dtype=torch.int64, pin_memory=True), 0]
+        except Exception:  # noqa: BLE001 - no host copies: a gate inside this capture refuses (below)
+            _HOSTS.pop(id(graph), None)
 
 
 def capture_end(graph) -> None:
     if getattr(_CAPTURE, "graph", None) is graph:
         _CAPTURE.graph = None
+
+
+def _host_slot(graph):
+    h = _HOSTS.get(id(graph))
+    if h is None or h[0]() is not graph or h[2] >= GRAPH_GATES:
+        return None
+    h[2] += 1
+    return h[1][h[2] - 1]
 
 
 def _captured(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0):
@@ -820,22 +880,30 @@ def _captured(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0):
     if graph is None or GRAPH_HOOK not in _INSTALLED:
         _refuse(rec, "hook", "a capture this profile was not told about (torch.cuda.CUDAGraph.capture_begin not "
                              "hooked): its replays could not be checked", t0)
+    host = _host_slot(graph)
+    if host is None:
+        _refuse(rec, "unsupported", f"no pinned host copy for this gate's flags (none made at capture_begin, or more "
+                                    f"than {GRAPH_GATES} gates in one graph): a stop could not be told apart", t0)
     k = kernel(A, B, As, Bs, list(block), out_dtype)
     ref, status = _check(k, A, B, As, Bs, block, out_dtype, issues)
     bad = (status[1] + status[2] + status[3]) > 0
     out = torch.where(status[0] > 0, ref.reshape(k.shape), k)   # one value beyond: all the reference
-    out = torch.where(bad, torch.full_like(out, float("nan")), out)
     flags = torch.zeros(6, dtype=torch.int64, device=A.device)
     flags.copy_(status)
+    host.copy_(flags, non_blocking=True)
+    # integrity, scales or reference failed: nothing right to hand on. The device stops here, before the graph's
+    # next operation (stream order); the flags above are already on the host.
+    torch._assert_async(~bad)
     rec["captured"] = True
     rec["tolerance"] = {"ulps": p.ulps, "c_acc": p.c_acc, "form": "ulps*ulp(out,|r|) + c_acc*sum_blk|a_blk||b_blk|"}
-    site = _Site(rec["call"], dict(rec), issues, B, Bs, flags)
+    site = _Site(rec["call"], dict(rec), issues, B, Bs, flags, host)
     entry = _GRAPHS.get(id(graph))
     if entry is None or entry[0]() is not graph:
         entry = _GRAPHS[id(graph)] = (weakref.ref(graph), [])
     entry[1].append(site)
     rec.update({"outcome": "captured", "path_after": "the kernel's output, or the reference's when one value is "
-                                                     "beyond the tolerance, chosen on the device",
+                                                     "beyond the tolerance, chosen on the device; a failed "
+                                                     "integrity, scale or reference check stops the device here",
                 "permit": None, "delivered": False,
                 "note": "decided at each replay by the replay hook"})
     _count("captured_sites")
@@ -844,7 +912,8 @@ def _captured(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0):
 
 
 def before_replay(graph) -> None:
-    """Refuse a replay whose graph reads a weight that was re-issued, moved or written since capture."""
+    """Refuse a replay whose graph reads a weight that was re-issued, moved or written since capture; mark every
+    gate's host copy as not reached."""
     entry = _GRAPHS.get(id(graph))
     if entry is None or entry[0]() is not graph:
         return
@@ -854,13 +923,18 @@ def before_replay(graph) -> None:
             why = "it was collected" if t is None else _stale(t, site.issues[name])
             if why:
                 rec = dict(site.rec)
-                rec.update({"kind": "guarantee_replay", "replay_of": site.call, "call": next(_CALLS)})
+                rec.update({"kind": f"{mode()}_replay", "replay_of": site.call, "call": next(_CALLS)})
                 _refuse(rec, "epoch", f"the graph reads {name}, and {why}", time.perf_counter())
+    h = _HOSTS.get(id(graph))
+    if h is not None and h[0]() is graph and h[2]:
+        h[1][: h[2]].fill_(-1)
 
 
 def after_replay(graph) -> None:
-    """Read the flags every gate in the graph wrote at this replay; refuse the replay when one failed. Gates of
-    check "static" write none (their kernel was proven at capture, or the reference was captured): no wait."""
+    """Read the flags every gate in the graph wrote at this replay (from their pinned host copies) and refuse the
+    replay when one failed. A failed integrity, scale or reference check stopped the device at that gate: the wait
+    raises, the graph's later operations did not run, and the host copies say which gate stopped it. Gates of check
+    "static" write none (their kernel was proven at capture, or the reference was captured): no wait."""
     entry = _GRAPHS.get(id(graph))
     if entry is None or entry[0]() is not graph:
         return
@@ -868,28 +942,51 @@ def after_replay(graph) -> None:
     _count("replays")
     for site in entry[1]:
         if site.flags is None:         # check "static": what was captured is what replays (the kernel proven at
-            _count(site.rec.get("outcome", "normal_delivered"))   # capture, or the reference): counted, no wait
+            _count(site.rec.get("outcome", "kernel_delivered"))   # capture, or the reference): counted, no wait
     if not sites:
         return
     import torch
 
-    torch.cuda.current_stream().synchronize()
-    flags = torch.stack([s.flags for s in sites]).tolist()
-    blocked = None
+    stop = None
+    try:
+        torch.cuda.current_stream().synchronize()
+    except Exception as e:  # noqa: BLE001 - a device assertion (a gate's stop) or another device fault
+        stop = e
+    flags = [s.host.tolist() for s in sites]          # host memory: readable after a stop too
+    blocked, reached = None, 0
     for site, st in zip(sites, flags):
         viol, rbad, bits, sbad, kbad, ratio = (int(x) for x in st)
         rec = dict(site.rec)
         M, N = rec["shape"]["M"], rec["shape"]["N"]
-        rec.update({"kind": "guarantee_replay", "replay_of": site.call, "call": next(_CALLS),
-                    "checks": {"elements": M * N, "beyond_tolerance": viol, "kernel_nonfinite": kbad,
-                               "reference_nonfinite": rbad, "integrity_bits": bits, "scales_bad": bool(sbad),
-                               "max_ratio": ratio / 2.0 ** 20}})
+        rec.update({"kind": f"{mode()}_replay", "replay_of": site.call, "call": next(_CALLS)})
+        if viol < 0:                   # the host copy was not written: the device stopped before this gate
+            if stop is None:
+                rec.update({"outcome": "error", "permit": None, "delivered": False,
+                            "reason": "the gate's flags were not written although the replay finished"})
+                _count("errors")
+                _write(rec)
+                blocked = blocked or ("checker", rec)
+            continue
+        reached += 1
+        rec["checks"] = {"elements": M * N, "beyond_tolerance": viol, "kernel_nonfinite": kbad,
+                         "reference_nonfinite": rbad, "integrity_bits": bits, "scales_bad": bool(sbad),
+                         "max_ratio": ratio / 2.0 ** 20}
         if bits or sbad or rbad:
             kind = "integrity" if bits else ("scales" if sbad else "reference")
-            rec.update({"outcome": "blocked", "blocked_kind": kind, "permit": None, "delivered": False,
-                        "reason": "the replay's output was poisoned on the device and the replay is refused"})
-            _count("blocked")
-            _count(f"blocked_{kind}")
+            if stop is not None:
+                rec.update({"outcome": "blocked", "blocked_kind": kind, "permit": None, "delivered": False,
+                            "stopped": True,
+                            "reason": "the device stopped at this gate: the graph's next operation did not run; "
+                                      f"the replay is refused ({type(stop).__name__}: {str(stop).strip()[:200]})"})
+                _count("blocked")
+                _count(f"blocked_{kind}")
+            else:                      # the assertion did not stop the device: the next operation read this output
+                rec.update({"outcome": "error", "error_kind": "stop_failed", "blocked_kind": kind, "permit": None,
+                            "delivered": True,
+                            "reason": "a check failed and the device did not stop: the graph's next operation read "
+                                      "this output"})
+                _count("errors")
+                _count("stop_failed")
             blocked = blocked or (kind, rec)
         elif viol:
             rec.update({"outcome": "repaired_delivered", "path_after": "reference (chosen on the device)",
@@ -900,6 +997,16 @@ def after_replay(graph) -> None:
                         "path_after": "kernel", "permit": rec["call"], "delivered": True})
             _count(rec["outcome"])
         _write(rec)
+    if stop is not None:
+        if blocked is None:            # not a gate's stop: another fault of the device
+            _write({"kind": f"{mode()}_replay", "outcome": "error", "permit": None, "delivered": False,
+                    "reason": f"the replay failed on the device and no gate's check had failed ({type(stop).__name__}:"
+                              f" {str(stop).strip()[:300]})", "gates_reached": reached, "gates": len(sites)})
+            _count("errors")
+            raise stop
+        raise Refused(blocked[0], f"a gate in the replayed graph failed its check and stopped the device there (the "
+                                  f"graph's next operation did not run; {reached} of {len(sites)} gates reached); the "
+                                  f"replay is refused", blocked[1]) from stop
     if blocked:
         raise Refused(blocked[0], "a gate in the replayed graph failed its check; the replay's outputs are refused",
                       blocked[1])
@@ -982,7 +1089,7 @@ def consumer_launch(kernel_key, bound, grid, ttir) -> bool:
                 v = kernel_ir.Verdict("unproven", f"the IR check raised {type(e).__name__}: {e}")
         _VERDICTS[key] = v
         _count(f"ir_{v.verdict}")
-        _write({"kind": "guarantee_kernel_ir", "plan_fp": plan().fingerprint(), "kernel": str(kernel_key[0]),
+        _write({"kind": f"{mode()}_kernel_ir", "plan_fp": plan().fingerprint(), "kernel": str(kernel_key[0]),
                 "grid": list(grid), "ints": ints,
                 "binding": {k: [b.role, list(b.shape), list(b.stride), list(b.block)] for k, b in binding.items()},
                 "verdict": v.to_json()})
@@ -1041,9 +1148,10 @@ def reference_output(A, B, As, Bs, block, out_dtype):
 
 
 def _static(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0):
-    """Check "static": the consumer's launch goes ahead only when its configuration is proven to read the
-    producers' scales for every element (kernel_ir); otherwise the reference's output is handed on. Nothing is
-    compared after the call, and nothing waits for the device."""
+    """Check "static" (ENTAIL=structure, the structural check experiment - not the guarantee): the consumer's launch
+    goes ahead only when its configuration is proven to compute the contract (kernel_ir: every output element once,
+    the whole sum over K, the producers' scales); otherwise the reference's output is handed on. Nothing is compared
+    after the call, nothing waits for the device, and no permit is issued: kernel_delivered, reference_delivered."""
     p = plan()
     capturing = _capturing()
     graph = getattr(_CAPTURE, "graph", None) if capturing else None
@@ -1080,9 +1188,11 @@ def _static(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0):
     rec["check"] = "static"
     rec["integrity"] = p.integrity
     rec["kernel_ir"] = [v.verdict for v in vs]
+    if rec["repairs"]:
+        _count("admission_repairs")
     if vs and all(v.verdict == "proven" for v in vs):
         out = k
-        outcome = "repaired_delivered" if rec["repairs"] else "normal_delivered"
+        outcome = "kernel_delivered"
         rec.update({"outcome": outcome, "path_after": "kernel (its launch configuration proven)"})
     else:
         why = "no launch of the consumer kernel was seen" if not vs else \
@@ -1092,9 +1202,9 @@ def _static(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0):
         except Exception as e:  # noqa: BLE001
             _count("checker_errors")
             _refuse(rec, "checker", f"the reference raised {type(e).__name__}: {e}", t0)
-        outcome = "repaired_delivered"
+        outcome = "reference_delivered"
         rec.update({"outcome": outcome, "path_after": "reference (the kernel was not launched)",
-                    "reason": f"the kernel's launch is not proven to read its own scales ({why}); the reference's "
+                    "reason": f"the kernel's launch is not proven to compute the contract ({why}); the reference's "
                               f"output is handed on"})
     _count(outcome)
     if capturing:
@@ -1103,12 +1213,11 @@ def _static(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0):
             entry = _GRAPHS[id(graph)] = (weakref.ref(graph), [])
         entry[1].append(_Site(rec["call"], dict(rec), issues, B, Bs, None))
         rec["captured"] = True
-    rec.update({"permit": rec["call"], "delivered": True,
+    rec.update({"permit": None, "delivered": True,
                 "ms_kernel_path": round((time.perf_counter() - t1) * 1e3, 3),
                 "ms_total": round((time.perf_counter() - t0) * 1e3, 3)})
-    _PERMITS.set(out, {"permit": rec["call"], "plan_fp": rec["plan_fp"]})
     first = tuple(id(v) for _k, v in ctx["verdicts"])   # verdicts live in _VERDICTS: their ids are stable
-    if p.records == "all" or outcome != "normal_delivered" or first not in _SAID:
+    if p.records == "all" or outcome != "kernel_delivered" or rec["repairs"] or first not in _SAID:
         _SAID.add(first)
         _write(rec)
     return out
@@ -1130,6 +1239,7 @@ def reset() -> None:
     _EPOCHS.clear()
     _HELD.clear()
     _GRAPHS.clear()
+    _HOSTS.clear()
     _VERDICTS.clear()
     _FAST.clear()
     _SAID.clear()

@@ -137,6 +137,7 @@ def main():
     tmp = tempfile.mkdtemp()
     rec = os.path.join(tmp, "g.jsonl")
     os.environ["ENTAIL_GUARANTEE_RECORD"] = rec
+    os.environ.pop("ENTAIL", None)          # the guarantee (a test calls in directly)
     g.set_plan(None)
 
     # 1. normal: the kernel's own output is handed on
@@ -259,21 +260,106 @@ def main():
     assert counts.get("blocked", 0) >= 8 and counts.get("repaired_delivered", 0) >= 4, counts
     print("ok record:", counts)
 
-    # 15. the autoinstall table for ENTAIL=guarantee holds only the profile's entries
+    # 15. the autoinstall table for ENTAIL=guarantee holds only the profile's entries (no Triton launch hook: that
+    # is the structural check experiment's, ENTAIL=structure)
     src = open(os.path.join(os.path.dirname(HERE), "entail", "adapters", "autoinstall", "sitecustomize.py"),
                encoding="utf-8").read()
     assert "GUARANTEE_TARGETS" in src and 'TARGETS = dict(GUARANTEE_TARGETS)' in src
-    print("ok autoinstall table")
+    assert 'TARGETS = dict(STRUCTURE_TARGETS)' in src
+    head = src[src.index("GUARANTEE_TARGETS = {"):src.index("STRUCTURE_TARGETS = dict")]
+    assert "install_triton" not in head, head
+    print("ok autoinstall tables")
+
+    # 16. the guarantee runs only its own check: a plan asking for the structural check is refused
+    g.set_plan(g.Plan(check="static", integrity="epoch"))
+    refused(lambda: call(fu, l1, act()), "plan")
+    g.set_plan(None)
+    print("ok ENTAIL=guarantee refuses a plan with check 'static'")
+
+    graph_replays(fu, bk, rec)
     ad.uninstall()
     for name in (ad.FP8_UTILS, ad.BLOCK_KERNEL):
         sys.modules.pop(name, None)
     static_mode(rec)
 
 
+class _Graph:
+    """Something to stand for a torch.cuda.CUDAGraph (the replay hook keys its gates by identity)."""
+
+
+def graph_replays(fu, bk, rec):
+    """17. What the replay hook does with the gates of a replayed graph (L5.4c), on CPU with the device's wait faked:
+    a gate whose integrity, scale or reference check failed stopped the device (the wait raises) and its pinned host
+    copy says why - blocked, the replay refused; gates after it were not reached (host copy unwritten); a wait that
+    fails with no gate failed is another fault and is raised as it is; a failed check without a stop is an error
+    (the next operation read the output), never a block."""
+    import weakref
+
+    class Stream:
+        def __init__(self, fail):
+            self.fail = fail
+
+        def synchronize(self):
+            if self.fail:
+                raise RuntimeError("CUDA error: device-side assert triggered")
+
+    layer = layer_of(bk, seed=11)
+    issues = {"B": g.tag(layer.weight), "Bs": g.tag(layer.weight_scale_inv)}
+    base = {"call": 1, "shape": {"M": 4, "N": 256, "K": 512}, "repairs": []}
+
+    def run(host_rows, fail):
+        gr = _Graph()
+        sites = []
+        hosts = torch.full((len(host_rows), 6), -1, dtype=torch.int64)
+        for i, row in enumerate(host_rows):
+            hosts[i] = torch.tensor(row, dtype=torch.int64)
+            sites.append(g._Site(i + 1, dict(base, call=i + 1), issues, layer.weight, layer.weight_scale_inv,
+                                 torch.zeros(6, dtype=torch.int64), hosts[i]))
+        g._GRAPHS[id(gr)] = (weakref.ref(gr), sites)
+        orig = torch.cuda.current_stream
+        torch.cuda.current_stream = lambda: Stream(fail)
+        try:
+            g.after_replay(gr)
+            return None
+        except Exception as e:  # noqa: BLE001
+            return e
+        finally:
+            torch.cuda.current_stream = orig
+            g._GRAPHS.pop(id(gr), None)
+
+    unreached = [-1] * 6
+    e = run([[0, 0, 0, 0, 0, 0], [0, 0, 1, 0, 0, 0], unreached], fail=True)
+    assert isinstance(e, g.Refused) and e.kind == "integrity" and "stopped the device" in str(e), e
+    L = lines(rec)
+    assert L[-2]["outcome"] == "normal_delivered" and L[-1]["outcome"] == "blocked" and L[-1]["stopped"], L[-2:]
+    assert not L[-1]["delivered"] and L[-1]["blocked_kind"] == "integrity"
+    e = run([[0, 0, 0, 0, 0, 0], unreached], fail=True)                 # a fault no gate made
+    assert isinstance(e, RuntimeError) and not isinstance(e, g.Refused), e
+    assert lines(rec)[-1]["outcome"] == "error"
+    e = run([[0, 0, 0, 1, 0, 0]], fail=False)                           # failed, but the device did not stop
+    assert isinstance(e, g.Refused) and lines(rec)[-1]["outcome"] == "error" and \
+        lines(rec)[-1]["error_kind"] == "stop_failed" and lines(rec)[-1]["delivered"], lines(rec)[-1]
+    e = run([[3, 0, 0, 0, 0, 1 << 21], [0, 0, 0, 0, 0, 0]], fail=False)  # beyond the tolerance: the reference
+    assert e is None and [x["outcome"] for x in lines(rec)[-2:]] == ["repaired_delivered", "normal_delivered"]
+    # before a replay, every gate's host copy is marked unreached
+    gr = _Graph()
+    g._GRAPHS[id(gr)] = (weakref.ref(gr), [])
+    g._HOSTS[id(gr)] = [weakref.ref(gr), torch.full((4, 6), 7, dtype=torch.int64), 2]
+    g.before_replay(gr)
+    assert (g._HOSTS[id(gr)][1][:2] == -1).all() and (g._HOSTS[id(gr)][1][2:] == 7).all()
+    g._GRAPHS.pop(id(gr)), g._HOSTS.pop(id(gr))
+    print("ok graph replays: a failed check stopped the device -> blocked (next operation not run); another fault "
+          "raised as it is; a failed check without a stop -> error, not a block")
+
+
 def static_mode(rec):
-    """Check "static" (M19 L5.4b): the stand-in kernel offers its launch to the core as the Triton hook would, with
-    the TTIR vLLM's kernel compiles to (tests/data/kernel_ir); a proven configuration runs the kernel and nothing is
-    compared after it, a violating or unproven one is not launched and the reference's output is handed on."""
+    """Check "static" (ENTAIL=structure, the structural check experiment; M19 L5.4b/L5.4c): the stand-in kernel
+    offers its launch to the core as the Triton hook would, with the TTIR vLLM's kernel compiles to
+    (tests/data/kernel_ir); a proven configuration runs the kernel and nothing is compared after it, a violating or
+    unproven one is not launched and the reference's output is handed on. No permit: it is not the guarantee."""
+    os.environ["ENTAIL"] = "structure"
+    g.set_plan(None)
+    assert g.plan().check == "static" and g.profile() == "block_fp8_structure"
     data = os.path.join(HERE, "data", "kernel_ir")
     launched = []
 
@@ -304,8 +390,8 @@ def static_mode(rec):
     layer = layer_of(bk, N=256, K=512)
     x = act(M=96)
 
-    for ttir_name, bm, want_launch, outcome in (("orig", 64, True, "normal_delivered"),
-                                                 ("tile_1", 64, False, "repaired_delivered")):
+    for ttir_name, bm, want_launch, outcome in (("orig", 64, True, "kernel_delivered"),
+                                                 ("tile_1", 64, False, "reference_delivered")):
         ad.uninstall()
         fu.w8a8_triton_block_scaled_mm = kernel_with(ttir_name, bm)
         fu.per_token_group_quant_fp8 = quant
@@ -318,6 +404,7 @@ def static_mode(rec):
         y = fu.w8a8_triton_block_scaled_mm(A, layer.weight, As, layer.weight_scale_inv, [128, 128], torch.bfloat16)
         last = lines(rec)[-1]
         assert last["outcome"] == outcome and last["check"] == "static", last
+        assert last["permit"] is None and last["profile"] == "block_fp8_structure" and last["kind"] == "structure_call"
         assert (launched == [ttir_name]) == want_launch, launched
         t = truth(A, As, layer.weight, layer.weight_scale_inv)
         assert float(((y.double() - t).abs() / (t.abs() + 1)).max()) < 0.02
@@ -336,7 +423,7 @@ def static_mode(rec):
     A, As = fu.per_token_group_quant_fp8(x, BK)
     y = fu.w8a8_triton_block_scaled_mm(A, layer.weight, As, layer.weight_scale_inv, [128, 128], torch.bfloat16)
     last = lines(rec)[-1]
-    assert last["outcome"] == "repaired_delivered" and last["kernel_ir"] == [] and "no launch" in last["reason"], last
+    assert last["outcome"] == "reference_delivered" and last["kernel_ir"] == [] and "no launch" in last["reason"], last
     t = truth(A, As, layer.weight, layer.weight_scale_inv)
     assert float(((y.double() - t).abs() / (t.abs() + 1)).max()) < 0.02
     print("ok static: a consumer launch never seen -> the reference's output")
@@ -346,6 +433,14 @@ def static_mode(rec):
     refused(lambda: fu.w8a8_triton_block_scaled_mm(A, layer.weight, As, layer.weight_scale_inv, [128, 128],
                                                    torch.bfloat16), "hook")
     print("ok static: the Triton launch hook missing -> refused")
+    # the structural experiment runs only its own check: a plan asking for the whole-output check is refused
+    g.installed(g.TRITON_HOOK)
+    g.set_plan(g.Plan(check="output"))
+    A, As = fu.per_token_group_quant_fp8(x, BK)
+    refused(lambda: fu.w8a8_triton_block_scaled_mm(A, layer.weight, As, layer.weight_scale_inv, [128, 128],
+                                                   torch.bfloat16), "plan")
+    print("ok ENTAIL=structure refuses a plan with check 'output'")
+    os.environ.pop("ENTAIL", None)
     g.set_plan(None)
     ad.uninstall()
     for name in (ad.FP8_UTILS, ad.BLOCK_KERNEL):

@@ -1,7 +1,7 @@
 """Cost, apart from conservation: python cost.py <out_root> [pairs]   (one measurement:  python cost.py --one ...)
 
-Each measurement is a fresh process (off or guarantee), in pairs whose order alternates (off first, then guarantee
-first, ...), `pairs` pairs (default 5). In each process, on the real vLLM path (TritonFp8BlockScaledMMKernel,
+Each measurement is a fresh process (off, guarantee or - from v3 - structure, BFG_COST_MODES), in rounds whose order
+rotates (off first, then the next mode first, ...), `pairs` rounds (default 5). In each process, on the real vLLM path (TritonFp8BlockScaledMMKernel,
 N=6144, K=2560 and N=2560, K=9728: Qwen3-4B's fused QKV-like and down-projection shapes), it times:
   start         process start -> the kernel object and the weights processed (issued, under the profile)
   first         the first call of each shape (Triton compiles the kernel in both modes)
@@ -79,7 +79,7 @@ def one(mode, out_path):
             lau = common.install_launcher(None)
         r["peak_bytes"] = int(torch.cuda.max_memory_allocated())
         r["launches"] = launches + lau.launches
-        if mode == "guarantee":
+        if mode in ("guarantee", "structure"):
             from entail.adapters import vllm_block_fp8_guarantee as ad
             r["entail"] = ad.stats()
     common.write_json(out_path, r)
@@ -90,9 +90,11 @@ def main(out_root, pairs=5):
 
     os.makedirs(out_root, exist_ok=True)
     auto = os.path.join(common.ENTAIL_ROOT, "entail", "adapters", "autoinstall")
+    modes = ["off"] + os.environ.get("BFG_COST_MODES", "guarantee,structure").split(",")
     order = []
     for i in range(pairs):
-        order += [("off", i), ("guarantee", i)] if i % 2 == 0 else [("guarantee", i), ("off", i)]
+        rot = modes[i % len(modes):] + modes[:i % len(modes)]
+        order += [(m, i) for m in rot]
     runs = []
     for mode, i in order:
         env = dict(os.environ, ENTAIL=mode, ENTAIL_QUIET="start",
@@ -126,18 +128,22 @@ def main(out_root, pairs=5):
                     t[f"{shape}.{key}"] = vals
     summary["table"] = table
     ratios = {}
-    if "off" in table and "guarantee" in table:
-        for key, gv in table["guarantee"].items():
+    for mode in modes[1:]:
+        if "off" not in table or mode not in table:
+            continue
+        rm = ratios[mode] = {}
+        for key, gv in table[mode].items():
             ov = table["off"].get(key)
             if key.endswith("median_ms") or key.endswith("first_ms") or key == "start_s":
                 if ov:
-                    ratios[key] = {"off_median": statistics.median(ov), "guarantee_median": statistics.median(gv),
-                                   "ratio": statistics.median(gv) / max(statistics.median(ov), 1e-9),
-                                   "guarantee_range": [min(gv), max(gv)], "off_range": [min(ov), max(ov)]}
+                    rm[key] = {"off_median": statistics.median(ov), "mode_median": statistics.median(gv),
+                               "ratio": statistics.median(gv) / max(statistics.median(ov), 1e-9),
+                               "mode_range": [min(gv), max(gv)], "off_range": [min(ov), max(ov)]}
     summary["ratios"] = ratios
     common.write_json(os.path.join(out_root, "cost_summary.json"), summary)
-    for k, v in ratios.items():
-        print(f"{k:40s} off {v['off_median']:9.3f}  guarantee {v['guarantee_median']:9.3f}  x{v['ratio']:.2f}")
+    for mode, rm in ratios.items():
+        for k, v in rm.items():
+            print(f"{mode:9s} {k:40s} off {v['off_median']:9.3f}  {mode} {v['mode_median']:9.3f}  x{v['ratio']:.2f}")
 
 
 if __name__ == "__main__":

@@ -15,7 +15,8 @@
   handles      the consumer's call goes through guarantee.gate, which may hand the kernel the scale the producer
                paired with its value or the declared block (before dispatch), hand on the reference's output, or
                refuse. Nothing here compares or decides.
-Installed only by ENTAIL=guarantee (adapters/autoinstall/sitecustomize.py), or by a harness calling install().
+Installed only by ENTAIL=guarantee or ENTAIL=structure (adapters/autoinstall/sitecustomize.py; the Triton launch hook
+only for structure, the structural check experiment), or by a harness calling install().
 A producer called while torch.compile traces issues nothing: compiled code does not run these hooks at run time,
 and the gate refuses a value without an issue.
 """
@@ -249,8 +250,9 @@ def read_launch(fn, args, kwargs, grid):
 
 
 def install_triton():
-    """The launch hook check "static" needs: every eager Triton launch while a gate is open is offered to the core,
-    which decides whether it goes ahead (guarantee.consumer_launch). Compile-only warm-ups pass through."""
+    """The launch hook check "static" (ENTAIL=structure) needs: every eager Triton launch while a gate is open is
+    offered to the core, which decides whether it goes ahead (guarantee.consumer_launch). Compile-only warm-ups pass
+    through."""
     mod = sys.modules.get("triton.runtime.jit")
     J = getattr(mod, "JITFunction", None) if mod is not None else None
     if J is None or getattr(J.run, "__entail_guarantee__", False):

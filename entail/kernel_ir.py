@@ -10,23 +10,41 @@ every loop iteration, without any data: the values the kernel loads are never ne
 
 The meaning it holds the kernel to is the producers' (guarantee.Issue): an activation value A[m, k] goes with the
 scale As[m, k // group_k] issued with it, a weight value B[n, k] with Bs[n // block_n, k // block_k] issued with
-it. For every `tt.dot` whose result is multiplied by loaded scales and accumulated, and for every element of both
-operands the dot consumes (masked-out elements contribute nothing and are skipped):
+it. The contract of the launch is the whole product: every output element C[m, n] (M x N, the output's shape) is
+stored once, and what is stored is
 
-  scaled_dot_reads   the activation scale multiplied into output row i is, for every k the row consumes, the one
-                     issued for (m, k // group_k) with that activation; the weight scale multiplied into output
-                     column j is, for every k, the one issued for (n // block_n, k // block_k) with that weight
-  contraction        both operands are read at the same k for each contraction index
-  store              the accumulated value of (row of A, column of B) is stored at C[m, n]
+    C[m, n] = convert( 0 + sum over every k in [0, K), once each, of  A[m, k] * B[n, k] * As[..] * Bs[..] )
+
+with the scales the producers issued for those elements. The IR proves this when all of the following hold for
+every program and every loop iteration (masked-out operand lanes load an exact zero and contribute nothing):
+
+  terms        each addend is one `tt.dot` (accumulating into an exact zero) of a load of the issued activation
+               and a load of the issued weight, multiplied by exactly one loaded activation scale and one loaded
+               weight scale and nothing else (a constant factor other than 1 is a violation)
+  scale reads  the activation scale multiplied into output row i is, for every k the row consumes, the one issued
+               for (m, k // group_k) with that activation; the weight scale multiplied into output column j is, for
+               every k, the one issued for (n // block_n, k // block_k) with that weight
+  contraction  both operands are read at the same k for each contraction index, masked alike along k
+  sum          what is stored is a sum of such terms from an exact zero (only float conversions between it and the
+               store), all for the same output rows and columns, whose k cover [0, K) exactly once
+  store        it is stored at C[m, n] for its (row of A, column of B); over the whole launch every element of C is
+               stored exactly once; nothing else is written anywhere
+  indices      the integer arithmetic stays inside its i32 range (the IR wraps; this module does not model that)
 
 The verdict, per launch:
-  proven       every term of every iteration of every program holds the meaning above, whatever the data
-  violation    an element is multiplied by a scale that is not its own (the first such is described)
+  proven       all of the above, whatever the data (the arithmetic itself - products, sums, rounding - is the
+               compiler's and the device's, not checked here)
+  violation    the IR does not compute the contract for this launch: an element multiplied by a scale that is not
+               its own, a k missing or counted twice, an output element never stored, a write elsewhere, an extra
+               factor (the first such is described)
   possible     the scale read is chosen by a value the kernel loads at run time (data the IR cannot see), and one
                of the choices is not the element's own scale
   unproven     the IR does something this module does not model (an op, a data-dependent address, a loop whose
-               bounds differ between programs, a layout it cannot invert): nothing is claimed
-A launch that is not proven gets no claim from here; the caller decides (the L5.4a whole-output check, or refuse).
+               bounds differ between programs, a layout it cannot invert, a value stored that is not a sum of
+               terms): nothing is claimed
+A launch that is not proven gets no claim from here; the caller decides (the reference's output, or refuse).
+(2026-10-03, L5.4c: before this, only the scale reads of the terms found were checked, so a kernel that stored
+nothing, or summed one K group of twenty, was "proven".)
 Integers are evaluated with numpy over all programs (in chunks); a launch is decided once and cached by its
 caller, so the cost is per launch configuration and size, not per call.
 """
@@ -175,6 +193,8 @@ def _op(line: str) -> Op:
     op.rtype = rest[cut + 1:].strip() if cut < len(rest) else ""
     if "->" in op.rtype:
         op.rtype = op.rtype.split("->")[-1].strip()
+    if " to " in op.rtype:                  # a conversion prints "source type to result type"
+        op.rtype = op.rtype.split(" to ")[-1].strip()
     return op
 
 
@@ -280,6 +300,57 @@ def _as_bool_full(x):
     return x.full().astype(bool) if x is not None else None
 
 
+def _const(x):
+    """The value of a float constant (None when x is not one or the value is not readable)."""
+    if isinstance(x, F) and x.kind == "opaque" and (x.stash or {}).get("const"):
+        return x.stash.get("value")
+    return None
+
+
+def _zero(x) -> bool:
+    return _const(x) == 0.0
+
+
+class Acc:
+    """A sum, from an exact zero, of checked scaled dot terms: the operands they read (A, B), the output rows and
+    columns they belong to (the same for every term that adds something to a program), K, per program whether any
+    term adds something (has (P,)), and per term and program the k it covers as one range (lo (P,), count (P,))."""
+    __slots__ = ("src", "rows", "rows_valid", "cols", "cols_valid", "K", "has", "ranges")
+
+    def __init__(self, src=None, rows=None, rows_valid=None, cols=None, cols_valid=None, K=None, has=None,
+                 ranges=()):
+        self.src, self.rows, self.rows_valid, self.cols, self.cols_valid = src, rows, rows_valid, cols, cols_valid
+        self.K, self.has, self.ranges = K, has, tuple(ranges)
+
+    def plus(self, other):
+        if not self.ranges:
+            return other
+        if not other.ranges:
+            return self
+        if self.src != other.src or self.K != other.K:
+            raise Unmodelled("a sum of terms over different operands")
+        both = self.has & other.has
+        if not (_same_coords(self.rows, self.rows_valid, other.rows, other.rows_valid, both)
+                and _same_coords(self.cols, self.cols_valid, other.cols, other.cols_valid, both)):
+            raise Unmodelled("terms of one sum belong to different output rows or columns")
+        if self.has.all():               # the usual case: every program already has its rows and columns
+            return Acc(self.src, self.rows, self.rows_valid, self.cols, self.cols_valid, self.K, self.has,
+                       self.ranges + other.ranges)
+        h = self.has[:, None]
+        return Acc(self.src, np.where(h, self.rows, other.rows), np.where(h, self.rows_valid, other.rows_valid),
+                   np.where(h, self.cols, other.cols), np.where(h, self.cols_valid, other.cols_valid), self.K,
+                   self.has | other.has, self.ranges + other.ranges)
+
+
+def _same_coords(a, va, b, vb, sel) -> bool:
+    """Whether two (P, n) coordinate arrays agree, with their validity, on the programs `sel` (P,)."""
+    if np.shape(va) != np.shape(vb):
+        return False
+    if not sel.all():
+        a, va, b, vb = a[sel], va[sel], b[sel], vb[sel]
+    return bool(np.array_equal(va, vb) and not np.any((a != b) & va))
+
+
 # --- the binding of a launch ----------------------------------------------------------------------------------------
 
 @dataclass
@@ -350,6 +421,7 @@ class _Run:
         self.terms = 0
         self.elements = 0
         self.went_dense = False
+        self.stores = []           # per store to the output: (row lo, rows, column lo, columns) of the programs storing
 
     # -- kept-apart arithmetic --
 
@@ -422,7 +494,11 @@ class _Run:
             m = re.match(r'(?:dense<)?([-0-9.eE+a-z]+)>?', op.text)
             et = _elem(op.rtype)
             if et.startswith("f") or et.startswith("bf"):
-                r = F("opaque", stash={"const": True})
+                try:
+                    val = float(m.group(1)) if m else None
+                except ValueError:             # a hex bit pattern: not read here
+                    val = None
+                r = F("opaque", stash={"const": True, "value": val})
             else:
                 v = m.group(1)
                 v = 1 if v == "true" else 0 if v == "false" else int(float(v))
@@ -477,6 +553,10 @@ class _Run:
             r = self._shape_op(n, op, args[0], shape)
         elif n in _PASS:
             r = args[0]
+            if isinstance(r, F) and n not in ("arith.truncf", "arith.extf"):
+                # a float made into an integer or reinterpreted: a value that depends on data from here on
+                r = T(f"{n} of a float value") if not _elem(op.rtype).startswith(("f", "bf")) else \
+                    F("opaque", stash={"why": f"{n} of a float value"})
         elif n == "tt.addptr":
             p, o = args
             if isinstance(o, T) or p.taint is not None:
@@ -496,13 +576,21 @@ class _Run:
             if not isinstance(p, Ptr):
                 raise Unmodelled("a load from a non-pointer")
             if et.startswith("f") or et.startswith("bf"):
-                r = F("leaf", arg=p.arg, off=(p.off if p.taint is None else None), mask=mask, taint=p.taint)
+                other = args[2] if len(args) > 2 else None
+                # masked-out lanes hold `other` (undefined without one): they contribute nothing only when it is 0
+                r = F("leaf", arg=p.arg, off=(p.off if p.taint is None else None), mask=mask, taint=p.taint,
+                      stash={"masked_zero": mask is None or _zero(other)})
             else:
                 r = T(f"a value loaded from {p.arg}")
         elif n == "tt.dot":
             a, b = args[0], args[1]
             if not (isinstance(a, F) and isinstance(b, F) and a.kind == "leaf" and b.kind == "leaf"):
                 raise Unmodelled("a dot whose operands are not loads")
+            if len(args) > 2 and not _zero(args[2]):
+                raise Unmodelled("a dot that accumulates into something other than an exact zero")
+            for leaf in (a, b):
+                if not (leaf.stash or {}).get("masked_zero"):
+                    raise _Fail("unproven", f"masked-out lanes of {leaf.arg} in the dot are not loaded as zero")
             r = F("dot", parts=[a, b])
         elif n == "arith.mulf":
             parts = []
@@ -513,12 +601,11 @@ class _Run:
             r = F("mul", parts=parts)
         elif n == "arith.addf":
             a, b = args
-            stash = None
-            for x in (a, b):
-                if isinstance(x, F) and self._has_dot(x):
-                    stash = self._check_term(x)
-            prev = [x.stash for x in (a, b) if isinstance(x, F) and x.kind == "acc" and x.stash]
-            r = F("acc", stash=stash or (prev[0] if prev else None))
+            sa, sb = self._acc_of(a), self._acc_of(b)
+            if sa is None or sb is None:      # something else is added: not a sum of terms (stored, it is unproven)
+                r = F("opaque", stash={"why": "a sum with an addend that is not a scaled dot term"})
+            else:
+                r = F("acc", stash=sa.plus(sb))
         elif n == "scf.for":
             self._for(op, env)
             return
@@ -532,6 +619,10 @@ class _Run:
             return
         else:
             raise Unmodelled(f"the op {n} is not modelled")
+        if isinstance(r, E) and not r.b and n.startswith("arith.") and _elem(op.rtype) == "i32":
+            lo, hi = _int_range(r)
+            if lo < -2 ** 31 or hi > 2 ** 31 - 1:
+                raise Unmodelled(f"an i32 index computation ({n}) leaves the i32 range ({lo}..{hi}); the IR wraps")
         for name in op.results[:1]:
             env[name] = r
 
@@ -545,7 +636,8 @@ class _Run:
         if isinstance(x, F):
             if x.kind == "leaf":
                 return F("leaf", arg=x.arg, off=None if x.off is None else self._shape_op(n, op, x.off, shape),
-                         mask=None if x.mask is None else self._shape_op(n, op, x.mask, shape), taint=x.taint)
+                         mask=None if x.mask is None else self._shape_op(n, op, x.mask, shape), taint=x.taint,
+                         stash=x.stash)
             if x.kind == "opaque":
                 return x
             if x.kind == "sel":
@@ -604,6 +696,26 @@ class _Run:
     def _has_dot(x):
         return x.kind == "dot" or (x.kind == "mul" and any(p.kind == "dot" for p in x.parts))
 
+    def _acc_of(self, x) -> Optional[Acc]:
+        """x as a sum of checked terms from zero: an exact zero is the empty sum, a scaled dot term (checked here)
+        a sum of one; None for anything else."""
+        if not isinstance(x, F):
+            return None
+        if _zero(x):
+            return Acc()
+        if x.kind == "acc":
+            return x.stash
+        if self._has_dot(x):
+            t = self._check_term(x)
+            P = self.P
+            kv = _bp(t["k_valid"], P, np.shape(t["k_valid"])[-1])
+            lo, cnt = _ranges(_bp(t["k"], P, kv.shape[1]), kv, "a contraction tile reads one k twice",
+                              "a contraction tile whose k are not one range")
+            R, C = np.shape(t["rows"])[-1], np.shape(t["cols"])[-1]
+            return Acc(t["src"], _bp(t["rows"], P, R), _bp(t["rows_valid"], P, R), _bp(t["cols"], P, C),
+                       _bp(t["cols_valid"], P, C), t["K"], cnt > 0, ((lo, cnt),))
+        return None
+
     # --- the meaning check -------------------------------------------------------------------------------------------
 
     def _check_term(self, term):
@@ -618,10 +730,20 @@ class _Run:
                 raise _Fail("unproven", f"the dot reads {leaf.arg}, which is not issued as {role}")
             if leaf.off is None:
                 raise _Fail("unproven", f"the dot reads {leaf.arg} at an address chosen by data ({leaf.taint})")
+        ai, bi = self.binding[a.arg], self.binding[b.arg]
+        if len(ai.shape) != 2 or len(bi.shape) != 2 or int(ai.shape[1]) != int(bi.shape[1]):
+            raise Unmodelled(f"{a.arg} {ai.shape} and {b.arg} {bi.shape} do not share one contraction length")
         scales = []
         for f in parts:
-            if f.kind == "dot" or (f.kind == "opaque" and (f.stash or {}).get("const")):
+            if f.kind == "dot":
                 continue
+            if f.kind == "opaque" and (f.stash or {}).get("const"):
+                v = f.stash.get("value")
+                if v == 1.0:
+                    continue
+                if v is None:
+                    raise Unmodelled("a term multiplied by a constant this module cannot read")
+                raise _Fail("violation", f"the scaled dot term is also multiplied by the constant {v}")
             scales.append(f)
         fast = _Fast(self, a, b) if FAST and not self.went_dense else None
         if fast is not None and not fast.ok:
@@ -630,9 +752,13 @@ class _Run:
                 raise _Dense()
         seen = {"activation_scale": 0, "weight_scale": 0}
         for f in scales:
-            for alt, data_choice in self._alternatives(f):
+            alts = self._alternatives(f)
+            roles = {self._scale_role(alt) for alt, _ in alts}
+            if len(roles) != 1:
+                raise Unmodelled("a factor chosen between an activation scale and a weight scale")
+            seen[roles.pop()] += 1
+            for alt, data_choice in alts:
                 role = self._scale_role(alt)
-                seen[role] = seen.get(role, 0) + 1
                 try:
                     if fast is not None and fast.scale(alt, role):
                         continue
@@ -647,13 +773,20 @@ class _Run:
         if not seen["activation_scale"] or not seen["weight_scale"]:
             missing = [k for k, v in seen.items() if not v]
             raise _Fail("violation", f"the dot's product is not multiplied by its {' and '.join(missing)}")
+        extra = {k: v for k, v in seen.items() if v > 1}
+        if extra:
+            raise _Fail("violation", "the dot's product is multiplied by " +
+                        " and ".join(f"{v} {k.replace('_', ' ')}s" for k, v in extra.items()))
         self.terms += 1
+        K = int(ai.shape[1])
         if fast is not None:
             self.elements += fast.elements
-            return {"rows": fast.m, "rows_valid": fast.vR, "cols": fast.n, "cols_valid": fast.vC}
-        rows, cols, count = _dense_rows_cols(self, a, b)
+            return {"src": (a.arg, b.arg), "K": K, "rows": fast.m, "rows_valid": fast.vR, "cols": fast.n,
+                    "cols_valid": fast.vC, "k": fast.k, "k_valid": fast.vT}
+        rows, cols, count, k, kv = _dense_rows_cols(self, a, b)
         self.elements += count
-        return {"rows": rows, "rows_valid": rows >= 0, "cols": cols, "cols_valid": cols >= 0}
+        return {"src": (a.arg, b.arg), "K": K, "rows": rows, "rows_valid": rows >= 0, "cols": cols,
+                "cols_valid": cols >= 0, "k": k, "k_valid": kv}
 
     def _alternatives(self, f):
         if f.kind == "leaf":
@@ -672,50 +805,85 @@ class _Run:
         return info.role
 
     def _store(self, args):
+        """A store: only to the output, only a complete sum of terms, each value at its own C[m, n]. The stored
+        rows and columns of each program are kept (self.stores) for the check over the whole launch."""
         ptr, val = args[0], args[1]
         mask = args[2] if len(args) > 2 else None
-        if not isinstance(val, F) or val.kind != "acc" or not val.stash:
-            return
+        if not isinstance(ptr, Ptr):
+            raise Unmodelled("a store through a value that is not a pointer")
         info = self.binding.get(ptr.arg)
         if info is None or info.role != "output":
-            raise _Fail("violation", f"the accumulated product is stored to {ptr.arg}, which is not the output")
+            raise _Fail("violation", f"the kernel writes to {ptr.arg}, which is not its output")
         if ptr.taint is not None:
             raise _Fail("unproven", f"the output address is chosen by data ({ptr.taint})")
         if isinstance(mask, T):
             raise Unmodelled("a store masked by data")
-        st = val.stash
+        acc = self._acc_of(val)
+        if acc is None:
+            raise _Fail("unproven", "the value stored to the output is not a sum of scaled dot terms "
+                                    f"({getattr(val, 'kind', type(val).__name__)})")
+        if not acc.ranges:
+            raise _Fail("violation", "the kernel stores an exact zero, not the product, to its output")
+        if len(info.shape) != 2 or len(info.stride) != 2:
+            raise Unmodelled(f"an output of shape {info.shape}")
+        M, N = int(info.shape[0]), int(info.shape[1])
         s0, s1 = int(info.stride[0]), int(info.stride[1])
+        if s1 != 1 or s0 < N:
+            raise Unmodelled(f"an output whose rows overlap or whose columns are not contiguous (strides {s0}, {s1})")
+        ai, bi = self.binding[acc.src[0]], self.binding[acc.src[1]]
+        if (M, N) != (int(ai.shape[0]), int(bi.shape[0])):
+            raise _Fail("violation", f"the output is {M}x{N}, the product of {acc.src[0]} and {acc.src[1]} is "
+                                     f"{int(ai.shape[0])}x{int(bi.shape[0])}")
         P = self.P
         off = ptr.off
-        sep = _separate_mask(mask, off.shape, P) if FAST and off.d is None and off.axes() <= {0, 1} \
-            and len(off.shape) == 2 else None
+        if len(off.shape) != 2 or np.shape(acc.rows)[-1] != off.shape[0] or np.shape(acc.cols)[-1] != off.shape[1]:
+            raise Unmodelled("a store whose tile is not the sum's rows x columns")
+        R, C = off.shape
+        rows, cols = _bp(acc.rows, P, R), _bp(acc.cols, P, C)
+        rv, cv = _bp(acc.rows_valid, P, R), _bp(acc.cols_valid, P, C)
+        sep = _separate_mask(mask, off.shape, P) if FAST and off.d is None and off.axes() <= {0, 1} else None
         if sep is not None:
             vS, v0, v1 = sep
-            R, C = off.shape
-            rows, cols = _bp(st["rows"], P, R), _bp(st["cols"], P, C)
-            vR = v0 & _bp(st["rows_valid"], P, R)
-            vC = v1 & _bp(st["cols_valid"], P, C)
+            sr = v0 & vS.reshape(-1, 1)                  # stored lanes along the rows, along the columns
+            sc = v1 & vS.reshape(-1, 1)
+            live = sr.any(axis=1) & sc.any(axis=1)
+            sr, sc = sr & live[:, None], sc & live[:, None]
+            if np.any(sr & ~rv) or np.any(sc & ~cv):
+                raise _Fail("violation", "the kernel stores output lanes whose sum has no row or column of the "
+                                         "operands (masked-out operand lanes)")
             u = _bp(off.v.get(0, np.zeros((1, R), dtype=np.int64)), P, R) + _bp(off.s.reshape(-1, 1), P, 1) \
                 - rows * s0
             w = _bp(off.v.get(1, np.zeros((1, C), dtype=np.int64)), P, C) - cols * s1
-            live = vS & vR.any(axis=1) & vC.any(axis=1)
-            if not live.any():
-                return
-            uc, wc = _constant_over(u, vR), _constant_over(w, vC)
+            uc, wc = _constant_over(u, sr), _constant_over(w, sc)
             if uc is None or wc is None or np.any((uc + wc)[live] != 0):
                 raise _Fail("violation", "an output value is stored where another row or column belongs")
-            return
-        if not self.allow_dense:
-            raise _Dense()
-        self.went_dense = True
-        rows, cols = st["rows"], st["cols"]
-        want = rows[:, :, None] * s0 + cols[:, None, :] * s1
-        offd = np.broadcast_to(off.full(), np.broadcast_shapes(off.full().shape, want.shape))
-        want = np.broadcast_to(want, offd.shape)
-        m = np.ones(offd.shape, dtype=bool) if mask is None else np.broadcast_to(_as_bool_full(mask), offd.shape)
-        m = m & np.broadcast_to(st["rows_valid"][:, :, None] & st["cols_valid"][:, None, :], offd.shape)
-        if (m & (offd != want)).any():
-            raise _Fail("violation", "an output value is stored where another row or column belongs")
+        else:
+            if not self.allow_dense:
+                raise _Dense()
+            self.went_dense = True
+            want = rows[:, :, None] * s0 + cols[:, None, :] * s1
+            offd = np.broadcast_to(off.full(), np.broadcast_shapes(off.full().shape, want.shape))
+            want = np.broadcast_to(want, offd.shape)
+            m = np.ones(offd.shape, dtype=bool) if mask is None else \
+                np.array(np.broadcast_to(_as_bool_full(mask), offd.shape))
+            if np.any(m & ~(rv[:, :, None] & cv[:, None, :])):
+                raise _Fail("violation", "the kernel stores output lanes whose sum has no row or column of the "
+                                         "operands (masked-out operand lanes)")
+            if (m & (offd != want)).any():
+                raise _Fail("violation", "an output value is stored where another row or column belongs")
+            sr, sc = m.any(axis=2), m.any(axis=1)
+            if not np.array_equal(m, sr[:, :, None] & sc[:, None, :]):
+                raise Unmodelled("a store mask that is not a set of rows times a set of columns")
+            live = sr.any(axis=1) & sc.any(axis=1)
+        bad = _coverage(acc, live)
+        if bad.any():
+            p = int(np.nonzero(bad)[0][0])
+            raise _Fail("violation", _coverage_why(acc, p), {"program_chunk_index": p})
+        rlo, rcnt = _ranges(rows, sr, "one output row is stored twice by one program",
+                            "the rows a program stores are not one range", twice="unproven")
+        clo, ccnt = _ranges(cols, sc, "one output column is stored twice by one program",
+                            "the columns a program stores are not one range", twice="unproven")
+        self.stores.append((rlo[live], rcnt[live], clo[live], ccnt[live]))
 
 
 def _bp(x, P, n):
@@ -724,6 +892,123 @@ def _bp(x, P, n):
     if x.ndim == 1:
         x = x.reshape(-1, 1)
     return np.broadcast_to(x, (P, n))
+
+
+_BIG = np.iinfo(np.int64).max
+
+
+def _int_range(x):
+    """(least, greatest) value of an integer value over all programs and elements."""
+    if x.d is not None:
+        return int(x.d.min()), int(x.d.max())
+    lo, hi = x.s.astype(np.int64), x.s.astype(np.int64)
+    for arr in x.v.values():
+        lo = lo + arr.min(axis=1)
+        hi = hi + arr.max(axis=1)
+    return int(lo.min()), int(hi.max())
+
+
+def _ranges(vals, valid, twice_why, gaps_why, twice="violation"):
+    """Per program, the values `vals` (P, n) takes where `valid` (P, n), as one range: (lo (P,), count (P,)); lo is
+    0 where nothing is valid. A value taken twice raises `twice` (the verdict) with `twice_why`; values that do not
+    form one range are not modelled. The usual form (valid lanes in one run, stepping by one) is decided without
+    sorting."""
+    vals, valid = np.asarray(vals), np.asarray(valid, dtype=bool)
+    cnt = valid.sum(axis=1).astype(np.int64)
+    lo = np.where(cnt > 0, np.where(valid, vals, _BIG).min(axis=1), 0)
+    if vals.shape[1] < 2:
+        return lo, cnt
+    runs = valid[:, 0].astype(np.int64) + (valid[:, 1:] & ~valid[:, :-1]).sum(axis=1)
+    pair = valid[:, 1:] & valid[:, :-1]
+    if np.all(runs <= 1) and not np.any(pair & (vals[:, 1:] - vals[:, :-1] != 1)):
+        return lo, cnt
+    s = np.sort(np.where(valid, vals, _BIG), axis=1)
+    idx = np.arange(vals.shape[1])[None, :]
+    inrun = idx < cnt[:, None]
+    if np.any(inrun[:, 1:] & (s[:, 1:] == s[:, :-1])):
+        raise _Fail(twice, twice_why)
+    if np.any(inrun & (s != lo[:, None] + idx)):
+        raise Unmodelled(gaps_why)
+    return lo, cnt
+
+
+def _coverage(acc, live):
+    """Programs of `live` (P,) whose sum does not cover k = 0 .. K-1 exactly once."""
+    lo = np.stack([np.broadcast_to(r[0], live.shape) for r in acc.ranges])       # [terms, P]
+    cnt = np.stack([np.broadcast_to(r[1], live.shape) for r in acc.ranges])
+    key = np.where(cnt > 0, lo, _BIG)
+    order = np.argsort(key, axis=0, kind="stable")
+    los, cs = np.take_along_axis(key, order, 0), np.take_along_axis(cnt, order, 0)
+    start = np.cumsum(cs, axis=0) - cs                # where each range must begin to follow the ones before
+    ok = np.all((cs == 0) | (los == start), axis=0) & (cs.sum(axis=0) == acc.K)
+    return live & ~ok
+
+
+def _coverage_why(acc, p) -> str:
+    seen = np.zeros(acc.K + 1, dtype=np.int64)
+    outside = 0
+    for lo, cnt in acc.ranges:
+        lo, cnt = np.asarray(lo).reshape(-1), np.asarray(cnt).reshape(-1)
+        a, c = int(lo[p if lo.size > 1 else 0]), int(cnt[p if cnt.size > 1 else 0])
+        if c <= 0:
+            continue
+        if a < 0 or a + c > acc.K:
+            outside += c
+            a, c = max(a, 0), max(0, min(a + c, acc.K) - max(a, 0))
+        seen[a: a + c] += 1
+    seen = seen[: acc.K]
+    missing, twice = int((seen == 0).sum()), int((seen > 1).sum())
+    parts = []
+    if missing:
+        first = int(np.nonzero(seen == 0)[0][0])
+        parts.append(f"{missing} of the K={acc.K} contraction indices are never added (the first k={first})")
+    if twice:
+        parts.append(f"{twice} are added more than once")
+    if outside:
+        parts.append(f"{outside} lie outside 0..K-1")
+    return "the value stored is not the whole product: " + "; ".join(parts or ["its k do not tile 0..K-1"]) + \
+        f" ({len(acc.ranges)} terms)"
+
+
+def _tiling(stores, M, N):
+    """None when the stores of a launch (row lo, rows, column lo, columns per storing program) cover the M x N
+    output exactly once; otherwise (verdict, why, example)."""
+    if not stores:
+        return "violation", "the kernel never stores to its output", None
+    r0 = np.concatenate([s[0] for s in stores])
+    rc = np.concatenate([s[1] for s in stores])
+    c0 = np.concatenate([s[2] for s in stores])
+    cc = np.concatenate([s[3] for s in stores])
+    nz = (rc > 0) & (cc > 0)
+    r0, r1, c0, c1 = r0[nz], r0[nz] + rc[nz], c0[nz], c0[nz] + cc[nz]
+    if r0.size == 0:
+        return "violation", "the kernel never stores to its output", None
+    if np.any(r0 < 0) or np.any(r1 > M) or np.any(c0 < 0) or np.any(c1 > N):
+        return "violation", f"a store outside the {M}x{N} output", None
+    rs = np.unique(np.concatenate([[0, M], r0, r1]))
+    cs = np.unique(np.concatenate([[0, N], c0, c1]))
+    if rs.size * cs.size > (1 << 26):
+        return "unproven", "the stores' rows and columns are too irregular to check", None
+    i0, i1, j0, j1 = (np.searchsorted(rs, r0), np.searchsorted(rs, r1), np.searchsorted(cs, c0),
+                      np.searchsorted(cs, c1))
+    d = np.zeros((rs.size + 1, cs.size + 1), dtype=np.int64)
+    np.add.at(d, (i0, j0), 1)
+    np.add.at(d, (i1, j0), -1)
+    np.add.at(d, (i0, j1), -1)
+    np.add.at(d, (i1, j1), 1)
+    cover = d.cumsum(axis=0).cumsum(axis=1)[: rs.size - 1, : cs.size - 1]   # cell [rs[i], rs[i+1]) x [cs[j], ..)
+    never = np.argwhere(cover == 0)
+    if never.size:
+        i, j = (int(x) for x in never[0])
+        n = int(sum((rs[a + 1] - rs[a]) * (cs[b + 1] - cs[b]) for a, b in never))
+        return "violation", (f"{n} of the {M * N} output elements are never stored (the first block: rows "
+                             f"{rs[i]}..{rs[i + 1] - 1}, columns {cs[j]}..{cs[j + 1] - 1})"), None
+    many = np.argwhere(cover > 1)
+    if many.size:
+        i, j = (int(x) for x in many[0])
+        return "unproven", (f"output elements are stored more than once (rows {rs[i]}..{rs[i + 1] - 1}, columns "
+                            f"{cs[j]}..{cs[j + 1] - 1})"), None
+    return None
 
 
 def _constant_over(vals, valid):
@@ -804,6 +1089,10 @@ class _Fast:
         self.m, ka = ca               # m [P, R], ka [P, T]
         self.n, kb = cb               # n [P, C], kb [P, T]
         vS = (vSa & vSb).reshape(-1, 1)
+        live = vS & vRa.any(axis=1, keepdims=True) & vCb.any(axis=1, keepdims=True)
+        if np.any(live & (vTa != vTb)):
+            # a k read by one operand and masked out of the other: 0 * x is not 0 for every x the IR cannot see
+            raise _Fail("unproven", "the two operands are masked differently along k")
         vT = vTa & vTb & vS
         if np.any(vT & (ka != kb)):
             raise _Fail("violation", "the two operands are read at different k for one contraction index")
@@ -886,8 +1175,18 @@ def _dense_coords(run, leaf, role):
 
 
 def _dense_rows_cols(run, a, b):
-    am, ak, av, _ = _dense_coords(run, a, "activation")
-    bn, bk, bv, _ = _dense_coords(run, b, "weight")
+    """(rows (P, R), columns (P, C), elements, k (P, T), k valid (P, T)), element by element; -1 where a row,
+    column or k is not read."""
+    am, ak, av, _ = _dense_coords(run, a, "activation")      # [P, R, T]
+    bn, bk, bv, _ = _dense_coords(run, b, "weight")          # [P, T, C]
+    rv, tva = av.any(axis=2), av.any(axis=1)
+    cv, tvb = bv.any(axis=1), bv.any(axis=2)
+    if not np.array_equal(av, rv[:, :, None] & tva[:, None, :]) or \
+            not np.array_equal(bv, tvb[:, :, None] & cv[:, None, :]):
+        raise Unmodelled("an operand mask that is not a row (or column) condition times a k condition")
+    live = (rv.any(axis=1) & cv.any(axis=1))[:, None]
+    if np.any(live & (tva != tvb)):
+        raise _Fail("unproven", "the two operands are masked differently along k")
     ka = np.where(av, ak, -1).max(axis=1)
     kb = np.where(bv, bk, -1).max(axis=2)
     if not np.array_equal(np.where(av, ak, ka[:, None, :]), np.broadcast_to(ka[:, None, :], ak.shape)) or \
@@ -898,7 +1197,10 @@ def _dense_rows_cols(run, a, b):
         raise _Fail("violation", "the two operands are read at different k for one contraction index")
     rows = np.where(av, am, -1).max(axis=2)
     cols = np.where(bv, bn, -1).max(axis=1)
-    return rows, cols, int(av.sum() + bv.sum())
+    if not np.array_equal(np.where(av, am, rows[:, :, None]), np.broadcast_to(rows[:, :, None], am.shape)) or \
+            not np.array_equal(np.where(bv, bn, cols[:, None, :]), np.broadcast_to(cols[:, None, :], bn.shape)):
+        raise _Fail("violation", "an operand row changes along the contraction")
+    return rows, cols, int(av.sum() + bv.sum()), ka, both & live
 
 
 def _dense_scale(run, leaf, role, a, b):
@@ -968,10 +1270,16 @@ def check_launch(ttir: str, binding: Dict[str, Tensor], ints: Dict[str, int], gr
         sh = _shape(op.rtype) or (1,)
         biggest = max(biggest, int(np.prod(sh)))
         longest = max(longest, max(sh))
+    outs = [t for t in binding.values() if t.role == "output"]
+    if len(outs) != 1 or len(outs[0].shape) != 2:
+        return Verdict("unproven", f"the launch has {len(outs)} tensors bound as its output (one is needed)",
+                       seconds=time.perf_counter() - t0)
+    M, N = (int(x) for x in outs[0].shape)
     dense = False
     for attempt in (("fast", "dense") if FAST else ("dense",)):
         per = max(1, chunk_elements // (longest if attempt == "fast" else biggest))
         terms = elements = 0
+        stores = []
         try:
             for start in range(0, total, per):
                 run = _Run(fn, binding, ints, _grid_pids((gx, gy, gz), start, min(total, start + per)),
@@ -979,6 +1287,7 @@ def check_launch(ttir: str, binding: Dict[str, Tensor], ints: Dict[str, int], gr
                 run.run()
                 terms += run.terms
                 elements += run.elements
+                stores += run.stores
                 dense = dense or run.went_dense
             break
         except _Dense:
@@ -989,10 +1298,12 @@ def check_launch(ttir: str, binding: Dict[str, Tensor], ints: Dict[str, int], gr
         except Unmodelled as e:
             return Verdict("unproven", str(e), terms, elements, total, time.perf_counter() - t0, None,
                            dense or attempt == "dense")
-    if terms == 0:
-        return Verdict("unproven", "no scaled dot term was found in the kernel", 0, 0, total,
-                       time.perf_counter() - t0, None, dense)
-    return Verdict("proven", f"{terms} scaled dot terms over {total} programs hold the producers' scale mapping",
+    tiled = _tiling(stores, M, N)
+    if tiled is not None:
+        return Verdict(tiled[0], tiled[1], terms, elements, total, time.perf_counter() - t0, tiled[2], dense)
+    return Verdict("proven", f"every element of the {M}x{N} output is stored once, as the whole product: the sum "
+                             f"over all K of its activation and weight values times their producers' scales "
+                             f"({terms} scaled dot terms over {total} programs)",
                    terms, elements, total, time.perf_counter() - t0, None, dense)
 
 
