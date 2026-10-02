@@ -64,6 +64,7 @@ ACTIVATION_PRODUCER = "vllm.model_executor.layers.quantization.utils.fp8_utils:p
 WEIGHT_PRODUCER = ("vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel:"
                    "Fp8BlockScaledMMLinearKernel.process_weights_after_loading")
 REQUIRED_HOOKS = (ACTIVATION_PRODUCER, WEIGHT_PRODUCER, CONSUMER)
+TRITON_HOOK = "triton.runtime.jit:JITFunction.run"   # required by check "static": where the kernel is launched
 GRAPH_HOOK = "torch.cuda.graphs:CUDAGraph.capture_begin/capture_end/replay"   # required only inside a capture
 ROLES = ("activation", "activation_scale", "weight", "weight_scale")
 OUTCOMES = ("normal_delivered", "repaired_delivered", "blocked", "error")
@@ -97,6 +98,13 @@ class Plan:
     budget_ms: Optional[float] = None  # wall time one eager check may take (None: no limit)
     chunk_bytes: int = 64 << 20        # rows of the weight dequantised at once by the reference
     graphs: bool = True                # CUDA graphs captured from eager code: checks captured with the call
+    check: str = "output"              # "output": the whole output against the reference at every call (L5.4a);
+    #                                    "static": the kernel's own IR read once per launch configuration
+    #                                    (kernel_ir.py, L5.4b); a launch not proven gets the reference's output
+    integrity: str = "checksum"        # "checksum": the operands' bytes against their issue at every call;
+    #                                    "epoch": storage, layout, epoch and version only (host, no device work)
+    records: str = "all"               # "all": a line per call; "changes": a line per launch key and per
+    #                                    outcome that is not a plain normal delivery
     trusted: Tuple[str, ...] = ("PyTorch eager operations on the device (float32 matmul with TF32 off, "
                                 "elementwise and reductions)", "the CUDA runtime, driver and device memory",
                                 "this checker's code", "the producers hooked as REQUIRED_HOOKS name them")
@@ -107,7 +115,14 @@ class Plan:
         return d
 
     def fingerprint(self) -> str:
-        return hashlib.sha256(json.dumps(self.to_json(), sort_keys=True).encode()).hexdigest()
+        fp = _FINGERPRINTS.get(id(self))
+        if fp is None or fp[0] is not self:
+            fp = _FINGERPRINTS[id(self)] = (self, hashlib.sha256(json.dumps(self.to_json(), sort_keys=True)
+                                                                 .encode()).hexdigest())
+        return fp[1]
+
+
+_FINGERPRINTS = {}         # id(plan) -> (plan, sha256 of its JSON): read at every call, computed once
 
 
 def _plan_from_env() -> Plan:
@@ -294,7 +309,8 @@ def tag(t) -> Optional[Issue]:
 def _issue(t, role, producer, block, layout, source, ok=True, why=""):
     s = next(_SERIAL)
     iss = Issue(serial=s, role=role, producer=producer, pair=0, block=tuple(int(x) for x in block), layout=layout,
-                snap=_snap(t), epoch=_bump(t), version=_version(t), checksum=checksum(t), source=dict(source),
+                snap=_snap(t), epoch=_bump(t), version=_version(t),
+                checksum=checksum(t) if plan().integrity == "checksum" else None, source=dict(source),
                 declared_ok=ok, why=why)
     _ISSUES.set(t, iss)
     return iss
@@ -455,7 +471,8 @@ def _admit(A, B, As, Bs, block_size, output_dtype, rec, t0):
     import torch
 
     p = plan()
-    missing = [h for h in REQUIRED_HOOKS if h not in _INSTALLED]
+    required = REQUIRED_HOOKS + ((TRITON_HOOK,) if p.check == "static" else ())
+    missing = [h for h in required if h not in _INSTALLED]
     if missing:
         _refuse(rec, "hook", f"required hook(s) not installed: {', '.join(missing)}", t0)
     if torch.compiler.is_compiling():
@@ -646,8 +663,9 @@ def _check(k, A, B, As, Bs, block, out_dtype, issues):
             ref[:, n0:n1] = r.to(out_dtype)
     bits = z.clone()
     for i, (x, name) in enumerate(((A, "A"), (As, "As"), (B, "B"), (Bs, "Bs"))):
-        bits = bits + (checksum(x) != issues[name].checksum).to(torch.int64) * (1 << i)
-    sbad = (~((As > 0) & torch.isfinite(As)).all()) | (~((Bs > 0) & torch.isfinite(Bs)).all())
+        if issues[name].checksum is not None:          # integrity "epoch" issues none: the host checks only
+            bits = bits + (checksum(x) != issues[name].checksum).to(torch.int64) * (1 << i)
+    sbad =(~((As > 0) & torch.isfinite(As)).all()) | (~((Bs > 0) & torch.isfinite(Bs)).all())
     status = torch.stack([viol, rbad, bits, sbad.to(torch.int64), kbad,
                           (ratio.clamp_max(2.0 ** 40) * 2.0 ** 20).round().to(torch.int64)])
     return ref, status
@@ -687,6 +705,8 @@ def gate(kernel, A, B, As, Bs, block_size, output_dtype=None, consumer: str = CO
         _write(rec)
         _count("normal_delivered")
         return kernel(A, B, As, Bs, list(block), out_dtype)
+    if plan().check == "static":
+        return _static(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0)
     if _capturing():
         return _captured(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0)
     t1 = time.perf_counter()
@@ -821,17 +841,21 @@ def before_replay(graph) -> None:
 
 
 def after_replay(graph) -> None:
-    """Read the flags every gate in the graph wrote at this replay; refuse the replay when one failed."""
+    """Read the flags every gate in the graph wrote at this replay; refuse the replay when one failed. Gates of
+    check "static" write none (their kernel was proven at capture, or the reference was captured): no wait."""
     entry = _GRAPHS.get(id(graph))
     if entry is None or entry[0]() is not graph:
+        return
+    sites = [s for s in entry[1] if s.flags is not None]
+    _count("replays")
+    if not sites:
         return
     import torch
 
     torch.cuda.current_stream().synchronize()
-    flags = torch.stack([s.flags for s in entry[1]]).tolist()
-    _count("replays")
+    flags = torch.stack([s.flags for s in sites]).tolist()
     blocked = None
-    for site, st in zip(entry[1], flags):
+    for site, st in zip(sites, flags):
         viol, rbad, bits, sbad, kbad, ratio = (int(x) for x in st)
         rec = dict(site.rec)
         M, N = rec["shape"]["M"], rec["shape"]["N"]
@@ -860,6 +884,215 @@ def after_replay(graph) -> None:
                       blocked[1])
 
 
+# --- check "static": the kernel's own IR, read once per launch configuration (M19 L5.4b) ---------------------------
+
+_VERDICTS = {}             # launch key -> kernel_ir.Verdict
+_SAID = set()              # launch keys whose normal delivery has been recorded once (records "changes")
+_LAUNCH = threading.local()
+
+
+def _ctx():
+    return getattr(_LAUNCH, "ctx", None)
+
+
+def _canon_binding(bound, ctx):
+    """(binding by parameter name, integer arguments, a key without the run's serial numbers) for one launch."""
+    import torch
+
+    from . import kernel_ir
+
+    binding, ints, canon, parts = {}, {}, {}, []
+
+    def cid(serial):
+        return canon.setdefault(serial, len(canon) + 1) if serial else 0
+
+    for name, v in bound.items():
+        if isinstance(v, torch.Tensor):
+            iss = tag(v)
+            if iss is not None:
+                t = kernel_ir.Tensor(iss.role, iss.serial, iss.pair, tuple(int(x) for x in v.shape),
+                                     tuple(int(x) for x in v.stride()), tuple(iss.block))
+            elif v.dtype == ctx["out_dtype"] and v.dim() >= 2 and int(v.shape[-1]) == ctx["N"] \
+                    and int(v.numel() // v.shape[-1]) == ctx["M"]:
+                t = kernel_ir.Tensor("output", 0, 0, (ctx["M"], ctx["N"]), (int(v.stride(-2)), int(v.stride(-1))))
+            else:
+                t = kernel_ir.Tensor("other", 0, 0, tuple(int(x) for x in v.shape),
+                                     tuple(int(x) for x in v.stride()))
+            binding[name] = t
+            parts.append((name, t.role, cid(t.serial), cid(t.pair), t.shape, t.stride, t.block, str(v.dtype)))
+        elif isinstance(v, (bool, int)):
+            ints[name] = int(v)
+            parts.append((name, int(v)))
+        else:
+            parts.append((name, repr(v)[:40]))
+    return binding, ints, tuple(parts)
+
+
+def consumer_launch(kernel_key, bound, grid, ttir) -> bool:
+    """Called by the adapter at every Triton launch while a gate of check "static" is open. Not the consumer's
+    launch (none of its tensors is the gate's activation or weight): True, launch as asked. The consumer's: decide
+    the launch configuration once (kernel_ir.check_launch on the kernel's TTIR, `ttir()` compiling it if needed) and
+    launch only when proven; otherwise nothing is launched and the gate hands on the reference's output."""
+    import torch
+
+    from . import kernel_ir
+
+    ctx = _ctx()
+    if ctx is None:
+        return True
+    if not any(isinstance(v, torch.Tensor) and (v is ctx["A"] or v is ctx["B"]) for v in bound.values()):
+        return True
+    fast = _fast_key(kernel_key, bound, grid, ctx)
+    hit = _FAST.get(fast)
+    if hit is not None:
+        ctx["verdicts"].append(hit)
+        return hit[1].verdict == "proven"
+    binding, ints, parts = _canon_binding(bound, ctx)
+    key = (kernel_key, parts, tuple(int(g) for g in grid))
+    v = _VERDICTS.get(key)
+    if v is None:
+        if _capturing():
+            v = kernel_ir.Verdict("unproven", "the launch configuration was first seen inside a CUDA graph capture "
+                                              "(its IR is not compiled there)")
+        else:
+            try:
+                v = kernel_ir.check_launch(ttir(), binding, ints, grid)
+            except Exception as e:  # noqa: BLE001 - the checker failed: nothing is claimed
+                v = kernel_ir.Verdict("unproven", f"the IR check raised {type(e).__name__}: {e}")
+        _VERDICTS[key] = v
+        _count(f"ir_{v.verdict}")
+        _write({"kind": "guarantee_kernel_ir", "plan_fp": plan().fingerprint(), "kernel": str(kernel_key[0]),
+                "grid": list(grid), "ints": ints,
+                "binding": {k: [b.role, list(b.shape), list(b.stride), list(b.block)] for k, b in binding.items()},
+                "verdict": v.to_json()})
+    ctx["verdicts"].append((key, v))
+    if not _capturing():
+        _FAST[fast] = (key, v)
+    return v.verdict == "proven"
+
+
+_FAST = {}                 # the cheap key of a launch -> (launch key, verdict)
+
+
+def _fast_key(kernel_key, bound, grid, ctx):
+    """What decides a launch's verdict, read cheaply: the gate's four operands by position (their pairing was
+    admitted by the gate), the weight and its scale by identity (a re-issue makes new tensors), every tensor's
+    shape, strides and dtype, any other tensor's issue (role, and whether it is paired with the gate's weight or
+    activation), the integers and the grid."""
+    import torch
+
+    parts = []
+    for name, v in bound.items():
+        if isinstance(v, torch.Tensor):
+            if v is ctx["B"] or v is ctx["Bs"]:
+                role = ("B" if v is ctx["B"] else "Bs", id(v))
+            elif v is ctx["A"] or v is ctx["As"]:
+                role = ("A" if v is ctx["A"] else "As",)
+            else:
+                iss = tag(v)
+                role = ("other",) if iss is None else \
+                    (iss.role, iss.pair == ctx["serial_A"], iss.pair == ctx["serial_B"], id(v))
+            parts.append((name, role, v.shape, v.stride(), v.dtype))
+        else:
+            parts.append((name, v))
+    return kernel_key, tuple(grid), tuple(parts)
+
+
+def reference_output(A, B, As, Bs, block, out_dtype):
+    """The reference's output only (no comparison), a chunk of output columns at a time: the path a launch that is
+    not proven takes."""
+    import torch
+
+    p = plan()
+    gn, gk = int(block[0]), int(block[1])
+    K = int(A.shape[-1])
+    M, N, nb = A.numel() // K, int(B.shape[0]), K // gk
+    a = (A.reshape(M, nb, gk).to(torch.float32) * As.reshape(M, nb).to(torch.float32)[:, :, None]).reshape(M, K)
+    ref = torch.empty((M, N), dtype=out_dtype, device=A.device)
+    cols = _columns(M, K, gn, p)
+    with _Precision():
+        for n0 in range(0, N, cols):
+            n1 = min(N, n0 + cols)
+            s = Bs[n0 // gn: -(-n1 // gn)].to(torch.float32).repeat_interleave(gn, dim=0)[: n1 - n0]
+            b = B[n0:n1].to(torch.float32).reshape(n1 - n0, nb, gk) * s[:, :, None]
+            ref[:, n0:n1] = (a @ b.reshape(n1 - n0, K).T).to(out_dtype)
+    return ref.reshape(*A.shape[:-1], N)
+
+
+def _static(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0):
+    """Check "static": the consumer's launch goes ahead only when its configuration is proven to read the
+    producers' scales for every element (kernel_ir); otherwise the reference's output is handed on. Nothing is
+    compared after the call, and nothing waits for the device."""
+    p = plan()
+    capturing = _capturing()
+    graph = getattr(_CAPTURE, "graph", None) if capturing else None
+    if capturing and (not p.graphs or graph is None or GRAPH_HOOK not in _INSTALLED):
+        _refuse(rec, "hook" if p.graphs else "unsupported",
+                "a CUDA graph capture this profile was not told about (or graphs are outside the plan)", t0)
+    if p.integrity == "checksum":
+        if capturing:
+            _refuse(rec, "unsupported", "integrity 'checksum' with check 'static' inside a capture", t0)
+        bits = 0
+        for i, (x, name) in enumerate(((A, "A"), (As, "As"), (B, "B"), (Bs, "Bs"))):
+            if int(checksum(x)) != int(issues[name].checksum):
+                bits |= 1 << i
+        if bits:
+            names = [n for i, n in enumerate(("A", "As", "B", "Bs")) if bits >> i & 1]
+            _refuse(rec, "integrity", f"the bytes of {', '.join(names)} differ from what the producer issued", t0)
+    M, N = rec["shape"]["M"], rec["shape"]["N"]
+    ctx = {"A": A, "B": B, "As": As, "Bs": Bs, "serial_A": issues["A"].serial, "serial_B": issues["B"].serial,
+           "out_dtype": out_dtype, "M": M, "N": N, "verdicts": []}
+    prev = _ctx()
+    _LAUNCH.ctx = ctx
+    t1 = time.perf_counter()
+    try:
+        k = kernel(A, B, As, Bs, list(block), out_dtype)
+    except Exception as e:
+        rec.update({"outcome": "error", "reason": f"the kernel raised {type(e).__name__}: {e}", "permit": None,
+                    "delivered": False})
+        _count("kernel_errors")
+        _write(rec)
+        raise
+    finally:
+        _LAUNCH.ctx = prev
+    vs = [v for _k, v in ctx["verdicts"]]
+    rec["check"] = "static"
+    rec["integrity"] = p.integrity
+    rec["kernel_ir"] = [v.verdict for v in vs]
+    if vs and all(v.verdict == "proven" for v in vs):
+        out = k
+        outcome = "repaired_delivered" if rec["repairs"] else "normal_delivered"
+        rec.update({"outcome": outcome, "path_after": "kernel (its launch configuration proven)"})
+    else:
+        why = "no launch of the consumer kernel was seen" if not vs else \
+            "; ".join(f"{v.verdict}: {v.why}" for v in vs if v.verdict != "proven")
+        try:
+            out = reference_output(A, B, As, Bs, block, out_dtype)
+        except Exception as e:  # noqa: BLE001
+            _count("checker_errors")
+            _refuse(rec, "checker", f"the reference raised {type(e).__name__}: {e}", t0)
+        outcome = "repaired_delivered"
+        rec.update({"outcome": outcome, "path_after": "reference (the kernel was not launched)",
+                    "reason": f"the kernel's launch is not proven to read its own scales ({why}); the reference's "
+                              f"output is handed on"})
+    _count(outcome)
+    if capturing:
+        entry = _GRAPHS.get(id(graph))
+        if entry is None or entry[0]() is not graph:
+            entry = _GRAPHS[id(graph)] = (weakref.ref(graph), [])
+        entry[1].append(_Site(rec["call"], dict(rec), issues, B, Bs, None))
+        rec["captured"] = True
+    rec.update({"permit": rec["call"], "delivered": True,
+                "ms_kernel_path": round((time.perf_counter() - t1) * 1e3, 3),
+                "ms_total": round((time.perf_counter() - t0) * 1e3, 3)})
+    _PERMITS.set(out, {"permit": rec["call"], "plan_fp": rec["plan_fp"]})
+    first = tuple(k for k, _v in ctx["verdicts"])
+    if p.records == "all" or outcome != "normal_delivered" or first not in _SAID:
+        _SAID.add(first)
+        _write(rec)
+    return out
+
+
 # --- state ------------------------------------------------------------------------------------------------------------
 
 def stats() -> dict:
@@ -875,6 +1108,9 @@ def reset() -> None:
     _PERMITS.clear()
     _EPOCHS.clear()
     _GRAPHS.clear()
+    _VERDICTS.clear()
+    _FAST.clear()
+    _SAID.clear()
     _STATS.clear()
     _REACHED.clear()
     _CHECK_WEIGHTS.clear()

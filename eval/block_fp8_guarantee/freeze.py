@@ -16,7 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import common  # noqa: E402
 
-CODE = ("entail/guarantee.py", "entail/adapters/vllm_block_fp8_guarantee.py",
+CODE = ("entail/guarantee.py", "entail/kernel_ir.py", "entail/adapters/vllm_block_fp8_guarantee.py",
         "entail/adapters/autoinstall/sitecustomize.py", "entail/core.py", "entail/policies.py", "entail/record.py")
 
 
@@ -27,6 +27,11 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--cost-budget", type=float, default=None,
                     help="largest accepted ratio of the guarantee's normal repeat time to off's (median, eager)")
+    ap.add_argument("--check", default="output", choices=("output", "static"))
+    ap.add_argument("--integrity", default="checksum", choices=("checksum", "epoch"))
+    ap.add_argument("--records", default="all", choices=("all", "changes"))
+    ap.add_argument("--what", default="M19 L5.4a block FP8 guarantee: implementation, tolerances and harness frozen "
+                                      "before the holdout")
     a = ap.parse_args()
     with open(a.calibration, encoding="utf-8") as f:
         cal = json.load(f)
@@ -35,14 +40,14 @@ def main():
     assert cal["decode_all_256_agree"] and cal["exact_case"]["equal"], "the oracle's own checks failed"
     from entail import guarantee as g
 
-    plan = g.Plan(c_acc=cal["proposed"]["c_acc"]).to_json()
+    plan = g.Plan(c_acc=cal["proposed"]["c_acc"], check=a.check, integrity=a.integrity, records=a.records).to_json()
     code = {p: common.sha256_file(os.path.join(common.ENTAIL_ROOT, p)) for p in CODE}
     for p in sorted(glob.glob(os.path.join(HERE, "*.py"))):
         code[os.path.relpath(p, common.ENTAIL_ROOT).replace(os.sep, "/")] = common.sha256_file(p)
     manifest = {
         "frozen": True,
         "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "what": "M19 L5.4a block FP8 guarantee: implementation, tolerances and harness frozen before the holdout",
+        "what": a.what,
         "plan": plan,
         "oracle": {"c": cal["proposed"]["oracle_c"], "form": "|out - truth| <= ulp(out dtype, |truth|) + c * "
                                                              "(|a| @ |b|^T), float64 on the CPU, bit-field fp8 decode",

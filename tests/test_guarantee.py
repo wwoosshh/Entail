@@ -267,6 +267,89 @@ def main():
     ad.uninstall()
     for name in (ad.FP8_UTILS, ad.BLOCK_KERNEL):
         sys.modules.pop(name, None)
+    static_mode(rec)
+
+
+def static_mode(rec):
+    """Check "static" (M19 L5.4b): the stand-in kernel offers its launch to the core as the Triton hook would, with
+    the TTIR vLLM's kernel compiles to (tests/data/kernel_ir); a proven configuration runs the kernel and nothing is
+    compared after it, a violating or unproven one is not launched and the reference's output is handed on."""
+    data = os.path.join(HERE, "data", "kernel_ir")
+    launched = []
+
+    def kernel_with(ttir_name, bm, extra=None):
+        ttir = open(os.path.join(data, ttir_name + ".ttir"), encoding="utf-8").read()
+
+        def kernel(A, B, As, Bs, block_size, output_dtype=torch.float16):
+            M, K = A.shape
+            N = B.shape[0]
+            C = torch.empty((M, N), dtype=output_dtype)
+            bound = {"A": A, "B": B, "C": C, "As": As, "Bs": Bs, "M": M, "N": N, "K": K, "group_n": 128,
+                     "group_k": 128, "stride_am": K, "stride_bn": K, "stride_cm": N, "stride_As_m": As.shape[1],
+                     "stride_Bs_n": Bs.shape[1]}
+            bound.update(extra(A, B, As, Bs) if extra else {})
+            go = g.consumer_launch((ttir_name, "test", ()), bound, (-(-M // bm) * -(-N // 128),), lambda: ttir)
+            if go:
+                launched.append(ttir_name)
+                C.copy_(kernel_factory("neighbor" if ttir_name == "tile_1" else "faithful")(A, B, As, Bs,
+                                                                                           block_size, output_dtype))
+            return C
+        return kernel
+
+    g.set_plan(g.Plan(check="static", integrity="epoch", records="all"))
+    for name in (ad.FP8_UTILS, ad.BLOCK_KERNEL):
+        sys.modules.pop(name, None)
+    fu, bk = stand_ins("faithful")
+    g.installed(g.TRITON_HOOK)
+    layer = layer_of(bk, N=256, K=512)
+    x = act(M=96)
+
+    for ttir_name, bm, want_launch, outcome in (("orig", 64, True, "normal_delivered"),
+                                                 ("tile_1", 64, False, "repaired_delivered")):
+        ad.uninstall()
+        fu.w8a8_triton_block_scaled_mm = kernel_with(ttir_name, bm)
+        fu.per_token_group_quant_fp8 = quant
+        ad.install_fp8_utils()
+        ad.install_weights()
+        g.installed(g.TRITON_HOOK)
+        layer = layer_of(bk, N=256, K=512, seed=ord(ttir_name[0]))
+        launched.clear()
+        A, As = fu.per_token_group_quant_fp8(x, BK)
+        y = fu.w8a8_triton_block_scaled_mm(A, layer.weight, As, layer.weight_scale_inv, [128, 128], torch.bfloat16)
+        last = lines(rec)[-1]
+        assert last["outcome"] == outcome and last["check"] == "static", last
+        assert (launched == [ttir_name]) == want_launch, launched
+        t = truth(A, As, layer.weight, layer.weight_scale_inv)
+        assert float(((y.double() - t).abs() / (t.abs() + 1)).max()) < 0.02
+        print(f"ok static {ttir_name}: {last['kernel_ir']} -> {outcome}, kernel launched: {want_launch}")
+        # the second call of the same configuration is decided from the cache, without the IR
+        A, As = fu.per_token_group_quant_fp8(x, BK)
+        fu.w8a8_triton_block_scaled_mm(A, layer.weight, As, layer.weight_scale_inv, [128, 128], torch.bfloat16)
+        assert lines(rec)[-1]["kernel_ir"] == last["kernel_ir"]
+    # a launch the hook never offers (the kernel ran some other way): nothing claimed, the reference is handed on
+    ad.uninstall()
+    fu.w8a8_triton_block_scaled_mm = kernel_factory("neighbor")
+    ad.install_fp8_utils()
+    ad.install_weights()
+    g.installed(g.TRITON_HOOK)
+    layer = layer_of(bk, N=256, K=512, seed=9)
+    A, As = fu.per_token_group_quant_fp8(x, BK)
+    y = fu.w8a8_triton_block_scaled_mm(A, layer.weight, As, layer.weight_scale_inv, [128, 128], torch.bfloat16)
+    last = lines(rec)[-1]
+    assert last["outcome"] == "repaired_delivered" and last["kernel_ir"] == [] and "no launch" in last["reason"], last
+    t = truth(A, As, layer.weight, layer.weight_scale_inv)
+    assert float(((y.double() - t).abs() / (t.abs() + 1)).max()) < 0.02
+    print("ok static: a consumer launch never seen -> the reference's output")
+    # the Triton hook missing: refused
+    g.uninstalled(g.TRITON_HOOK)
+    A, As = fu.per_token_group_quant_fp8(x, BK)
+    refused(lambda: fu.w8a8_triton_block_scaled_mm(A, layer.weight, As, layer.weight_scale_inv, [128, 128],
+                                                   torch.bfloat16), "hook")
+    print("ok static: the Triton launch hook missing -> refused")
+    g.set_plan(None)
+    ad.uninstall()
+    for name in (ad.FP8_UTILS, ad.BLOCK_KERNEL):
+        sys.modules.pop(name, None)
 
 
 if __name__ == "__main__":
