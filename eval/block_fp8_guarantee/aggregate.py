@@ -8,13 +8,18 @@ in the denominator as incomplete.
 Per step (calls, direct calls, replays):
   normal_delivered     handed on, within the oracle's tolerance, no repair or reference path used
   repaired_delivered   handed on, within the tolerance, after a repair or with the reference's values
-  blocked              not handed on, refused before it left (a replay: also nothing wrong read inside the graph -
-                       the graph's next operation read only NaN)
-  wrong_escaped        a value beyond the tolerance was handed on, or read inside the graph, even once
+  blocked              not handed on, refused before it left. A replay: the graph's next operation did not run (the
+                       device stopped at the gate; v3 harness, which marks on the host whether it ran)
+  wrong_escaped        a value beyond the tolerance was handed on, or read inside the graph, even once - NaN included
+  refused_after_use    a replay refused after the graph's next operation had read a value (within the tolerance):
+                       not a block, the refusal came too late
+  stopped              not run: the device was stopped by a block at an earlier step of the same process
   unknown              nothing observed (no producer output, a step not reached)
   error                an exception that is not a refusal (crash, OOM)
-Per defect case: the off baseline (off A) must be beyond the tolerance on a defective step (mutation_effective);
-otherwise the case is incomplete, and it is never dropped.
+Until 2026-10-03 (L5.4c) a replay whose next operation read only NaN counted as blocked; that is an escape of a value
+without a permit, not a block. No step of the v1 and v2 runs read only NaN, so their numbers do not change.
+Per defect or integrity case: the off baseline (off A) must be beyond the tolerance on a defective step
+(mutation_effective); otherwise the case is incomplete, and it is never dropped.
 """
 import json
 import os
@@ -25,9 +30,10 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-LABELS = ("offA", "offB", "load", "guarantee")
+LABELS = ("offA", "offB", "load", "guarantee", "structure")
 COUNTS = ("scheduled", "reached", "mutation_effective", "normal_delivered", "repaired_delivered", "blocked",
-          "wrong_escaped", "unknown", "error")
+          "wrong_escaped", "refused_after_use", "unknown", "error")
+DEFECT_LIKE = ("defect", "integrity")
 
 
 def load(out_root, cid, label):
@@ -43,6 +49,8 @@ def load(out_root, cid, label):
 
 def defective(step, case):
     """Whether a step is one where the case's defect is on."""
+    if case.get("group") == "integrity":
+        return bool(step.get("corrupt"))
     if case.get("tile_k256"):
         return step.get("M", 0) >= 128
     if case.get("mechanism", "").startswith("consumer-side"):
@@ -55,12 +63,17 @@ def repaired_by_entail(step, label):
     e = step.get("entail") or {}
     if label == "guarantee":
         return e.get("repaired_delivered", 0) > 0
+    if label == "structure":        # the structural experiment: the reference handed on, or a repair at admission
+        return e.get("reference_delivered", 0) > 0 or e.get("admission_repairs", 0) > 0 or \
+            e.get("repaired_delivered", 0) > 0
     if label == "load":
         return e.get("definition_calls", 0) > 0 or e.get("sent_to_definition", 0) > 0
     return False
 
 
 def step_outcome(step, label):
+    if step.get("not_run"):
+        return "stopped"
     if step["op"] in ("capture", "reload"):
         return None
     exc = step.get("exception")
@@ -68,12 +81,15 @@ def step_outcome(step, label):
     if exc and exc.get("type") != "Refused":
         return "error"
     if step["op"] == "replay":
+        ran = step.get("next_op_ran", True)     # v1/v2 harness: no device stop existed, the next operation ran
+        if not ran:
+            return "blocked" if exc else "unknown"
         if orc is None:
             return "unknown"
-        if not orc["ok"] and not step.get("poisoned"):
-            return "wrong_escaped"        # the graph's next operation read a wrong value, refused or not
+        if not orc["ok"]:
+            return "wrong_escaped"        # the graph's next operation read a value beyond the tolerance (or NaN)
         if not step.get("delivered"):
-            return "blocked"
+            return "refused_after_use"
     else:
         if not step.get("delivered"):
             return "blocked" if exc else "unknown"
@@ -89,7 +105,7 @@ def judge_case(out_root, case):
     runs = {lab: load(out_root, case["id"], lab) for lab in LABELS}
     offA = runs["offA"][0]
     base_eff = None
-    if case["group"] == "defect" and offA is not None:
+    if case["group"] in DEFECT_LIKE and offA is not None:
         eff = [s for s in offA["steps"] if defective(s, case) and s.get("oracle")]
         base_eff = any(not s["oracle"]["ok"] for s in eff)
         res["off_baseline"] = {"defective_steps": len(eff),
@@ -108,11 +124,17 @@ def judge_case(out_root, case):
             res["modes"][lab] = m
             continue
         outs = [step_outcome(s, lab) for s in r["steps"]]
+        # steps not run because an earlier step's block stopped the device count as blocked (nothing was handed on)
+        if "stopped" in outs:
+            first = outs.index("stopped")
+            outs = [("blocked" if "blocked" in outs[:first] else "unknown") if o == "stopped" else o for o in outs]
+            m["stopped_after_block"] = sum(1 for s in r["steps"] if s.get("not_run"))
         m["steps"] = outs
-        m["rng_same"] = all(s.get("rng_same", True) for s in r["steps"])
+        m["rng_same"] = all(s.get("rng_same", True) is not False for s in r["steps"])
         m["exceptions"] = [((s.get("exception") or {}).get("kind") or (s.get("exception") or {}).get("type"))
                            for s in r["steps"]]
-        if case["group"] == "defect":
+        m["next_op_ran"] = [s.get("next_op_ran") for s in r["steps"] if s.get("op") == "replay"]
+        if case["group"] in DEFECT_LIKE:
             ds = [o for s, o in zip(r["steps"], outs) if o is not None and defective(s, case)]
             if sum(1 for s in case["steps"] if defective(s, case)) > len(ds):
                 ds.append("unknown")         # a defective step that never ran
@@ -120,6 +142,8 @@ def judge_case(out_root, case):
                 verdict = "wrong_escaped"
             elif "error" in ds:
                 verdict = "error"
+            elif "refused_after_use" in ds:
+                verdict = "refused_after_use"
             elif "unknown" in ds or not ds:
                 verdict = "unknown"
             elif "blocked" in ds:
@@ -131,6 +155,9 @@ def judge_case(out_root, case):
             nd = [o for s, o in zip(r["steps"], outs) if o is not None and not defective(s, case)]
             m["non_defective_steps"] = nd
             m["verdict"] = verdict
+            if case.get("expect"):
+                m["refusal_kinds"] = [k for k in m["exceptions"] if k]
+                m["expected_kind"] = case["expect"]
         elif case["group"] == "normal":
             bad = [o for o in outs if o is not None and o != "normal_delivered"]
             planned = sum(1 for s in case["steps"] if s["op"] not in ("capture", "reload"))
@@ -144,7 +171,7 @@ def judge_case(out_root, case):
                 m["verdict"] = "wrong_escaped"
             elif "error" in outs:
                 m["verdict"] = "error"
-            elif "blocked" in outs:
+            elif "blocked" in outs or "refused_after_use" in outs:
                 m["verdict"] = "wrong_refusal"
             elif seen < planned:
                 m["verdict"] = "unknown"        # a planned step never ran (a capture failed): not a pass
@@ -172,7 +199,8 @@ def summarize(out_root):
     judged = [judge_case(out_root, c) for c in cases]
     judged_extra = [judge_case(out_root, c) for c in extra]
     out = {"split": meta["split"], "key": meta["key"], "per_case": judged, "dev_extra": judged_extra, "modes": {}}
-    for lab in ("load", "guarantee", "offA"):
+    present = [lab for lab in LABELS if any(j["modes"].get(lab, {}).get("present") for j in judged)]
+    for lab in [x for x in ("load", "guarantee", "structure", "offA") if x in present]:
         cnt = {k: 0 for k in COUNTS}
         cnt["scheduled"] = len(judged)
         normal_fail, adm_fail, incomplete = [], [], []
@@ -183,7 +211,7 @@ def summarize(out_root):
                 continue
             cnt["reached"] += 1
             v = m.get("verdict")
-            if j["group"] == "defect":
+            if j["group"] in DEFECT_LIKE:
                 if j.get("mutation_effective"):
                     cnt["mutation_effective"] += 1
                 else:
@@ -206,24 +234,38 @@ def summarize(out_root):
                     cnt["blocked"] += 1
             if not m.get("rng_same", True):
                 normal_fail.append((j["id"], "rng_changed"))
-        defects = [j for j in judged if j["group"] == "defect"]
-        effective = [j for j in defects if j.get("mutation_effective")]
-        escaped = [j["id"] for j in effective if j["modes"].get(lab, {}).get("verdict") == "wrong_escaped"]
+        by_group = {}
+        for grp in DEFECT_LIKE:
+            gj = [j for j in judged if j["group"] == grp]
+            if not gj:
+                continue
+            eff = [j for j in gj if j.get("mutation_effective")]
+            verdicts = {}
+            for j in eff:
+                v = j["modes"].get(lab, {}).get("verdict")
+                verdicts[v] = verdicts.get(v, 0) + 1
+            by_group[grp] = {"cases": len(gj), "effective": len(eff), "verdicts": verdicts,
+                             "wrong_escaped": [j["id"] for j in eff if j["modes"].get(lab, {}).get("verdict") in
+                                               ("wrong_escaped", "refused_after_use")]}
+        effective = [j for j in judged if j["group"] in DEFECT_LIKE and j.get("mutation_effective")]
+        escaped = [j["id"] for j in effective if j["modes"].get(lab, {}).get("verdict") in
+                   ("wrong_escaped", "refused_after_use")]
         unresolved = [j["id"] for j in effective if j["modes"].get(lab, {}).get("verdict") in
                       ("unknown", "error", "normal_delivered", None)]
-        if escaped or normal_fail or (lab == "guarantee" and adm_fail):
+        if escaped or normal_fail or (lab in ("guarantee", "structure") and adm_fail):
             state = "failed"
         elif incomplete or unresolved or not effective:
             state = "incomplete"
         else:
             state = "passed"
+        defects = [j for j in effective if j["group"] == "defect"]
         out["modes"][lab] = {"counts": cnt, "state": state, "wrong_escaped": escaped, "unresolved": unresolved,
                              "normal_failures": normal_fail, "admission_failures": adm_fail,
-                             "incomplete": incomplete,
-                             "defects_effective": len(effective),
-                             "repaired_of_effective": sum(1 for j in effective if j["modes"].get(lab, {})
+                             "incomplete": incomplete, "by_group": by_group,
+                             "defects_effective": len(defects),
+                             "repaired_of_effective": sum(1 for j in defects if j["modes"].get(lab, {})
                                                           .get("verdict") == "repaired_delivered"),
-                             "blocked_of_effective": sum(1 for j in effective if j["modes"].get(lab, {})
+                             "blocked_of_effective": sum(1 for j in defects if j["modes"].get(lab, {})
                                                          .get("verdict") == "blocked")}
     return out
 
@@ -236,4 +278,5 @@ if __name__ == "__main__":
         json.dump(s, f, indent=1)
     for lab, m in s["modes"].items():
         print(lab, m["state"], m["counts"], "escaped:", m["wrong_escaped"], "normal fail:", m["normal_failures"],
-              "admission fail:", m["admission_failures"], "incomplete:", m["incomplete"])
+              "admission fail:", m["admission_failures"], "incomplete:", m["incomplete"],
+              "groups:", {k: v["verdicts"] for k, v in m["by_group"].items()})

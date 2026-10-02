@@ -1,4 +1,5 @@
-"""The real engine: one FP8 model in vLLM 0.30, off against the guarantee profile, each in a fresh process.
+"""The real engine: one FP8 model in vLLM 0.30, off against the guarantee profile and (from v3, L5.4c) against the
+structural check experiment (BFG_ENGINE_MODES, default "guarantee,structure"), each in a fresh process.
   python engine_smoke.py <out_root> [model]          (one run:  python engine_smoke.py --one <mode> <config> <out>)
 
 Configurations (BFG_ENGINE_CONFIGS, default "eager,default"): eager (enforce_eager), graphs (no torch.compile,
@@ -78,7 +79,7 @@ def one(mode, config, out_path, model):
     gen("unseeded", SamplingParams(temperature=0.8, top_p=0.95, max_tokens=24, logprobs=5))
     r["runs"] = runs
     r["peak_bytes"] = int(torch.cuda.max_memory_allocated())
-    if mode == "guarantee":
+    if mode in ("guarantee", "structure"):
         from entail.adapters import vllm_block_fp8_guarantee as ad
         r["entail"] = ad.stats()
     common.write_json(out_path, r)
@@ -112,8 +113,9 @@ def main(out_root, model):
     auto = os.path.join(common.ENTAIL_ROOT, "entail", "adapters", "autoinstall")
     plan = []
     configs = os.environ.get("BFG_ENGINE_CONFIGS", "eager,default").split(",")
+    modes = os.environ.get("BFG_ENGINE_MODES", "guarantee,structure").split(",")
     for config in configs:
-        for mode in ("off", "guarantee", "off"):
+        for mode in ["off"] + modes + ["off"]:
             plan.append((config, mode))
     results = []
     for i, (config, mode) in enumerate(plan):
@@ -122,7 +124,7 @@ def main(out_root, model):
         env = dict(os.environ, ENTAIL=mode, ENTAIL_QUIET="start", VLLM_ENABLE_V1_MULTIPROCESSING="0",
                    VLLM_DISABLED_KERNELS=DISABLED, PYTHONPATH=os.pathsep.join([common.ENTAIL_ROOT, auto, HERE]),
                    ENTAIL_LOG_DIR=os.path.join(d, "entail_logs"),
-                   ENTAIL_GUARANTEE_RECORD=os.path.join(d, "guarantee.jsonl"))
+                   ENTAIL_GUARANTEE_RECORD=os.path.join(d, f"{mode}.jsonl"))
         if os.environ.get("BFG_FREEZE"):
             env["ENTAIL_GUARANTEE_PLAN"] = os.environ["BFG_FREEZE"]
         t0 = time.time()
@@ -135,8 +137,8 @@ def main(out_root, model):
                            if "Selected " in ln and " for " in ln})
         row = {"dir": d, "config": config, "mode": mode, "exit": p.returncode, "wall_s": time.time() - t0,
                "selected_kernels": selected}
-        if mode == "guarantee":
-            row["reach"] = reach(os.path.join(d, "guarantee.jsonl"))
+        if mode in ("guarantee", "structure"):
+            row["reach"] = reach(os.path.join(d, f"{mode}.jsonl"))
         results.append(row)
         print(json.dumps(row, default=str), flush=True)
     common.write_json(os.path.join(out_root, "smoke_runs.json"), results)
@@ -163,24 +165,26 @@ def compare(out_root):
     for config, runs in rows.items():
         c = out[config] = {"runs": [n for n, _ in runs]}
         offs = [r for n, r in runs if r["mode"] == "off" and "runs" in r]
-        gs = [r for n, r in runs if r["mode"] == "guarantee"]
-        for r in gs:
-            if "start_error" in r:
-                c["guarantee_start_error"] = r["start_error"]
         if len(offs) >= 2:
             c["offA_vs_offB"] = _cmp(offs[0], offs[1])
-        if offs and gs and "runs" in gs[0]:
-            c["off_vs_guarantee"] = _cmp(offs[0], gs[0])
-            c["timing"] = {"start_s": {"off": [r["start_s"] for r in offs], "guarantee": gs[0]["start_s"]}}
+        for mode in ("guarantee", "structure"):
+            gs = [r for n, r in runs if r["mode"] == mode]
+            for r in gs:
+                if "start_error" in r:
+                    c[f"{mode}_start_error"] = r["start_error"]
+            if not (offs and gs and "runs" in gs[0]):
+                continue
+            c[f"off_vs_{mode}"] = _cmp(offs[0], gs[0])
+            t = c[f"{mode}_timing"] = {"start_s": {"off": [r["start_s"] for r in offs], mode: gs[0]["start_s"]}}
             for label in ("greedy_cold", "greedy_warm", "seeded", "unseeded"):
                 o = [_run(r, label)["s"] for r in offs if _run(r, label)]
                 gv = _run(gs[0], label)
                 if o and gv:
-                    c["timing"][label] = {"off": o, "guarantee": gv["s"], "ratio": gv["s"] / (sum(o) / len(o))}
-            steady = [c["timing"][k]["ratio"] for k in ("seeded", "unseeded") if k in c["timing"]]
-            c["timing"]["steady_ratio"] = sum(steady) / len(steady) if steady else None
-            c["guarantee_warm_equals_cold"] = _same_outputs(gs[0], "greedy_cold", "greedy_warm")
-            c["guarantee_entail"] = {k: v for k, v in gs[0].get("entail", {}).items() if not isinstance(v, (list,))}
+                    t[label] = {"off": o, mode: gv["s"], "ratio": gv["s"] / (sum(o) / len(o))}
+            steady = [t[k]["ratio"] for k in ("seeded", "unseeded") if k in t]
+            t["steady_ratio"] = sum(steady) / len(steady) if steady else None
+            c[f"{mode}_warm_equals_cold"] = _same_outputs(gs[0], "greedy_cold", "greedy_warm")
+            c[f"{mode}_entail"] = {k: v for k, v in gs[0].get("entail", {}).items() if not isinstance(v, (list,))}
     common.write_json(os.path.join(out_root, "compare.json"), out)
     print(json.dumps(out, indent=1, default=str)[:4000])
 

@@ -145,11 +145,15 @@ GUARANTEE_TARGETS = {
     "vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel":
         ["entail.adapters.vllm_block_fp8_guarantee:install_weights"],
     "torch.cuda.graphs": ["entail.adapters.vllm_block_fp8_guarantee:install_graphs"],
-    # check "static" (M19 L5.4b): the consumer's Triton launch, read before it goes ahead
-    "triton.runtime.jit": ["entail.adapters.vllm_block_fp8_guarantee:install_triton"],
 }
+# ENTAIL=structure (M19 L5.4b/L5.4c): the structural check experiment - the same hooks, and the consumer's Triton
+# launch, read before it goes ahead. Not the guarantee.
+STRUCTURE_TARGETS = dict(GUARANTEE_TARGETS)
+STRUCTURE_TARGETS["triton.runtime.jit"] = ["entail.adapters.vllm_block_fp8_guarantee:install_triton"]
 if os.environ.get("ENTAIL", "off") == "guarantee":
     TARGETS = dict(GUARANTEE_TARGETS)
+elif os.environ.get("ENTAIL", "off") == "structure":
+    TARGETS = dict(STRUCTURE_TARGETS)
 # ENTAIL_ONLY=rope_alias,sglang_adapter installs just those adapters (to measure one of them on its own).
 if os.environ.get("ENTAIL_ONLY"):
     _only = {s.strip() for s in os.environ["ENTAIL_ONLY"].split(",") if s.strip()}
@@ -253,7 +257,7 @@ def _reached_nothing(folder, since, pid):
             return
         named = os.environ.get("ENTAIL_RECORD")
         files = [named] if named else [os.path.join(folder, n) for n in
-                                       (os.listdir(folder) if os.path.isdir(folder) else []) if n.startswith(("record-", "guarantee-"))]
+                                       (os.listdir(folder) if os.path.isdir(folder) else []) if n.startswith(("record-", "guarantee-", "structure-"))]
         if any(os.path.exists(f) and os.path.getmtime(f) >= since for f in files):
             return
         print(f"[entail] was on, but no process of this run recorded a decision (nothing in {folder}): nothing it "
@@ -294,7 +298,7 @@ def activate():
     install_now()
 
 
-if os.environ.get("ENTAIL", "off") in ("load", "debug", "guarantee"):
+if os.environ.get("ENTAIL", "off") in ("load", "debug", "guarantee", "structure"):
     activate()
 
 

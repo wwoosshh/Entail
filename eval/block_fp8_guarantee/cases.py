@@ -1,5 +1,6 @@
 """The scenarios (docs/semantic-guarantee-gpu-protocol.ko.md "첫 시나리오 묶음"): normal 8, consumer defects 12
-(four misreads x three timings), admission and unsupported 4. `cases(split, key)` gives the dev set (fixed seeds, used
+(four misreads x three timings), admission and unsupported 4; from v3 (L5.4c) also integrity 2 (bytes changed between
+the producer and the consumer, eager and at a graph replay). `cases(split, key)` gives the dev set (fixed seeds, used
 for development and calibration) or the holdout (seeds and the free parameters drawn from a key that exists only
 after the freeze: the freeze manifest's hash). The holdout varies inputs and timings inside the four published
 misread classes; it is not a measure of new, unseen bug types, and it is not blind (no separate evaluator).
@@ -9,6 +10,7 @@ A step is one of:
   reload    {"op": "reload", "layer": i, "seed": s}        new weight values, processed again by the producer
   capture   {"op": "capture", "layer": i, "M": rows, "seed": s}   warm up, then capture quant + consumer + observer
   replay    {"op": "replay", "seed": s, "mut": 0|1}       new input into the captured buffer, then replay
+            (integrity cases: "corrupt": 0|1 on call and replay steps turns the write after the issue on)
   direct    {"op": "direct", "layer": i, "M": rows, "seed": s, "quant": "native"}   consumer called with an
             activation another quantizer made (vLLM's QuantFP8.forward_native)
 """
@@ -133,6 +135,34 @@ def admission_cases(split, key):
     ]
 
 
+def integrity_cases(split, key):
+    """Two cases outside the 24, added for v3 (M19 L5.4c) before its results: the activation's bytes are changed
+    after the producer issued them and before the consumer reads them, through a second tensor on the same storage
+    (no version counter moves, no producer runs) - the sign bit of the first `corrupt_bytes` values flipped. Eagerly,
+    and at a CUDA graph replay (a device flag turns the write on, as the defects of T3 come on). No right value
+    exists to hand on: the guarantee must block before the next operation reads anything (in a graph: the next
+    operation must not run). The graph case's defective replay is its last step: a stop ends the process's device
+    context, as a refusal ends an engine."""
+    r = _rng(split, key, "I1")
+    m = r.choice([32, 64, 128])
+    i1 = {"id": "I1-integrity-eager", "group": "integrity", "N": N, "K": K, "out": "bfloat16", "layers": 1,
+          "wseed": [_seed(r)], "expect": "integrity", "corrupt_bytes": 16,
+          "steps": [{"op": "call", "layer": 0, "M": m, "seed": _seed(r), "dist": "normal", "corrupt": 0,
+                     "role": "normal call"},
+                    {"op": "call", "layer": 0, "M": m, "seed": _seed(r), "dist": "normal", "corrupt": 1,
+                     "role": "bytes changed after the issue"},
+                    {"op": "call", "layer": 0, "M": m, "seed": _seed(r), "dist": "normal", "corrupt": 1,
+                     "role": "second changed call"}]}
+    r = _rng(split, key, "I2")
+    m = r.choice([64, 128, 256])
+    i2 = {"id": "I2-integrity-graph", "group": "integrity", "N": N, "K": K, "out": "bfloat16", "layers": 1,
+          "wseed": [_seed(r)], "expect": "integrity", "corrupt_bytes": 16,
+          "steps": [{"op": "capture", "layer": 0, "M": m, "seed": _seed(r), "role": "normal warm-up + capture"},
+                    {"op": "replay", "seed": _seed(r), "corrupt": 0, "role": "normal replay"},
+                    {"op": "replay", "seed": _seed(r), "corrupt": 1, "role": "bytes changed at replay"}]}
+    return [i1, i2]
+
+
 def known_dev_cases():
     """Development cases outside the 24: the known tile defect (a tuned table gives BLOCK_SIZE_K 256 at larger
     batches), which must be shown repaired and delivered."""
@@ -143,9 +173,12 @@ def known_dev_cases():
                        {"op": "call", "layer": 0, "M": 300, "seed": 23, "dist": "normal", "mut": 0}]}]
 
 
-def cases(split="dev", key=""):
+def cases(split="dev", key="", integrity=True):
+    """The 24 scenarios, then (v3, integrity=True) the two integrity cases; then, for dev, the development case."""
     out = normal_cases(split, key) + defect_cases(split, key) + admission_cases(split, key)
     assert len(out) == 24, len(out)
+    if integrity:
+        out += integrity_cases(split, key)
     if split == "dev":
         out += known_dev_cases()
     for c in out:
