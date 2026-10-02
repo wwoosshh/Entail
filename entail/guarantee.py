@@ -185,7 +185,8 @@ class Issue:
     def brief(self) -> dict:
         return {"serial": self.serial, "role": self.role, "producer": self.producer, "pair": self.pair,
                 "block": list(self.block), "layout": self.layout, "epoch": self.epoch, "version": self.version,
-                "shape": list(self.snap[3]), "stride": list(self.snap[4]), "dtype": self.snap[6]}
+                "shape": list(self.snap[3]), "stride": list(self.snap[4]),
+                "dtype": str(self.snap[6]).replace("torch.", "")}
 
 
 class _ByTensor:
@@ -241,20 +242,17 @@ def _version(t) -> Optional[int]:
         return None
 
 
-def _storage_ptr(t) -> int:
-    try:
-        return int(t.untyped_storage().data_ptr())
-    except Exception:  # noqa: BLE001
-        return int(t.data_ptr())
-
-
 def _snap(t) -> tuple:
-    return (str(t.device), _storage_ptr(t), int(t.data_ptr()), tuple(int(n) for n in t.shape),
-            tuple(int(s) for s in t.stride()), int(t.storage_offset()), str(t.dtype).replace("torch.", ""))
+    """(device, storage start, data pointer, shape, strides, storage offset, dtype) - read without making objects
+    beyond the tuples (this runs at every call)."""
+    off = t.storage_offset()
+    ptr = t.data_ptr()
+    return (t.device, ptr - off * t.element_size(), ptr, tuple(t.shape), t.stride(), off, t.dtype)
 
 
 def _bump(t) -> int:
-    key = (str(t.device), _storage_ptr(t))
+    s = _snap(t)
+    key = (s[0], s[1])
     _EPOCHS[key] = _EPOCHS.get(key, 0) + 1
     return _EPOCHS[key]
 
@@ -367,10 +365,28 @@ def issue_weight(w, w_s, block: Tuple[int, int], producer: str = WEIGHT_PRODUCER
         return b, s
 
 
+_HELD = {}                 # id(tensor with a version counter) -> what it was when last found as issued
+
+
 def _stale(t, iss: Issue) -> Optional[str]:
     """Why t no longer holds what its producer issued as far as the host can tell (storage, layout, epoch, version);
-    None when it does. The bytes themselves are compared on the device (checksum)."""
+    None when it does. The bytes themselves are compared on the device (checksum). A tensor with a version counter
+    (a weight) found as issued is remembered with its version, pointer and layout; while they and its storage's
+    epoch stay, the next look is a few attribute reads."""
+    v = _version(t)
+    if v is not None:
+        h = _HELD.get(id(t))
+        if h is not None and h[0] == iss.serial and h[1] == v and h[2] == t.data_ptr() and h[3] == t.shape \
+                and h[4] == t.stride() and _EPOCHS.get(h[5], 0) == iss.epoch:
+            return None
     now = _snap(t)
+    why = _stale_full(t, iss, now)
+    if why is None and v is not None:
+        _HELD[id(t)] = (iss.serial, v, now[2], t.shape, now[4], (now[0], now[1]))
+    return why
+
+
+def _stale_full(t, iss, now):
     if now != iss.snap:
         return f"{iss.role} moved or changed its layout since its issue ({iss.snap[2:6]} -> {now[2:6]})"
     if _epoch_now(now) != iss.epoch:
@@ -442,6 +458,8 @@ def _write(line: dict) -> None:
 
     full = {"v": 1, "t": round(time.time(), 3), "run": record.run_id(), "pid": os.getpid(), "profile": PROFILE}
     full.update(line)
+    if isinstance(full.get("issues"), dict):
+        full["issues"] = {k: (v.brief() if isinstance(v, Issue) else v) for k, v in full["issues"].items()}
     record._append(path, json.dumps(full, ensure_ascii=False, default=str) + "\n")
 
 
@@ -513,7 +531,7 @@ def _admit(A, B, As, Bs, block_size, output_dtype, rec, t0):
                         "after": list(tB.block)})
         block = tuple(tB.block)
     issues = {"A": tA, "As": tAs, "B": tB, "Bs": tBs}
-    rec["issues"] = {k: v.brief() for k, v in issues.items()}
+    rec["issues"] = issues                 # Issue objects: made into JSON only when the line is written
     rec["repairs"] = repairs
     for k, v in issues.items():
         if not v.declared_ok:
@@ -848,6 +866,9 @@ def after_replay(graph) -> None:
         return
     sites = [s for s in entry[1] if s.flags is not None]
     _count("replays")
+    for site in entry[1]:
+        if site.flags is None:         # check "static": what was captured is what replays (the kernel proven at
+            _count(site.rec.get("outcome", "normal_delivered"))   # capture, or the reference): counted, no wait
     if not sites:
         return
     import torch
@@ -1086,7 +1107,7 @@ def _static(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0):
                 "ms_kernel_path": round((time.perf_counter() - t1) * 1e3, 3),
                 "ms_total": round((time.perf_counter() - t0) * 1e3, 3)})
     _PERMITS.set(out, {"permit": rec["call"], "plan_fp": rec["plan_fp"]})
-    first = tuple(k for k, _v in ctx["verdicts"])
+    first = tuple(id(v) for _k, v in ctx["verdicts"])   # verdicts live in _VERDICTS: their ids are stable
     if p.records == "all" or outcome != "normal_delivered" or first not in _SAID:
         _SAID.add(first)
         _write(rec)
@@ -1107,6 +1128,7 @@ def reset() -> None:
     _ISSUES.clear()
     _PERMITS.clear()
     _EPOCHS.clear()
+    _HELD.clear()
     _GRAPHS.clear()
     _VERDICTS.clear()
     _FAST.clear()
