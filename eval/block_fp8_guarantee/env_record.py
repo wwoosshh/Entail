@@ -31,7 +31,8 @@ def main(out):
     env = common.environment()
     choice = {}
     for label, disabled in (("unforced", None),
-                            ("marlin_humming_disabled", "MarlinFP8ScaledMMLinearKernel,HummingFP8ScaledMMLinearKernel")):
+                            ("marlin_humming_disabled",
+                             "MarlinFP8ScaledMMLinearKernel,HummingFP8ScaledMMLinearKernel")):
         e = dict(os.environ)
         e.pop("VLLM_DISABLED_KERNELS", None)
         if disabled:

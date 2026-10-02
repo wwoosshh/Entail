@@ -1,10 +1,10 @@
 """The real engine: one FP8 model in vLLM 0.30, off against the guarantee profile, each in a fresh process.
   python engine_smoke.py <out_root> [model]          (one run:  python engine_smoke.py --one <mode> <config> <out>)
 
-Configurations (BFG_ENGINE_CONFIGS, default "eager,default"): eager (enforce_eager), graphs (no torch.compile, CUDA
-graphs of decode steps captured from eager code: compilation mode 0, FULL_DECODE_ONLY) and default (torch.compile + CUDA graphs:
-the profile does not support it; the run records what happens - a refusal is the expected outcome, not a failure of
-the smoke). VLLM_DISABLED_KERNELS turns Marlin and Humming off so the Triton block kernel is chosen on this GPU (the
+Configurations (BFG_ENGINE_CONFIGS, default "eager,default"): eager (enforce_eager), graphs (no torch.compile,
+CUDA graphs of decode steps captured from eager code: compilation mode 0, FULL_DECODE_ONLY) and default
+(torch.compile + CUDA graphs: the profile does not support it; the run records what happens - a refusal is the
+expected outcome, not a failure of the smoke). VLLM_DISABLED_KERNELS turns Marlin and Humming off so the Triton block kernel is chosen on this GPU (the
 choice is read from vLLM's log). The engine runs in this process (VLLM_ENABLE_V1_MULTIPROCESSING=0), so the
 profile's counts and the RNG states are readable here.
 
@@ -171,6 +171,14 @@ def compare(out_root):
             c["offA_vs_offB"] = _cmp(offs[0], offs[1])
         if offs and gs and "runs" in gs[0]:
             c["off_vs_guarantee"] = _cmp(offs[0], gs[0])
+            c["timing"] = {"start_s": {"off": [r["start_s"] for r in offs], "guarantee": gs[0]["start_s"]}}
+            for label in ("greedy_cold", "greedy_warm", "seeded", "unseeded"):
+                o = [_run(r, label)["s"] for r in offs if _run(r, label)]
+                gv = _run(gs[0], label)
+                if o and gv:
+                    c["timing"][label] = {"off": o, "guarantee": gv["s"], "ratio": gv["s"] / (sum(o) / len(o))}
+            steady = [c["timing"][k]["ratio"] for k in ("seeded", "unseeded") if k in c["timing"]]
+            c["timing"]["steady_ratio"] = sum(steady) / len(steady) if steady else None
             c["guarantee_warm_equals_cold"] = _same_outputs(gs[0], "greedy_cold", "greedy_warm")
             c["guarantee_entail"] = {k: v for k, v in gs[0].get("entail", {}).items() if not isinstance(v, (list,))}
     common.write_json(os.path.join(out_root, "compare.json"), out)

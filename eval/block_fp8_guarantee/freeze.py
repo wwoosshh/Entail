@@ -27,6 +27,9 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--cost-budget", type=float, default=None,
                     help="largest accepted ratio of the guarantee's normal repeat time to off's (median, eager)")
+    ap.add_argument("--engine-budget", type=float, default=None,
+                    help="largest accepted ratio of the guarantee's steady generation time to off's in the engine's "
+                         "CUDA graph configuration (seeded and unseeded runs, engine_smoke.py)")
     ap.add_argument("--check", default="output", choices=("output", "static"))
     ap.add_argument("--integrity", default="checksum", choices=("checksum", "epoch"))
     ap.add_argument("--records", default="all", choices=("all", "changes"))
@@ -64,7 +67,7 @@ def main():
         "cases": {"file_sha256": common.sha256_file(os.path.join(HERE, "cases.py")),
                   "normal": 8, "defect": 12, "admission": 4,
                   "holdout_rule": "seeds and free parameters = sha256(f'{sha256 of this manifest file}:{case id}')"},
-        "cost_budget": {"normal_repeat_ratio_max": a.cost_budget,
+        "cost_budget": {"normal_repeat_ratio_max": a.cost_budget, "engine_graphs_steady_ratio_max": a.engine_budget,
                         "note": "the conservation verdict and the cost verdict are separate; the check is never "
                                 "narrowed to meet this"},
         "env": env,

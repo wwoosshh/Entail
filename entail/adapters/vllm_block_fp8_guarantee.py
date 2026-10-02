@@ -218,6 +218,7 @@ def install_graphs():
 
 
 _KERNEL_KEYS = {}      # id(JITFunction) -> (qualified name, source cache key)
+_PARAMS = {}           # id(JITFunction) -> (it, parameter names, constexpr names)
 
 
 def _kernel_key(fn, consts):
@@ -232,8 +233,11 @@ def _kernel_key(fn, consts):
 def read_launch(fn, args, kwargs, grid):
     """One Triton launch as the core reads it: its arguments bound to the kernel's parameter names (constexpr ones
     apart, they are folded into the IR), the grid as a tuple."""
-    names = [p.name for p in fn.params]
-    constexpr = {p.name for p in fn.params if getattr(p, "is_constexpr", False)}
+    sig = _PARAMS.get(id(fn))
+    if sig is None or sig[0] is not fn:
+        sig = _PARAMS[id(fn)] = (fn, [p.name for p in fn.params],
+                                 {p.name for p in fn.params if getattr(p, "is_constexpr", False)})
+    _fn, names, constexpr = sig
     bound = dict(zip(names, args))
     bound.update({k: v for k, v in kwargs.items() if k in names})
     values = {k: v for k, v in bound.items() if k not in constexpr}
