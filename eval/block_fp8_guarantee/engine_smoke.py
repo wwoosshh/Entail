@@ -42,9 +42,14 @@ def one(mode, config, out_path, model):
     torch.manual_seed(0)
     from vllm import LLM, SamplingParams
 
-    r = {"mode": mode, "config": config, "model": model}
+    r = {"mode": mode, "config": config, "model": model,
+         "gpu_memory_utilization": float(os.environ.get("BFG_ENGINE_GPU_MEM", "0.55"))}
     t0 = time.perf_counter()
-    kw = dict(model=model, gpu_memory_utilization=0.55, max_model_len=2048, seed=0, enable_prefix_caching=True)
+    # BFG_ENGINE_GPU_MEM (default 0.55, the frozen setting): added after the v3 freeze, when the guarantee's graph
+    # configuration could not start at 0.55 (its in-graph check left no memory for the KV cache); a run with another
+    # value is a supplementary measurement, reported apart from the frozen one
+    kw = dict(model=model, gpu_memory_utilization=float(os.environ.get("BFG_ENGINE_GPU_MEM", "0.55")),
+              max_model_len=2048, seed=0, enable_prefix_caching=True)
     if config == "eager":
         kw["enforce_eager"] = True
     elif config == "graphs":            # no torch.compile, CUDA graphs of whole decode steps captured from eager code
