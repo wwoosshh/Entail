@@ -145,6 +145,8 @@ GUARANTEE_TARGETS = {
     "vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel":
         ["entail.adapters.vllm_block_fp8_guarantee:install_weights"],
     "torch.cuda.graphs": ["entail.adapters.vllm_block_fp8_guarantee:install_graphs"],
+    # check "static" (M19 L5.4b): the consumer's Triton launch, read before it goes ahead
+    "triton.runtime.jit": ["entail.adapters.vllm_block_fp8_guarantee:install_triton"],
 }
 if os.environ.get("ENTAIL", "off") == "guarantee":
     TARGETS = dict(GUARANTEE_TARGETS)

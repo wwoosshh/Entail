@@ -6,8 +6,10 @@ N=6144, K=2560 and N=2560, K=9728: Qwen3-4B's fused QKV-like and down-projection
   start         process start -> the kernel object and the weights processed (issued, under the profile)
   first         the first call of each shape (Triton compiles the kernel in both modes)
   repeat        median of 30 calls after 5 warm-ups, at M = 1, 16, 256 (decode-like to prefill-like)
-  bypass        the same with the consumer reading the neighbour block's scale (repaired with the reference under
-                the profile: the cost of the reference path; off hands the wrong values on, for the time only)
+  bypass        the same with a consumer kernel that reads the neighbour block's scale (repaired with the reference
+                under the profile: the cost of the reference path; off hands the wrong values on, for the time only)
+  (repeat runs vLLM's own kernel, bypass the misreading one; the plan comes from BFG_FREEZE, so the same script
+  measures check "output" and check "static")
   memory        peak allocated bytes, and the extra transient of one checked call
 Nothing in the check is skipped or sampled to save time.
 """
@@ -34,8 +36,8 @@ def one(mode, out_path):
 
     r = {"mode": mode, "shapes": {}}
     with common.vllm_context():
-        lau = common.install_launcher("neighbor")
-        lau.flag.fill_(0)
+        lau = common.install_launcher(None)     # vLLM's own kernel; the bypass below swaps in a misreading one
+        launches = 0
         kernels = {}
         for N, K in SHAPES:
             k, _ = common.make_kernel(N, K, torch.bfloat16)
@@ -53,8 +55,10 @@ def one(mode, out_path):
             k.apply_weights(layer, x)
             torch.cuda.synchronize()
             sh["first_ms"] = (time.perf_counter() - t0) * 1e3
-            for flag, label in ((0, "repeat"), (1, "bypass")):
-                lau.flag.fill_(flag)
+            for label in ("repeat", "bypass"):
+                launches += lau.launches
+                lau = common.install_launcher(None if label == "repeat" else "neighbor")
+                lau.flag.fill_(1)
                 for M in MS:
                     x = common.make_input(M, K, 100 + M)
                     for _ in range(5):
@@ -71,9 +75,10 @@ def one(mode, out_path):
                     sh[f"{label}_M{M}"] = {"median_ms": statistics.median(times), "min_ms": min(times),
                                            "max_ms": max(times),
                                            "transient_bytes": int(torch.cuda.max_memory_allocated() - base)}
-            lau.flag.fill_(0)
+            launches += lau.launches
+            lau = common.install_launcher(None)
         r["peak_bytes"] = int(torch.cuda.max_memory_allocated())
-        r["launches"] = lau.launches
+        r["launches"] = launches + lau.launches
         if mode == "guarantee":
             from entail.adapters import vllm_block_fp8_guarantee as ad
             r["entail"] = ad.stats()

@@ -1,7 +1,8 @@
 """The real engine: one FP8 model in vLLM 0.30, off against the guarantee profile, each in a fresh process.
   python engine_smoke.py <out_root> [model]          (one run:  python engine_smoke.py --one <mode> <config> <out>)
 
-Configurations: eager (enforce_eager; the profile's supported engine path) and default (torch.compile + CUDA graphs:
+Configurations (BFG_ENGINE_CONFIGS, default "eager,default"): eager (enforce_eager), graphs (no torch.compile, CUDA
+graphs of decode steps captured from eager code: compilation mode 0, FULL_DECODE_ONLY) and default (torch.compile + CUDA graphs:
 the profile does not support it; the run records what happens - a refusal is the expected outcome, not a failure of
 the smoke). VLLM_DISABLED_KERNELS turns Marlin and Humming off so the Triton block kernel is chosen on this GPU (the
 choice is read from vLLM's log). The engine runs in this process (VLLM_ENABLE_V1_MULTIPROCESSING=0), so the
@@ -45,6 +46,8 @@ def one(mode, config, out_path, model):
     kw = dict(model=model, gpu_memory_utilization=0.55, max_model_len=2048, seed=0, enable_prefix_caching=True)
     if config == "eager":
         kw["enforce_eager"] = True
+    elif config == "graphs":            # no torch.compile, CUDA graphs of whole decode steps captured from eager code
+        kw["compilation_config"] = {"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY"}
     try:
         llm = LLM(**kw)
     except Exception as e:  # noqa: BLE001
@@ -108,7 +111,8 @@ def main(out_root, model):
     os.makedirs(out_root, exist_ok=True)
     auto = os.path.join(common.ENTAIL_ROOT, "entail", "adapters", "autoinstall")
     plan = []
-    for config in ("eager", "default"):
+    configs = os.environ.get("BFG_ENGINE_CONFIGS", "eager,default").split(",")
+    for config in configs:
         for mode in ("off", "guarantee", "off"):
             plan.append((config, mode))
     results = []

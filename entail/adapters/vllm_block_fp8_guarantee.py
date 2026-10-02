@@ -97,6 +97,8 @@ def _wrap_quantizer(mod, name):
     if getattr(orig, "__entail_guarantee__", False):
         return False
     sig = inspect.signature(orig)
+    names = list(sig.parameters)
+    defaults = {k: p.default for k, p in sig.parameters.items() if p.default is not inspect.Parameter.empty}
 
     @functools.wraps(orig)
     def run(*args, **kwargs):
@@ -104,9 +106,10 @@ def _wrap_quantizer(mod, name):
         if _compiling():
             return out
         try:
-            ba = sig.bind(*args, **kwargs)
-            ba.apply_defaults()
-            (x_q, x_s), group, layout, source = read_choice("activation", ba.arguments, out)
+            bound = dict(defaults)
+            bound.update(zip(names, args))
+            bound.update(kwargs)
+            (x_q, x_s), group, layout, source = read_choice("activation", bound, out)
             guarantee.issue_activation(x_q, x_s, group, layout=layout, source=source)
             _count("activation_issued")
         except Exception:  # noqa: BLE001 - principle 12: never the engine's problem; the gate then refuses
@@ -124,12 +127,14 @@ def _wrap_consumer(mod, name):
     if getattr(orig, "__entail_guarantee__", False):
         return False
     sig = inspect.signature(orig)
+    names = list(sig.parameters)
+    defaults = {k: p.default for k, p in sig.parameters.items() if p.default is not inspect.Parameter.empty}
 
     @functools.wraps(orig)
     def run(*args, **kwargs):
-        ba = sig.bind(*args, **kwargs)
-        ba.apply_defaults()
-        a = ba.arguments
+        a = dict(defaults)
+        a.update(zip(names, args))
+        a.update(kwargs)
         _count("consumer_calls")
         return guarantee.gate(orig, a["A"], a["B"], a["As"], a["Bs"], a["block_size"], a["output_dtype"])
 
@@ -212,9 +217,68 @@ def install_graphs():
     return 1
 
 
+_KERNEL_KEYS = {}      # id(JITFunction) -> (qualified name, source cache key)
+
+
+def _kernel_key(fn, consts):
+    k = _KERNEL_KEYS.get(id(fn))
+    if k is None:
+        f = getattr(fn, "fn", None)
+        name = f"{getattr(f, '__module__', '?')}.{getattr(f, '__qualname__', '?')}"
+        k = _KERNEL_KEYS[id(fn)] = (name, str(getattr(fn, "cache_key", "")))
+    return k + (consts,)
+
+
+def read_launch(fn, args, kwargs, grid):
+    """One Triton launch as the core reads it: its arguments bound to the kernel's parameter names (constexpr ones
+    apart, they are folded into the IR), the grid as a tuple."""
+    names = [p.name for p in fn.params]
+    constexpr = {p.name for p in fn.params if getattr(p, "is_constexpr", False)}
+    bound = dict(zip(names, args))
+    bound.update({k: v for k, v in kwargs.items() if k in names})
+    values = {k: v for k, v in bound.items() if k not in constexpr}
+    consts = tuple(sorted((k, repr(v)) for k, v in bound.items() if k in constexpr)) + \
+        tuple(sorted((k, repr(v)) for k, v in kwargs.items() if k not in names))
+    g = grid(dict(bound, **kwargs)) if callable(grid) else grid
+    g = tuple(int(x) for x in (g if isinstance(g, (tuple, list)) else (g,)))
+    return values, consts, g
+
+
+def install_triton():
+    """The launch hook check "static" needs: every eager Triton launch while a gate is open is offered to the core,
+    which decides whether it goes ahead (guarantee.consumer_launch). Compile-only warm-ups pass through."""
+    mod = sys.modules.get("triton.runtime.jit")
+    J = getattr(mod, "JITFunction", None) if mod is not None else None
+    if J is None or getattr(J.run, "__entail_guarantee__", False):
+        return 0
+    orig = J.run
+
+    @functools.wraps(orig)
+    def run(self, *args, grid, warmup, **kwargs):
+        if warmup or guarantee._ctx() is None:
+            return orig(self, *args, grid=grid, warmup=warmup, **kwargs)
+        go = True
+        try:
+            values, consts, g = read_launch(self, args, kwargs, grid)
+            go = guarantee.consumer_launch(_kernel_key(self, consts), values, g,
+                                           lambda: self.warmup(*args, grid=grid, **kwargs).asm["ttir"])
+        except Exception:  # noqa: BLE001 - principle 12: never the engine's problem; the gate sees no verdict and
+            _count("launch_read_failed")   # hands on the reference's output
+        if not go:
+            _count("launch_withheld")
+            return None
+        return orig(self, *args, grid=grid, warmup=warmup, **kwargs)
+
+    run.__entail_guarantee__ = True
+    J.run = run
+    _WRAPPED[(J, "run")] = orig
+    guarantee.installed(guarantee.TRITON_HOOK)
+    return 1
+
+
 def install():
     """Everything whose module has loaded (a harness, or install_now after the imports)."""
-    return install_fp8_utils() + install_weights() + install_graphs()
+    return install_fp8_utils() + install_weights() + install_graphs() + install_triton()
 
 
 def uninstall():
