@@ -276,6 +276,20 @@ def main():
     g.set_plan(None)
     print("ok ENTAIL=guarantee refuses a plan with check 'static'")
 
+    # 16b. a plan cannot weaken the guarantee (L5.4d): integrity "epoch" (no proof of immutable inputs or owned writes
+    # is available) and a tolerance looser than the calibrated one are refused at every call; a stricter one is not
+    for weak, word in ((g.Plan(integrity="epoch"), "immutable"), (g.Plan(c_acc=2.0 ** -9), "c_acc"),
+                       (g.Plan(ulps=2.0), "ulps")):
+        g.set_plan(weak)
+        e = refused(lambda: call(fu, l1, act()), "plan")
+        assert "weaken" in e.why and word in e.why, e.why
+        assert not lines(rec)[-1]["delivered"]
+    g.set_plan(g.Plan(c_acc=2.0 ** -12, ulps=0.5))
+    y, A, As = call(fu, l1, act())
+    assert lines(rec)[-1]["delivered"] and lines(rec)[-1]["outcome"] in ("normal_delivered", "repaired_delivered")
+    g.set_plan(None)
+    print("ok ENTAIL=guarantee refuses plans that weaken it (epoch integrity, a looser tolerance); a stricter one runs")
+
     graph_replays(fu, bk, rec)
     ad.uninstall()
     for name in (ad.FP8_UTILS, ad.BLOCK_KERNEL):

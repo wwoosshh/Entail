@@ -273,7 +273,9 @@ def main(case_path, mode, out_dir):
                 extra["device_stopped"] = stopped is not None
             y_obs = (common.to_np(y) if y is not None else None)
             record_step(step, y_obs, delivered, exc, A, As, li, extra)
-            if exc and op == "capture":
+            if exc and op == "capture":          # nothing to replay: the steps after it are recorded as not run
+                for rest in case["steps"][si + 1:]:
+                    res["steps"].append(dict(rest, not_run="the capture failed"))
                 break
             if stopped is not None:
                 for rest in case["steps"][si + 1:]:

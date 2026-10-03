@@ -17,10 +17,13 @@ Triton.
 | `run_suite.py` | every scenario in off A, off B, load, guarantee and structure, each a fresh process with entail's start-up hook |
 | `aggregate.py` | the verdicts from what the next operation read: normal, repaired, blocked (a replay: only when the next operation did not run), wrong escaped (NaN included), refused after use, stopped, unknown, error; passed / failed / incomplete |
 | `calibrate.py` | the oracle's own checks (all 256 fp8 codes, an exact power-of-two case) and the normal calibration of both tolerances |
+| `freeze_check.py` | before a frozen evaluation: every code file the manifest lists (sha256), the entail commit and the environment record against the manifest; the holdout, cost and engine runs do not start on a mismatch (v4) |
+| `selftest.py` | CPU self-test of the bookkeeping: completeness and partial runs in `aggregate.py`, mismatches in `freeze_check.py` |
 | `freeze.py` | the freeze manifest (the guarantee's `plan` and the structural experiment's `structure_plan`, tolerances, environment, code hashes, holdout rule); it is also the plan file `ENTAIL_GUARANTEE_PLAN` reads |
 | `cost.py` | start, first call, normal repeat and reference-path repeat, time and memory, off, guarantee and structure in rotating fresh processes |
 | `engine_smoke.py` | the real engine (vLLM 0.30, one FP8 model): producers and consumer reached in every layer, off against guarantee and against structure, RNG and prefix cache |
 
 Order: environment record and dev suite, `calibrate.py`, `freeze.py`, then the holdout suite with `--freeze`, cost and
-the engine smoke with `BFG_FREEZE` set. Results that are looked at and lead to a change go to a new frozen version;
+the engine smoke with `BFG_FREEZE` set. From v4 each of the three checks the freeze first (`freeze_check.py`), and the
+engine smoke takes its settings (configurations, modes, gpu_memory_utilization, rounds) from the manifest. Results that are looked at and lead to a change go to a new frozen version;
 the first holdout's results are kept as they are.
