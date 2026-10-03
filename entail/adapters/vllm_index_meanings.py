@@ -148,14 +148,19 @@ def _classes():
     return {k: {attr: (list(v[0]), v[1]) for attr, v in spec.items()} for k, spec in table.get("classes", {}).items()}
 
 
-def _attach_holder(obj, names, basis):
+def _attach_holder(obj, names, basis, **kw):
     """A tensor, or an object holding one (.gpu): the meaning goes on the GPU tensor; a staged-write buffer's write
     buffers are tagged with it, so what they hand to the write kernel means places along its axes."""
     t = getattr(obj, "gpu", obj)
     if t is None or not hasattr(t, "dim"):
         return
     if t.dim() == len(names):
-        _attach(t, names, basis)
+        _attach(t, names, basis, **kw)
+    if hasattr(obj, "write_indices"):
+        try:
+            obj.__entail_meaning__ = (list(names), basis)
+        except Exception:  # noqa: BLE001
+            pass
     for attr, role in (("write_indices", 0), ("write_starts", 1), ("write_cu_lens", None), ("write_contents", "v")):
         pool = getattr(obj, attr, None)
         if pool is not None and hasattr(pool, "copy_to_uva"):
@@ -250,7 +255,32 @@ def install_write_buffers():
                     _count("attach_failed")
             return t
         return run
-    return _wrap(cls, "copy_to_uva", make)
+    n = _wrap(cls, "copy_to_uva", make)
+
+    # the staged values themselves, when they are copied fresh for the write (not through a pool): they are the
+    # buffer's values, in write order
+    swt = getattr(mod, "StagedWriteTensor", None)
+    if swt is not None and hasattr(mod, "async_tensor_h2d"):
+        def make_apply(orig):
+            @functools.wraps(orig)
+            def run(self, *a, **k):
+                m = getattr(self, "__entail_meaning__", None)
+                if m is None:
+                    return orig(self, *a, **k)
+                saved = mod.async_tensor_h2d
+
+                def h2d(*aa, **kk):
+                    t = saved(*aa, **kk)
+                    _attach(t, ["content"], m[1])
+                    return t
+                mod.async_tensor_h2d = h2d
+                try:
+                    return orig(self, *a, **k)
+                finally:
+                    mod.async_tensor_h2d = saved
+            return run
+        n += _wrap(swt, "apply_write", make_apply)
+    return n
 
 
 def install_request_state():
@@ -290,8 +320,7 @@ def install_block_tables():
             orig(self, *a, **k)
             try:
                 for i, bt in enumerate(getattr(self, "block_tables", []) or []):
-                    _attach(getattr(bt, "gpu", None), ["request_state", "block_slot"], "kv_block",
-                            label="block_table")
+                    _attach_holder(bt, ["request_state", "block_slot"], "kv_block", label="block_table")
                 for i, bt in enumerate(getattr(self, "input_block_tables", []) or []):
                     _attach(bt, ["batch_request", "block_slot"], "kv_block", label="block_table")
                 _attach(getattr(self, "slot_mappings", None), ["kv_group", "token"], "kv_slot")

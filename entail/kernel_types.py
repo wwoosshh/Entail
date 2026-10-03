@@ -831,6 +831,8 @@ class _Typed(KI._Run):
         if isinstance(a, V) != isinstance(b, V):          # a typed integer against a number: the numbers are meant
             a = a.sym if isinstance(a, V) and a.sym is not None else a
             b = b.sym if isinstance(b, V) and b.sym is not None else b
+        if isinstance(a, S) or isinstance(b, S):
+            return self._merge_data(a, b)           # differs by program: as a value chosen by data (its basis kept)
         if isinstance(a, T) or isinstance(b, T):
             return T(a.why if isinstance(a, T) else b.why)
         if isinstance(a, V) and isinstance(b, V):
@@ -866,8 +868,6 @@ class _Typed(KI._Run):
             if a.arg != b.arg or a.taint is not None or b.taint is not None:
                 raise Unmodelled("a branch that yields pointers into different tensors")
             return Ptr(a.arg, self._merge(cv, a.off, b.off))
-        if isinstance(a, S) or isinstance(b, S):
-            return self._merge_data(a, b)           # differs by program: as a value chosen by data (its basis kept)
         a, b = self._int(a), self._int(b)
         if not (isinstance(a, E) and isinstance(b, E)):
             raise Unmodelled("a branch whose two values are of different kinds")
@@ -1462,18 +1462,37 @@ class _Typed(KI._Run):
         self._footprint(ptr.arg, cs, sv, shape)
 
     def _gathered_at(self, val, name, oc, sv):
-        """Whether a value whose coordinate on some axis was chosen by an index is stored at the place (on the
-        axis `name`) that index was read from: True / False, None when no coordinate of the value is such."""
+        """Whether a value whose coordinate on some axis was chosen by an index is stored at its own place on the
+        axis `name`: the place that index was read from, or a place chosen by an index read where the value's index
+        was read (the w-th write's j-th element goes to row[w], start[w] + j). True / False, None when no coordinate
+        of the value is such."""
+        at_o = self.leaf_at.get(oc.key) if isinstance(oc, Sym) else None
+
+        def same(a, b):
+            if isinstance(a, Sym) or isinstance(b, Sym):
+                return bool(_same_coord(a, b, sv))
+            return not np.any(self._eq(a, 1, b, 1, sv))
+
         for _key, (arr, _g) in val.coords.items():
             if not isinstance(arr, Sym):
                 continue
             at = self.leaf_at.get(arr.key)
-            if not at or name not in at:
+            if not at:
                 continue
-            c = at[name]
-            if isinstance(oc, Sym) or isinstance(c, Sym):
-                return bool(_same_coord(oc, c, sv))
-            return not np.any(self._eq(oc, 1, c, 1, sv))
+            if name in at:
+                return same(oc, at[name])
+            if at_o:
+                shared = [ax for ax in at if ax in at_o]
+                if shared:
+                    offs_same = True
+                    if isinstance(oc, Sym):
+                        a_off, o_off = np.asarray(arr.off), np.asarray(oc.off)
+                        try:
+                            shp = np.broadcast_shapes(a_off.shape, o_off.shape)
+                            offs_same = bool(np.array_equal(np.broadcast_to(a_off, shp), np.broadcast_to(o_off, shp)))
+                        except ValueError:
+                            offs_same = False
+                    return offs_same and all(same(at_o[ax], at[ax]) for ax in shared)
         return None
 
     def _footprint(self, arg, cs, sv, shape):
