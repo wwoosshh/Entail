@@ -689,6 +689,8 @@ class _Typed(KI._Run):
                         if c == st:
                             dim = i
                             break
+                    if dim is None and not dims and m.shape:
+                        dim = 0
                 if dim is None:
                     raise _Fail("unproven", f"{what} addresses {arg} by a value read at run time that this module "
                                             f"cannot take apart by the strides ({off.why})")
@@ -1073,6 +1075,8 @@ class _Typed(KI._Run):
                 lo, cnt = _ranges(moved, vm[:, 0, :], f"a sum reads one '{key}' twice",
                                   f"a sum whose '{key}' are not one range")
                 sums[key] = sums.get(key, []) + [(lo, cnt)]
+            elif kind in ("max", "min"):
+                continue                                           # the coordinate along the reduced lanes is gone
             else:
                 raise Unmodelled(f"a {kind} over the axis {key}")
         return V(shape, coords, v.any(axis=lane), sums, x.serials, x.applied,
@@ -1146,7 +1150,7 @@ class _Typed(KI._Run):
             sv = np.ones((P,) + shape, dtype=bool) if mask is None else _full(_as_bool_full(mask), shape, P)
             if not self.active.all():
                 sv = sv & self._active_lanes(len(shape))
-        cs = self._coords_of(ptr.arg, ptr.off, sv, "a store")
+        cs = self._coords_of(ptr.arg, ptr.off, sv, "a store", bounds=sv is not None)
         basis = _coordinate_basis(val.basis) if isinstance(val, S) else None
         if m.basis is not None:
             if basis is not None and basis != m.basis:
