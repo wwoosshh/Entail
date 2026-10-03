@@ -26,7 +26,7 @@ import weakref
 from .facts import VOCABULARY, Certainty, Fact, Invalidated, KernelCaps, ModelProps, Source
 
 _MODE = os.environ.get("ENTAIL", "off")
-if _MODE in ("guarantee", "structure", "structure_writes", "structure_inkernel"):   # guarantee.py's profiles
+if _MODE in ("guarantee", "structure", "structure_writes", "structure_inkernel", "types"):   # guarantee.py's profiles, L6
     # run alone: the other checks stay off
     _MODE = "off"
 _POLICY = os.environ.get("ENTAIL_POLICY", "resolve")

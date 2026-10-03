@@ -105,7 +105,7 @@ def from_env(environ: Optional[Mapping[str, str]] = None) -> Policy:
             raise ValueError(f"ENTAIL_FACT_POLICY: expected Name=setting, got {item!r}")
         overrides.append((name.strip(), setting.strip()))
     mode = env.get("ENTAIL", "off")
-    if mode in ("guarantee", "structure", "structure_writes", "structure_inkernel"):   # guarantee.py's profiles
+    if mode in ("guarantee", "structure", "structure_writes", "structure_inkernel", "types"):   # guarantee.py's profiles, L6
         # run alone: the other checks stay off
         mode = "off"
     return Policy(mode=mode, on_mismatch=env.get("ENTAIL_POLICY", "resolve"),

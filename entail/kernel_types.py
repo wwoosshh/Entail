@@ -22,6 +22,11 @@ constant factor, a non-linear function, an addend that is not a term). Loads giv
 apart by the tensor's strides), elementwise operations pair them, dot and reduce turn one axis into a sum, stores
 pair the value with the output's own coordinates and record what was covered.
 
+A coordinate is kept as small as it is: one that varies only along the rows of a tile is a (programs, rows, 1)
+array, one that is the same for every lane a (programs, 1, 1) array; numpy broadcasts them when they meet. So a
+64 x 128 tile costs its 64 + 128 coordinates, not 8,192 (the launches of an engine run have thousands of programs
+and tens of loop iterations each).
+
 Verdicts (per launch; the caller decides what to do with one that is not proven):
   proven      the rule holds for every operation and every element, whatever the data; the output meaning, where
               it was not declared, is inferred (Verdict.inferred)
@@ -30,15 +35,16 @@ Verdicts (per launch; the caller decides what to do with one that is not proven)
   possible    the pairing depends on a value the kernel reads at run time, and one of the choices disagrees
   unproven    something this module does not model, or a meaning it was not given (nothing is claimed)
 """
+import itertools
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
 from . import kernel_ir as KI
-from .kernel_ir import E, Mk, Ptr, T, Unmodelled, _as_bool_full, _bounds, _Dense, _Fail, _ranges, _tiling
+from .kernel_ir import E, Mk, Ptr, T, Unmodelled, _as_bool_full, _Dense, _Fail, _ranges, _tiling
 
 CHUNK_ELEMENTS = 1 << 22
 MAX_ALTS = 8
@@ -117,8 +123,8 @@ class Verdict:
 # --- typed float values ---------------------------------------------------------------------------------------------
 
 class V:
-    """A float tensor value in the kernel, typed by where its elements come from (one program chunk at a time; every
-    array is (P, *lanes) or broadcastable to it)."""
+    """A float tensor value in the kernel, typed by where its elements come from. Every array has the rank
+    1 + len(shape) (the program axis first) and is as small as its variation: a size of 1 where it is constant."""
     __slots__ = ("shape", "coords", "valid", "sums", "serials", "applied", "extras", "fn", "const", "leaf",
                  "masked_zero", "data_addr", "alts", "scale_of", "scale_serial")
 
@@ -126,8 +132,8 @@ class V:
                  fn=False, const=None, leaf=None, masked_zero=True, data_addr=None, alts=None, scale_of=0,
                  scale_serial=0):
         self.shape = tuple(shape)
-        self.coords = dict(coords or {})      # name -> (array (P|1, *lanes), group)
-        self.valid = valid                    # bool array (P|1, *lanes) or None (every lane)
+        self.coords = dict(coords or {})      # name -> (array, group)
+        self.valid = valid                    # bool array or None (every lane holds a real element)
         self.sums = {k: list(v) for k, v in (sums or {}).items()}   # name -> [(lo (P,), count (P,)), ...]
         self.serials = frozenset(serials)     # quantized values this derives from (their issue serials)
         self.applied = dict(applied or {})    # scale serial -> times applied
@@ -153,9 +159,13 @@ class V:
         return out
 
 
-def _bc(a, shape, P):
-    """An array broadcast to (P, *shape)."""
+def _full(a, shape, P):
+    """An array broadcast to (P, *shape) (a view, no copy)."""
     return np.broadcast_to(np.asarray(a), (P,) + tuple(shape))
+
+
+def _ones(shape):
+    return np.ones((1,) + tuple(shape), dtype=bool)
 
 
 def _alts(v):
@@ -173,8 +183,6 @@ def _combine_alts(outs):
 def _alt_map(f, *vs):
     """f over every combination of the operands' alternatives; a violation in one of them is "possible" (the data
     the kernel reads decides which it takes)."""
-    import itertools
-
     outs = []
     for combo in itertools.product(*[_alts(v) for v in vs]):
         try:
@@ -184,6 +192,11 @@ def _alt_map(f, *vs):
                 raise _Fail("possible", f"a value chosen at run time: {e.why}", e.example)
             raise
     return _combine_alts(outs)
+
+
+def _first(bad):
+    """The index of the first True in a boolean array (program first, then the lanes)."""
+    return tuple(int(t[0]) for t in np.nonzero(bad))
 
 
 # --- evaluation -----------------------------------------------------------------------------------------------------
@@ -197,41 +210,112 @@ class _Typed(KI._Run):
         self.checks = 0
         self.chunk_index = chunk_index
         self.inferred = {}         # output argument -> {dim: axis name, ...}
-        self.store_shapes = {}
+
+    def run(self):
+        """kernel_ir's binding of the arguments, with a float scalar argument a constant value."""
+        env = {}
+        for name, typ in self.fn.args:
+            key = name[1:]
+            if not typ.startswith("!tt.ptr") and key in self.ints and isinstance(self.ints[key], float):
+                if not (typ.startswith("f") or typ.startswith("bf")):
+                    raise Unmodelled(f"argument {key} is a float in the launch but {typ} in the IR")
+                env[name] = V((), const=float(self.ints[key]))
+            elif typ.startswith("!tt.ptr"):
+                env[name] = Ptr(key, E(()))
+            elif key in self.ints:
+                w = KI._width(typ)
+                v = int(self.ints[key])
+                if w is None:
+                    raise Unmodelled(f"argument {key} has the type {typ}, not an integer type this module models")
+                if not KI._fits(v, v, w) or abs(v) > KI._LIMIT:
+                    raise Unmodelled(f"argument {key} = {v} is not a value of its type {typ}")
+                env[name] = E((), s=np.full((1,), v, dtype=np.int64), b=(w == 1), w=w)
+            else:
+                raise Unmodelled(f"argument {key} has no value in the launch")
+        self._ops(self.fn.body, env)
 
     # -- addresses as coordinates --
 
-    def _coords_of(self, arg, off, valid, what):
-        """{dim: coordinate array (P, *lanes)} of a load or store through `off`, in the tensor `arg`, for the lanes
-        `valid` (bool array or None); every valid lane must address an element of the tensor."""
-        m = self.meanings.get(arg)
-        if m is None:
-            raise Unmodelled(f"{what} through {arg}, whose shape and strides the launch did not give")
-        P = self.P
-        o = _bc(off.full(), off.shape, P)
-        v = np.ones(o.shape, dtype=bool) if valid is None else _bc(valid, off.shape, P)
+    def _dims(self, arg, m):
         dims = [(int(s), int(n), i) for i, (s, n) in enumerate(zip(m.stride, m.shape)) if int(n) > 1]
         dims.sort(key=lambda t: -t[0])
         for (sa, na, _ia), (sb, nb, _ib) in zip(dims, dims[1:]):
             if sa < nb * sb:
                 raise Unmodelled(f"{arg}: a layout whose dimensions overlap (strides {tuple(m.stride)})")
-        coords = {i: np.zeros(o.shape, dtype=np.int64) for i in range(len(m.shape))}
-        rem = o.copy()
-        for s, n, i in dims:
+        for s, _n, _i in dims:
             if s <= 0:
                 raise Unmodelled(f"{arg}: a stride of {s}")
-            c = np.floor_divide(rem, s)
-            rem = rem - c * s
-            bad = v & ((c < 0) | (c >= n))
-            if bad.any():
-                idx = tuple(int(x[0]) for x in np.nonzero(bad))
+        return dims
+
+    def _coords_of(self, arg, off, valid, what):
+        """{dim: coordinate array} of a load or store through `off` in the tensor `arg`, each array of rank
+        1 + len(off.shape) and as small as it varies, for the lanes `valid` (a bool array or None); every valid lane
+        must address an element of the tensor."""
+        m = self.meanings.get(arg)
+        if m is None:
+            raise Unmodelled(f"{what} through {arg}, whose shape and strides the launch did not give")
+        P, ndim = self.P, len(off.shape)
+        dims = self._dims(arg, m)
+        lead = (1,) * ndim
+        coords = None
+        if off.d is None:
+            # kept apart: the scalar part in mixed radix, then each lane axis's part a multiple of one stride
+            coords = {}
+            rem = np.array(off.s, dtype=np.int64).reshape(-1)
+            for s, n, i in dims:
+                c = np.floor_divide(rem, s)
+                rem = rem - c * s
+                coords[i] = c.reshape((-1,) + lead)
+            if np.any(rem != 0):
+                coords = None
+            else:
+                taken = set()
+                for j, vec in off.v.items():
+                    vec = np.asarray(vec)
+                    lane = [1] * ndim
+                    lane[j] = vec.shape[1]
+                    done = False
+                    for s, n, i in dims:
+                        if i in taken or np.any(vec % s):
+                            continue
+                        c = vec // s
+                        if np.any(c < 0) or np.any(c >= n):
+                            continue                  # a carry into the next dimension: taken apart below
+                        coords[i] = coords[i] + c.reshape((-1,) + tuple(lane))
+                        taken.add(i)
+                        done = True
+                        break
+                    if not done:
+                        coords = None
+                        break
+        if coords is None:
+            o = _full(off.full(), off.shape, P)
+            rem = o.copy()
+            coords = {}
+            for s, n, i in dims:
+                c = np.floor_divide(rem, s)
+                rem = rem - c * s
+                coords[i] = c
+            if valid is None:
+                v = True
+            else:
+                v = _full(valid, off.shape, P)
+            if np.any(v & (rem != 0)):
+                raise _Fail("violation", f"{what} addresses {arg} between its elements (strides {tuple(m.stride)})",
+                            {"program_chunk_index": self.chunk_index})
+        for i, (s, n) in enumerate(zip(m.stride, m.shape)):
+            if i not in coords:
+                coords[i] = np.zeros((1,) + lead, dtype=np.int64)
+        for s, n, i in dims:
+            c = coords[i]
+            out = (c < 0) | (c >= n)
+            bad = out if valid is None else (valid & out)
+            if np.any(bad):
+                idx = _first(np.broadcast_to(bad, (P,) + tuple(off.shape)))
+                cc = np.broadcast_to(c, (P,) + tuple(off.shape))
                 raise _Fail("violation", f"{what} addresses {arg} outside its {tuple(m.shape)} elements (coordinate "
-                                         f"{int(c[idx])} on axis {i} of size {n})",
+                                         f"{int(cc[idx])} on axis {i} of size {n})",
                             {"program_chunk_index": self.chunk_index, "lane": list(idx[1:])})
-            coords[i] = c
-        if (v & (rem != 0)).any():
-            raise _Fail("violation", f"{what} addresses {arg} between its elements (strides {tuple(m.stride)})",
-                        {"program_chunk_index": self.chunk_index})
         return coords
 
     def _load(self, op, p, mask):
@@ -243,21 +327,22 @@ class _Typed(KI._Run):
         if p.taint is not None or p.off is None:
             return V(shape, leaf=p.arg, data_addr=p.taint or "a data-dependent address")
         valid = None if mask is None else _as_bool_full(mask)
-        cs = self._coords_of(p.arg, p.off, valid, f"a load")
+        if valid is not None and valid.ndim != 1 + len(shape):
+            valid = valid.reshape((-1,) + tuple(shape))
+        cs = self._coords_of(p.arg, p.off, valid, "a load")
         coords = {}
         for i, ax in enumerate(m.axes):
             key = ax.name if ax.name is not None else (p.arg, i)
             coords[key] = (cs[i], ax.group)
         serials = frozenset([m.serial]) if m.kind == "value" and m.pair else frozenset()
         applied = {m.pair: 0} if m.kind == "value" and m.pair else {}
-        return V(shape, coords, None if valid is None else _bc(valid, shape, self.P), {}, serials, applied, (),
-                 False, None, p.arg, True, None, None, m.pair if m.kind == "scale" else 0,
-                 m.serial if m.kind == "scale" else 0)
+        return V(shape, coords, valid, {}, serials, applied, (), False, None, p.arg, True, None, None,
+                 m.pair if m.kind == "scale" else 0, m.serial if m.kind == "scale" else 0)
 
     # -- pairing --
 
     def _eq(self, a, ga, b, gb, where):
-        """Lanes (bool array) where coordinates a (group ga) and b (group gb) disagree, among `where`."""
+        """Lanes (a bool array, broadcast) where coordinates a (group ga) and b (group gb) disagree, among `where`."""
         if ga == gb:
             return where & (a != b)
         g = max(ga, gb)
@@ -270,8 +355,9 @@ class _Typed(KI._Run):
         real elements; returns the combined coordinates and validity."""
         P = self.P
         shape = np.broadcast_shapes(x.shape, y.shape)
-        vx = np.ones((1,) + shape, dtype=bool) if x.valid is None else _bc(x.valid, shape, P)
-        vy = np.ones((1,) + shape, dtype=bool) if y.valid is None else _bc(y.valid, shape, P)
+        full = (P,) + tuple(shape)
+        vx = _ones(shape) if x.valid is None else x.valid
+        vy = _ones(shape) if y.valid is None else y.valid
         both = vx & vy
         coords = {}
         for key in set(x.coords) | set(y.coords):
@@ -283,69 +369,64 @@ class _Typed(KI._Run):
                 if key in side.sums:
                     raise Unmodelled(f"a value with both a coordinate and a sum on the axis '{key}'")
                 c, g = side.coords[key]
-                cc = _bc(c, shape, P)
+                lead = (-1,) + (1,) * len(shape)
                 for lo, cnt in other_sums[key]:
-                        has = cnt > 0
-                        first, last = lo // g, (lo + np.maximum(cnt, 1) - 1) // g
-                        if np.any(has & (first != last)):
-                            p = int(np.nonzero(has & (first != last))[0][0])
-                            groups = sorted({int(t) for t in range(int(first[p]), int(last[p]) + 1)})
-                            raise _Fail("violation", f"{how} applies one coordinate on the axis '{key}' (groups of "
-                                                     f"{g}) to a sum over {int(cnt[p])} coordinates spanning "
-                                                     f"{len(groups)} groups", {"program_chunk_index": p,
-                                                                               "groups_in_tile": groups[:8]})
-                        want = first.reshape((-1,) + (1,) * len(shape))
-                        bad = both & has.reshape((-1,) + (1,) * len(shape)) & (cc != want)
-                        self.checks += 1
-                        if bad.any():
-                            idx = tuple(int(t[0]) for t in np.nonzero(bad))
-                            raise _Fail("violation", f"{how} applies a coordinate on the axis '{key}' (group "
-                                                     f"{int(cc[idx])} of {g}) to a sum over group "
-                                                     f"{int(want[idx[0]].flat[0])}", {"program_chunk_index": idx[0],
-                                                                                      "lane": list(idx[1:]),
-                                                                                      "axis": key})
+                    has = cnt > 0
+                    first, last = lo // g, (lo + np.maximum(cnt, 1) - 1) // g
+                    if np.any(has & (first != last)):
+                        p = int(np.nonzero(has & (first != last))[0][0])
+                        groups = list(range(int(first[p]), int(last[p]) + 1))
+                        raise _Fail("violation", f"{how} applies one coordinate on the axis '{key}' (groups of {g}) "
+                                                 f"to a sum over {int(cnt[p])} coordinates spanning {len(groups)} "
+                                                 f"groups", {"program_chunk_index": p, "groups_in_tile": groups[:8]})
+                    want = first.reshape(lead)
+                    bad = both & has.reshape(lead) & (c != want)
+                    self.checks += 1
+                    if np.any(bad):
+                        idx = _first(np.broadcast_to(bad, full))
+                        raise _Fail("violation", f"{how} applies a coordinate on the axis '{key}' (group "
+                                                 f"{int(np.broadcast_to(c, full)[idx])} of {g}) to a sum over group "
+                                                 f"{int(first[idx[0]])}", {"program_chunk_index": idx[0],
+                                                                          "lane": list(idx[1:]), "axis": key})
             elif cx is not None and cy is not None and isinstance(key, str):
-                ax, ay = _bc(cx[0], shape, P), _bc(cy[0], shape, P)
-                bad = self._eq(ax, cx[1], ay, cy[1], both)
+                bad = self._eq(cx[0], cx[1], cy[0], cy[1], both)
                 self.checks += 1
-                if bad.any():
-                    idx = tuple(int(t[0]) for t in np.nonzero(bad))
+                if np.any(bad):
+                    idx = _first(np.broadcast_to(bad, full))
+                    ax, ay = np.broadcast_to(cx[0], full), np.broadcast_to(cy[0], full)
                     raise _Fail("violation", f"{how} pairs elements that disagree on the axis '{key}': "
                                              f"{int(ax[idx]) * cx[1]} with {int(ay[idx]) * cy[1]} (base coordinates)",
                                 {"program_chunk_index": self.chunk_index, "lane": list(idx[1:]), "axis": key,
                                  "x": int(ax[idx]), "x_group": cx[1], "y": int(ay[idx]), "y_group": cy[1]})
-                coords[key] = (ax, cx[1]) if cx[1] <= cy[1] else (ay, cy[1])
+                coords[key] = cx if cx[1] <= cy[1] else cy
             else:
-                c = cx if cx is not None else cy
-                coords[key] = (_bc(c[0], shape, P), c[1])
+                coords[key] = cx if cx is not None else cy
         return shape, coords, vx, vy
 
     def _binary(self, kind, x, y):
         if x.alts is not None or y.alts is not None:
             return _alt_map(lambda a, b: self._binary(kind, a, b), x, y)
-        P = self.P
+        shape = np.broadcast_shapes(x.shape, y.shape)
         if x.const is not None and y.const is not None:
             vals = {"mul": x.const * y.const, "add": x.const + y.const, "sub": x.const - y.const,
                     "div": (x.const / y.const if y.const else None), "max": max(x.const, y.const),
                     "min": min(x.const, y.const)}
-            return V(np.broadcast_shapes(x.shape, y.shape), const=vals.get(kind))
+            return V(shape, const=vals.get(kind))
         if kind in ("mul", "div"):
             for c, o in ((x, y), (y, x)):
                 if c.const is not None:
                     if kind == "div" and c is x:
-                        return o.copy(shape=np.broadcast_shapes(x.shape, y.shape), fn=True,
-                                      extras=o.extras + (f"a constant {c.const} divided by it",))
+                        return o.copy(shape=shape, fn=True, extras=o.extras + (f"a constant {c.const} divided by "
+                                                                                f"it",))
                     if c.const == 1.0:
-                        return o.copy(shape=np.broadcast_shapes(x.shape, y.shape))
+                        return o.copy(shape=shape)
                     if c.const == 0.0 and kind == "mul":
-                        return V(np.broadcast_shapes(x.shape, y.shape), const=0.0)
-                    return o.copy(shape=np.broadcast_shapes(x.shape, y.shape),
-                                  extras=o.extras + (f"the constant factor {c.const}",))
-            shape, coords, vx, vy = self._pair(x, y, "a multiplication" if kind == "mul" else "a division")
+                        return V(shape, const=0.0)
+                    return o.copy(shape=shape, extras=o.extras + (f"the constant factor {c.const}",))
+            _shape, coords, vx, vy = self._pair(x, y, "a multiplication" if kind == "mul" else "a division")
             applied = dict(x.applied)
             for k, v in y.applied.items():
                 applied[k] = applied.get(k, 0) + v
-            serials = x.serials | y.serials
             for s, o in ((x, y), (y, x)):
                 if s.scale_serial:
                     if s.scale_of not in o.serials:
@@ -359,21 +440,21 @@ class _Typed(KI._Run):
                 if k in sums:
                     raise Unmodelled(f"a product of two sums over the axis '{k}'")
                 sums[k] = v
-            return V(shape, coords, vx & vy, sums, serials, applied, x.extras + y.extras, x.fn or y.fn,
-                     masked_zero=x.masked_zero and y.masked_zero, data_addr=x.data_addr or y.data_addr)
+            return V(shape, coords, vx & vy, sums, x.serials | y.serials, applied, x.extras + y.extras,
+                     x.fn or y.fn, masked_zero=x.masked_zero and y.masked_zero,
+                     data_addr=x.data_addr or y.data_addr)
         if kind in ("add", "sub"):
             if y.const == 0.0:
-                return x.copy(shape=np.broadcast_shapes(x.shape, y.shape))
+                return x.copy(shape=shape)
             if x.const == 0.0 and kind == "add":
-                return y.copy(shape=np.broadcast_shapes(x.shape, y.shape))
+                return y.copy(shape=shape)
             if x.const == 0.0 and kind == "sub":
-                return y.copy(shape=np.broadcast_shapes(x.shape, y.shape), extras=y.extras + ("negated",))
+                return y.copy(shape=shape, extras=y.extras + ("negated",))
             if x.const is not None or y.const is not None:
                 o = y if x.const is not None else x
                 c = x if x.const is not None else y
-                return o.copy(shape=np.broadcast_shapes(x.shape, y.shape),
-                              extras=o.extras + (f"the constant addend {c.const}",))
-            shape, coords, vx, vy = self._pair(x, y, "an addition" if kind == "add" else "a subtraction")
+                return o.copy(shape=shape, extras=o.extras + (f"the constant addend {c.const}",))
+            _shape, coords, vx, vy = self._pair(x, y, "an addition" if kind == "add" else "a subtraction")
             sums = {}
             extras = x.extras + y.extras
             for k in set(x.sums) | set(y.sums):
@@ -392,7 +473,7 @@ class _Typed(KI._Run):
                 applied[k] = v
             return V(shape, coords, vx | vy, sums, x.serials | y.serials, applied, extras, x.fn or y.fn,
                      masked_zero=x.masked_zero and y.masked_zero, data_addr=x.data_addr or y.data_addr)
-        shape, coords, vx, vy = self._pair(x, y, f"a {kind}")       # max, min: paired, no longer a plain term
+        _shape, coords, vx, vy = self._pair(x, y, f"a {kind}")      # max, min: paired, no longer a plain term
         return V(shape, coords, vx & vy, {}, x.serials | y.serials, {}, x.extras + y.extras +
                  (f"a {kind}",), True, data_addr=x.data_addr or y.data_addr)
 
@@ -415,9 +496,8 @@ class _Typed(KI._Run):
         Tb, C = b.shape
         if Tn != Tb:
             raise Unmodelled("a dot whose contraction lengths differ")
-        va = np.ones((1, R, Tn), dtype=bool) if a.valid is None else _bc(a.valid, a.shape, P)
-        vb = np.ones((1, Tn, C), dtype=bool) if b.valid is None else _bc(b.valid, b.shape, P)
-        va, vb = _bc(va, a.shape, P), _bc(vb, b.shape, P)
+        va = _full(_ones(a.shape) if a.valid is None else a.valid, a.shape, P)
+        vb = _full(_ones(b.shape) if b.valid is None else b.valid, b.shape, P)
         rv, tva = va.any(axis=2), va.any(axis=1)
         tvb, cv = vb.any(axis=2), vb.any(axis=1)
         if not np.array_equal(va, rv[:, :, None] & tva[:, None, :]) or \
@@ -432,17 +512,21 @@ class _Typed(KI._Run):
         for side, v, name in ((a, va, "a"), (b, vb, "b")):
             kax, oax = (2, 1) if name == "a" else (1, 2)       # the lane axis of k, the lane axis of rows / columns
             for key, (arr, g) in side.coords.items():
-                arr = _bc(arr, side.shape, P)
-                per_o = np.where(v, arr, -1).max(axis=kax)                     # one value per row (a) / column (b)
-                per_k = np.where(v, arr, -1).max(axis=oax)                     # one value per k
-                exp_o = np.expand_dims(per_o, kax)
-                exp_k = np.expand_dims(per_k, oax)
-                if np.array_equal(np.where(v, arr, exp_o), np.broadcast_to(exp_o, arr.shape)):
-                    carried[name][key] = (per_o, g)
-                elif np.array_equal(np.where(v, arr, exp_k), np.broadcast_to(exp_k, arr.shape)):
-                    contracted[name][key] = (per_k, g)
-                else:
-                    raise Unmodelled(f"an operand coordinate on '{key}' that varies along both lane axes")
+                if arr.shape[kax] == 1:
+                    carried[name][key] = (np.take(arr, 0, axis=kax), g)
+                elif arr.shape[oax] == 1:
+                    contracted[name][key] = (np.take(arr, 0, axis=oax), g)
+                else:                                          # varies along both lanes: decided by the data
+                    per_o = np.where(v, arr, -1).max(axis=kax)
+                    per_k = np.where(v, arr, -1).max(axis=oax)
+                    if np.array_equal(np.where(v, arr, np.expand_dims(per_o, kax)),
+                                      np.broadcast_to(np.expand_dims(per_o, kax), v.shape)):
+                        carried[name][key] = (per_o, g)
+                    elif np.array_equal(np.where(v, arr, np.expand_dims(per_k, oax)),
+                                        np.broadcast_to(np.expand_dims(per_k, oax), v.shape)):
+                        contracted[name][key] = (per_k, g)
+                    else:
+                        raise Unmodelled(f"an operand coordinate on '{key}' that varies along both lane axes")
         ca, cb = contracted["a"], contracted["b"]
         shared = [k for k in ca if k in cb and isinstance(k, str)]
         if not shared:
@@ -453,9 +537,10 @@ class _Typed(KI._Run):
             (ka, ga), (kb, gb) = ca[key], cb[key]
             if ga != 1 or gb != 1:
                 raise Unmodelled(f"a dot over the grouped axis '{key}'")
+            ka, kb = np.broadcast_to(ka, (P, Tn)), np.broadcast_to(kb, (P, Tn))
             bad = vT & (ka != kb)
             self.checks += 1
-            if bad.any():
+            if np.any(bad):
                 raise _Fail("violation", f"the two operands are read at different '{key}' for one contraction "
                                          f"index", {"program_chunk_index": self.chunk_index})
             lo, cnt = _ranges(ka, vT, f"a contraction tile reads one '{key}' twice",
@@ -490,25 +575,23 @@ class _Typed(KI._Run):
             raise Unmodelled(f"a reduction whose combiner is {sorted(names)}")
         P = self.P
         shape = tuple(n for i, n in enumerate(x.shape) if i != axis)
-        v = np.ones((1,) + x.shape, dtype=bool) if x.valid is None else _bc(x.valid, x.shape, P)
-        v = _bc(v, x.shape, P)
+        v = _full(_ones(x.shape) if x.valid is None else x.valid, x.shape, P)
         lane = axis + 1
         coords, sums = {}, {k: list(r) for k, r in x.sums.items()}
         for key, (arr, g) in x.coords.items():
-            arr = _bc(arr, x.shape, P)
-            first = np.take(np.where(v, arr, -1).max(axis=lane, keepdims=True), 0, axis=lane)
-            if np.array_equal(np.where(v, arr, np.expand_dims(first, lane)),
-                              np.broadcast_to(np.expand_dims(first, lane), arr.shape)):
-                coords[key] = (first, g)                       # constant along the reduced lanes: carried
+            if arr.shape[lane] == 1:
+                coords[key] = (np.take(arr, 0, axis=lane), g)       # constant along the reduced lanes: carried
             elif kind == "sum" and isinstance(key, str):
                 if g != 1:
                     raise Unmodelled(f"a sum over the grouped axis '{key}'")
-                moved = np.moveaxis(arr, lane, -1).reshape(P, -1, x.shape[axis])
-                vm = np.moveaxis(v, lane, -1).reshape(P, -1, x.shape[axis])
-                if not np.array_equal(moved, np.broadcast_to(moved[:, :1, :], moved.shape)) or \
-                        not np.array_equal(vm, np.broadcast_to(vm[:, :1, :], vm.shape)):
+                if any(s != 1 for i, s in enumerate(arr.shape) if i not in (0, lane)):
                     raise Unmodelled(f"a sum over '{key}' whose coordinates differ between the other lanes")
-                lo, cnt = _ranges(moved[:, 0, :], vm[:, 0, :], f"a sum reads one '{key}' twice",
+                vm = np.moveaxis(v, lane, -1).reshape(P, -1, x.shape[axis])
+                if not np.array_equal(vm, np.broadcast_to(vm[:, :1, :], vm.shape)):
+                    raise Unmodelled(f"a sum over '{key}' whose lanes are masked differently")
+                moved = np.broadcast_to(np.take(np.moveaxis(arr, lane, -1), 0, axis=1) if arr.ndim > 2 else arr,
+                                        (P, x.shape[axis]))
+                lo, cnt = _ranges(moved, vm[:, 0, :], f"a sum reads one '{key}' twice",
                                   f"a sum whose '{key}' are not one range")
                 sums[key] = sums.get(key, []) + [(lo, cnt)]
             else:
@@ -520,21 +603,21 @@ class _Typed(KI._Run):
     def _shape_v(self, n, op, x, shape):
         if x.alts is not None:
             return _alt_map(lambda a: self._shape_v(n, op, a, shape), x)
-        P = self.P
         if x.const is not None:
             return V(shape, const=x.const)
+        ndim = len(shape)
 
         def f(arr):
-            arr = _bc(arr, x.shape, P)
             if n == "tt.splat":
-                return _bc(arr.reshape((P,) + (1,) * len(shape)), shape, P)
+                return np.asarray(arr).reshape((-1,) + (1,) * ndim)
             if n == "tt.expand_dims":
                 axis = int(re.search(r'axis = (\d+)', op.text).group(1))
                 return np.expand_dims(arr, axis + 1)
             if n == "tt.broadcast":
-                return _bc(arr, shape, P)
+                return arr                                        # numpy broadcasts when the arrays meet
             if n == "tt.reshape":
-                return arr.reshape((P,) + tuple(shape))
+                return np.broadcast_to(arr, (arr.shape[0],) + tuple(x.shape)).reshape((arr.shape[0],) +
+                                                                                          tuple(shape))
             if n == "tt.trans":
                 order = [int(t) for t in re.search(r'order = array<i32: ([0-9, ]+)>', op.text).group(1).split(",")]
                 return np.transpose(arr, (0,) + tuple(o + 1 for o in order))
@@ -574,12 +657,12 @@ class _Typed(KI._Run):
     def _store_one(self, ptr, val, stored, m):
         P = self.P
         shape = tuple(ptr.off.shape)
-        sv = np.ones((P,) + shape, dtype=bool) if stored is None else _bc(stored, shape, P)
+        full = (P,) + shape
+        sv = np.ones(full, dtype=bool) if stored is None else _full(stored, shape, P)
         if val.data_addr:
             raise _Fail("unproven", f"the value stored was read at an address chosen by data ({val.data_addr})")
         cs = self._coords_of(ptr.arg, ptr.off, sv, "a store")
-        vv = np.ones((1,) + shape, dtype=bool) if val.valid is None else _bc(val.valid, shape, P)
-        vv = _bc(vv, shape, P)
+        vv = _ones(shape) if val.valid is None else val.valid
         if np.any(sv & ~vv):
             raise _Fail("violation", "the kernel stores output lanes whose value has no element (masked-out operand "
                                      "lanes)", {"program_chunk_index": self.chunk_index})
@@ -591,18 +674,18 @@ class _Typed(KI._Run):
                 if c is None:
                     raise _Fail("unproven", f"the value stored has no coordinate on the output's axis '{ax.name}' "
                                             f"(it derives from {sorted(str(k) for k in val.coords) or 'nothing'})")
-                bad = self._eq(oc, 1, _bc(c[0], shape, P), c[1], sv)
+                bad = self._eq(oc, 1, c[0], c[1], sv)
                 self.checks += 1
-                if bad.any():
-                    idx = tuple(int(t[0]) for t in np.nonzero(bad))
+                if np.any(bad):
+                    idx = _first(np.broadcast_to(bad, full))
                     raise _Fail("violation", f"an output value is stored where another '{ax.name}' belongs "
-                                             f"(stored at {int(oc[idx])}, the value's is "
-                                             f"{int(_bc(c[0], shape, P)[idx]) * c[1]})",
+                                             f"(stored at {int(np.broadcast_to(oc, full)[idx])}, the value's is "
+                                             f"{int(np.broadcast_to(c[0], full)[idx]) * c[1]})",
                                 {"program_chunk_index": self.chunk_index, "lane": list(idx[1:]), "axis": ax.name})
             else:
                 found = None
                 for key, (arr, g) in val.coords.items():
-                    if g == 1 and not np.any(self._eq(oc, 1, _bc(arr, shape, P), 1, sv)):
+                    if g == 1 and not np.any(self._eq(oc, 1, arr, 1, sv)):
                         found = key
                         break
                 if found is None and np.any(sv):
@@ -613,12 +696,12 @@ class _Typed(KI._Run):
                         raise _Fail("unproven", f"the output's axis {i} matches {was} in one store and {found} in "
                                                 f"another")
                     inferred[i] = found
-        for name, (lo, hi) in m.reduced.items():
+        for name in m.reduced:
             if name not in val.sums:
                 raise _Fail("violation", f"the output is the sum over '{name}', but the value stored is not summed "
                                          f"over it")
+        live = sv.reshape(P, -1).any(axis=1)
         for name, rs in val.sums.items():
-            live = sv.reshape(P, -1).any(axis=1)
             if name in m.reduced:
                 lo, hi = m.reduced[name]
                 bad = _covers(rs, lo, hi, live)
@@ -645,33 +728,32 @@ class _Typed(KI._Run):
             if val.extras:
                 inferred["extras"] = list(val.extras)
         if len(shape) == 2:
-            r, c = cs[0] if 0 in cs else np.zeros(sv.shape, dtype=np.int64), \
-                cs[1] if 1 in cs else np.zeros(sv.shape, dtype=np.int64)
             sr, sc = sv.any(axis=2), sv.any(axis=1)
             if not np.array_equal(sv, sr[:, :, None] & sc[:, None, :]):
                 raise Unmodelled("a store mask that is not a set of rows times a set of columns")
-            live = sr.any(axis=1) & sc.any(axis=1)
-            rows = np.where(sv, r, -1).max(axis=2)
-            cols = np.where(sv, c, -1).max(axis=1)
+            r = cs[0] if 0 in cs else np.zeros((1, 1, 1), dtype=np.int64)
+            c = cs[1] if 1 in cs else np.zeros((1, 1, 1), dtype=np.int64)
+            rows = np.where(sr, np.broadcast_to(r[:, :, 0], (P, shape[0])), -1) if r.shape[2] == 1 else \
+                np.where(sv, r, -1).max(axis=2)
+            cols = np.where(sc, np.broadcast_to(c[:, 0, :], (P, shape[1])), -1) if c.shape[1] == 1 else \
+                np.where(sv, c, -1).max(axis=1)
             rlo, rcnt = _ranges(rows, sr, "one output row is stored twice by one program",
                                 "the rows a program stores are not one range", twice="unproven")
             clo, ccnt = _ranges(cols, sc, "one output column is stored twice by one program",
                                 "the columns a program stores are not one range", twice="unproven")
             self.stores.append((rlo[live], rcnt[live], clo[live], ccnt[live]))
         elif len(shape) == 1:
-            x = cs[0]
-            live = sv.any(axis=1)
+            x = np.broadcast_to(cs[0], full)
             lo, cnt = _ranges(np.where(sv, x, -1), sv, "one output element is stored twice by one program",
                               "the elements a program stores are not one range", twice="unproven")
             self.stores.append((lo[live], cnt[live], np.zeros(int(live.sum()), dtype=np.int64),
                                 np.ones(int(live.sum()), dtype=np.int64)))
         elif len(shape) == 0:
-            x = cs[0].reshape(P)
+            x = np.broadcast_to(cs[0], (P,))
             self.stores.append((x, np.ones(P, dtype=np.int64), np.zeros(P, dtype=np.int64),
                                 np.ones(P, dtype=np.int64)))
         else:
             raise Unmodelled(f"a store of {len(shape)} lane dimensions")
-        self.store_shapes[ptr.arg] = m
 
     # -- the ops --
 
@@ -795,9 +877,8 @@ def _covers(ranges, lo, hi, live):
     program; else (program, why)."""
     if not ranges:
         return (int(np.nonzero(live)[0][0]) if live.any() else 0), "nothing"
-    P = ranges[0][0].shape[0]
-    starts = np.stack([r[0] for r in ranges], axis=1)
-    counts = np.stack([r[1] for r in ranges], axis=1)
+    starts = np.stack([np.broadcast_to(r[0], live.shape) for r in ranges], axis=1)
+    counts = np.stack([np.broadcast_to(r[1], live.shape) for r in ranges], axis=1)
     for p in np.nonzero(live)[0]:
         s, c = starts[p], counts[p]
         s, c = s[c > 0], c[c > 0]
@@ -823,7 +904,7 @@ def _covers(ranges, lo, hi, live):
 def check_launch(ttir: str, meanings: Dict[str, Meaning], ints: Dict[str, int], grid,
                  chunk_elements: int = CHUNK_ELEMENTS) -> Verdict:
     """The verdict on one launch: the kernel's IR, the meaning of each pointer argument (by parameter name), the
-    integer arguments by name, the grid."""
+    integer (and float) arguments by name, the grid."""
     t0 = time.perf_counter()
     try:
         fn = KI.parse(ttir)
@@ -831,16 +912,16 @@ def check_launch(ttir: str, meanings: Dict[str, Meaning], ints: Dict[str, int], 
         return Verdict("unproven", str(e), seconds=time.perf_counter() - t0)
     gx, gy, gz = (list(grid) + [1, 1, 1])[:3]
     total = int(gx) * int(gy) * int(gz)
-    biggest = 1
+    longest = 1
     for op in KI._walk(fn.body):
         sh = KI._shape(op.rtype) or (1,)
-        biggest = max(biggest, int(np.prod(sh)))
+        longest = max(longest, int(np.prod(sh)) if len(sh) <= 1 else max(sh))
     outs = [k for k, m in meanings.items() if m.kind == "output"]
     if len(outs) != 1:
         return Verdict("unproven", f"the launch has {len(outs)} tensors bound as its output (one is needed)",
                        seconds=time.perf_counter() - t0)
     out = meanings[outs[0]]
-    per = max(1, chunk_elements // biggest)
+    per = max(1, chunk_elements // max(longest, 1))
     checks = 0
     stores = []
     inferred = {}

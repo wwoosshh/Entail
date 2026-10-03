@@ -151,10 +151,19 @@ GUARANTEE_TARGETS = {
 # ENTAIL=structure_inkernel (M19 L5.4e) install the same.
 STRUCTURE_TARGETS = dict(GUARANTEE_TARGETS)
 STRUCTURE_TARGETS["triton.runtime.jit"] = ["entail.adapters.vllm_block_fp8_guarantee:install_triton"]
+# ENTAIL=types (M19 L6; entail/kernel_check.py): the one rule at every Triton launch - meanings attached by the two
+# producers and by every proven launch's output, verdicts recorded, nothing refused.
+TYPES_TARGETS = {
+    "vllm.model_executor.layers.quantization.utils.fp8_utils": ["entail.kernel_check:install_fp8_utils"],
+    "vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel": ["entail.kernel_check:install_weights"],
+    "triton.runtime.jit": ["entail.kernel_check:install_triton"],
+}
 if os.environ.get("ENTAIL", "off") == "guarantee":
     TARGETS = dict(GUARANTEE_TARGETS)
 elif os.environ.get("ENTAIL", "off") in ("structure", "structure_writes", "structure_inkernel"):
     TARGETS = dict(STRUCTURE_TARGETS)
+elif os.environ.get("ENTAIL", "off") == "types":
+    TARGETS = dict(TYPES_TARGETS)
 # ENTAIL_ONLY=rope_alias,sglang_adapter installs just those adapters (to measure one of them on its own).
 if os.environ.get("ENTAIL_ONLY"):
     _only = {s.strip() for s in os.environ["ENTAIL_ONLY"].split(",") if s.strip()}
@@ -300,7 +309,7 @@ def activate():
 
 
 if os.environ.get("ENTAIL", "off") in ("load", "debug", "guarantee", "structure", "structure_writes",
-                                       "structure_inkernel"):
+                                       "structure_inkernel", "types"):
     activate()
 
 
