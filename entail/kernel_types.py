@@ -562,7 +562,7 @@ class _Typed(KI._Run):
                     all(a.coords[k][1] == b.coords[k][1] and _same_coord(a.coords[k][0], b.coords[k][0])
                         for k in a.coords):
                 return a.copy(extras=tuple(dict.fromkeys(a.extras + b.extras)), fn=a.fn or b.fn)
-            raise Unmodelled("a value chosen by data read at run time whose two choices differ in meaning")
+            return self._select_v(None, a, b)
         if isinstance(a, V) or isinstance(b, V):
             raise Unmodelled("a float chosen by data against a non-float")
         if isinstance(a, Ptr) or isinstance(b, Ptr):
@@ -579,6 +579,47 @@ class _Typed(KI._Run):
             basis = None
         shape = a.shape if isinstance(a, (S, E)) else b.shape if isinstance(b, (S, E)) else ()
         return _opaque("a value chosen by data read at run time", ("select", self.iters, id(a), id(b)), basis, shape)
+
+    def _select_v(self, cond, a, b):
+        """a or b, typed values: by data (cond None) they are alternatives, unless one side is a constant (then the
+        other value, noted as sometimes replaced by a constant); by a launch-known condition (cond: an i1 E over the
+        lanes) they are taken lane by lane."""
+        if a.alts is not None or b.alts is not None:
+            return _combine_alts(_alts(a) + _alts(b))
+        if a.const is not None and b.const is not None:
+            return V(np.broadcast_shapes(a.shape, b.shape), const=a.const if a.const == b.const else None,
+                     fn=a.const != b.const)
+        if a.const is not None or b.const is not None:
+            c, o = (a, b) if a.const is not None else (b, a)
+            return o.copy(shape=np.broadcast_shapes(a.shape, b.shape),
+                          extras=o.extras + (f"some elements replaced by the constant {c.const}",), fn=True)
+        if cond is None:
+            return _combine_alts([a, b])
+        shape = np.broadcast_shapes(a.shape, b.shape)
+        sel = np.asarray(cond.full()).astype(bool)
+        if sel.ndim != 1 + len(shape):
+            sel = sel.reshape((-1,) + tuple(shape))
+        if set(a.coords) != set(b.coords) or set(a.sums) != set(b.sums) or a.serials != b.serials or \
+                a.applied != b.applied:
+            raise Unmodelled("a select, lane by lane, between values that differ in meaning")
+        coords = {}
+        for k in a.coords:
+            (xa, ga), (xb, gb) = a.coords[k], b.coords[k]
+            if ga != gb or isinstance(xa, Sym) or isinstance(xb, Sym):
+                raise Unmodelled("a select, lane by lane, between coordinates of different kinds")
+            coords[k] = (np.where(sel, xa, xb), ga)
+        va = _ones(shape) if a.valid is None else a.valid
+        vb = _ones(shape) if b.valid is None else b.valid
+        sums = {}
+        for k in a.sums:
+            if len(a.sums[k]) != len(b.sums[k]) or any(not (np.array_equal(la, lb) and np.array_equal(ca_, cb))
+                                                     for (la, ca_), (lb, cb) in zip(a.sums[k], b.sums[k])):
+                raise Unmodelled("a select between values summed over different ranges")
+            sums[k] = a.sums[k]
+        return V(shape, coords, np.where(sel, va, vb), sums, a.serials, a.applied,
+                 tuple(dict.fromkeys(a.extras + b.extras)), a.fn or b.fn,
+                 masked_zero=a.masked_zero and b.masked_zero, data_addr=a.data_addr or b.data_addr,
+                 data_valid=a.data_valid or b.data_valid)
 
     def _merge(self, cv, a, b):
         """a where the program's condition holds, else b."""
@@ -745,7 +786,7 @@ class _Typed(KI._Run):
                 v = True
             else:
                 v = _full(valid, off.shape, P)
-            if np.any(v & (rem != 0)):
+            if bounds and np.any(v & (rem != 0)):
                 raise _Fail("violation", f"{what} addresses {arg} between its elements (strides {tuple(m.stride)})",
                             {"program_chunk_index": self.chunk_index})
         for i, (s, n) in enumerate(zip(m.stride, m.shape)):
@@ -1439,7 +1480,7 @@ class _Typed(KI._Run):
             if not (isinstance(a, V) and isinstance(b, V)):
                 raise Unmodelled("a select between a float and something else")
             if isinstance(c, T):
-                r = _combine_alts(_alts(a) + _alts(b))
+                r = self._select_v(None, a, b)
             else:
                 cc = self._int(c)
                 if not isinstance(cc, E) or cc.w != 1:
@@ -1447,8 +1488,7 @@ class _Typed(KI._Run):
                 if cc.scalar_only() and np.unique(cc.s).size == 1:
                     r = a if int(cc.s.flat[0]) else b
                 else:
-                    raise Unmodelled("a select of float values by a condition that differs between lanes or "
-                                     "programs")
+                    r = self._select_v(cc, a, b)
         elif n in ("tt.splat", "tt.broadcast", "tt.expand_dims", "tt.reshape", "tt.trans") and \
                 isinstance(args[0], V):
             r = self._shape_v(n, op, args[0], shape)
