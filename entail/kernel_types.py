@@ -181,6 +181,27 @@ class S(T):
         return None
 
 
+class DM(T):
+    """A mask read from data, AND a launch-known part (known: an E or Mk, or None): which lanes the data keeps is
+    not known, which lanes the launch rules out is."""
+    __slots__ = ("known",)
+
+    def __init__(self, why, known=None):
+        super().__init__(why)
+        self.known = known
+
+
+def _known_part(mask):
+    """(the launch-known part of a mask or None, whether data also decides)."""
+    if mask is None:
+        return None, False
+    if isinstance(mask, DM):
+        return mask.known, True
+    if isinstance(mask, T):
+        return None, True
+    return mask, False
+
+
 class Sym:
     """A coordinate chosen by data: a symbolic leaf plus a launch-known offset."""
     __slots__ = ("key", "basis", "off")
@@ -283,16 +304,22 @@ def _first(bad):
     return tuple(int(t[0]) for t in np.nonzero(bad))
 
 
-def _same_coord(a, b):
-    """Two coordinates (arrays or Sym) that are the same, lane for lane."""
+def _same_coord(a, b, where=None):
+    """Two coordinates (arrays or Sym) that are the same, lane for lane (on the lanes `where`, when given)."""
     if isinstance(a, Sym) or isinstance(b, Sym):
-        return isinstance(a, Sym) and a.same(b)
-    a, b = np.asarray(a), np.asarray(b)
+        if not (isinstance(a, Sym) and isinstance(b, Sym) and a.key == b.key):
+            return False
+        a, b = np.asarray(a.off), np.asarray(b.off)
+    else:
+        a, b = np.asarray(a), np.asarray(b)
     try:
-        shape = np.broadcast_shapes(a.shape, b.shape)
+        shape = np.broadcast_shapes(a.shape, b.shape, () if where is None else np.asarray(where).shape)
     except ValueError:
         return False
-    return bool(np.array_equal(np.broadcast_to(a, shape), np.broadcast_to(b, shape)))
+    a, b = np.broadcast_to(a, shape), np.broadcast_to(b, shape)
+    if where is None:
+        return bool(np.array_equal(a, b))
+    return not bool(np.any(np.broadcast_to(where, shape) & (a != b)))
 
 
 # --- evaluation -----------------------------------------------------------------------------------------------------
@@ -310,6 +337,7 @@ class _Typed(KI._Run):
         self.stores = {}           # output argument -> [(row lo, rows, column lo, columns) per storing program]
         self.active = np.ones(self.P, dtype=bool)   # the programs the current branch is taken by
         self.iters = ()            # the loop iterations in progress (a leaf's key tells them apart)
+        self.notes = []            # what would be a violation if data sent some programs down this branch
         self.data_depth = 0        # inside a branch or loop decided by data: stores cover what data decides
         self.pointers = {}         # argument -> [target meaning names] (a table of pointers it holds)
 
@@ -411,59 +439,85 @@ class _Typed(KI._Run):
         return _opaque(why, self._key(op), None, shape)
 
     def _const_add(self, x, y, sign, shape):
-        """x + sign * y for launch-known parts that may be None."""
+        """x + sign * y for launch-known parts that may be None, as a value of the lane shape `shape`."""
         if x is None and y is None:
             return None
         if x is None:
-            return y if sign == 1 else self._mul(y, E((), s=np.full((1,), -1, dtype=np.int64), w=y.w))
+            y = y if sign == 1 else self._mul(y, E((), s=np.full((1,), -1, dtype=np.int64), w=y.w))
+            return self._bshape(y, shape)
         if y is None:
-            return x
-        if x.shape != y.shape:
-            if not x.shape:
-                x = E(y.shape, s=x.s, w=x.w)
-            elif not y.shape:
-                y = E(x.shape, s=y.s, w=y.w)
-            else:
-                raise Unmodelled("a symbolic sum of launch-known parts of different shapes")
+            return self._bshape(x, shape)
+        x, y = self._bshape(x, shape), self._bshape(y, shape)
         return self._add(x, y, sign)
 
-    def _ops(self, ops, env):
-        """kernel_ir's, with cf.cond_br: the two blocks follow, each ending in a return."""
-        i = 0
-        while i < len(ops):
-            op = ops[i]
-            if op.name == "cf.cond_br":
-                labels = ["^" + x for x in re.findall(r'\^(bb\d+)', op.text)]
-                blocks = {}
-                cur = None
-                for o in ops[i + 1:]:
-                    if o.name.startswith("^bb"):
-                        cur = o.name.rstrip(":")
-                        blocks[cur] = []
-                    elif cur is not None:
-                        blocks[cur].append(o)
-                if len(labels) != 2 or any(lb not in blocks for lb in labels):
-                    raise Unmodelled("a conditional branch whose blocks are not found")
-                for lb in labels:
-                    if any(o.name in ("cf.br", "cf.cond_br") for o in blocks[lb]):
-                        raise Unmodelled("a conditional branch whose block branches again")
-                cond = self._get(env, op.operands[0])
-                self._branch(cond, blocks[labels[0]], blocks[labels[1]], env)
-                return
-            if op.name.startswith("^bb"):
-                raise Unmodelled("a block label without a branch to it")
-            self._op(op, env)
-            i += 1
+    def _bshape(self, e, shape):
+        """e as a value of the lane shape `shape` (its axes kept apart where they are, broadcast where it is 1)."""
+        shape = tuple(shape)
+        if e.shape == shape:
+            return e
+        if not e.shape:
+            return E(shape, s=e.s, w=e.w)
+        if not shape:
+            return e
+        if e.d is not None:
+            return self._dense(shape, np.broadcast_to(e.d, (e.d.shape[0],) + shape), e.b, e.w)
+        if len(e.shape) != len(shape) or any(a != b and a != 1 for a, b in zip(e.shape, shape)) or                 any(e.shape[pos] == 1 and shape[pos] != 1 for pos in e.v):
+            raise Unmodelled(f"a symbolic sum of launch-known parts of shapes {e.shape} and {shape}")
+        return E(shape, s=e.s, v=e.v, b=e.b, w=e.w)
 
-    def _branch(self, cond, then_ops, else_ops, env):
+    def _ops(self, ops, env):
+        """kernel_ir's, with blocks: a body of labelled blocks joined by cf.cond_br / cf.br is followed from its
+        entry block; a branch back to an earlier block (a loop made of blocks) is not modelled."""
+        labels, entry, cur = {}, [], None
+        for o in ops:
+            if o.name.startswith("^bb"):
+                cur = o.name.rstrip(":")
+                labels[cur] = []
+            elif cur is None:
+                entry.append(o)
+            else:
+                labels[cur].append(o)
+        if not labels:
+            for o in ops:
+                self._op(o, env)
+            return
+        self._block_ops(entry, env, labels, frozenset())
+
+    def _block_ops(self, block, env, labels, visited):
+        for o in block:
+            if o.name == "cf.cond_br":
+                targets = ["^" + x for x in re.findall(r'\^(bb\d+)', o.text)]
+                if len(targets) != 2 or any(t not in labels for t in targets):
+                    raise Unmodelled("a conditional branch whose blocks are not found")
+                if any(t in visited for t in targets):
+                    raise Unmodelled("a branch back to an earlier block (a loop made of blocks)")
+                cond = self._get(env, o.operands[0])
+                self._branch(cond, labels[targets[0]], labels[targets[1]], env, labels, visited | set(targets))
+                return
+            if o.name == "cf.br":
+                targets = ["^" + x for x in re.findall(r'\^(bb\d+)', o.text)]
+                if len(targets) != 1 or targets[0] not in labels:
+                    raise Unmodelled("a jump whose block is not found")
+                if targets[0] in visited:
+                    raise Unmodelled("a branch back to an earlier block (a loop made of blocks)")
+                self._block_ops(labels[targets[0]], env, labels, visited | {targets[0]})
+                return
+            self._op(o, env)
+
+    def _branch(self, cond, then_ops, else_ops, env, labels=None, visited=frozenset()):
         """Both blocks of a two-way branch: by program when the launch decides the condition, under data when the
         kernel reads it."""
+        labels = labels or {}
+
+        def run(body, inner):
+            self._block_ops(body, inner, labels, visited)
+
         if isinstance(cond, T):
             self.data_depth += 1
             try:
                 for body in (then_ops, else_ops):
                     inner = dict(env)
-                    self._ops(body, inner)
+                    run(body, inner)
             finally:
                 self.data_depth -= 1
             return
@@ -478,7 +532,7 @@ class _Typed(KI._Run):
                     continue
                 self.active = saved & take
                 inner = dict(env)
-                self._ops(body, inner)
+                run(body, inner)
         finally:
             self.active = saved
 
@@ -813,8 +867,9 @@ class _Typed(KI._Run):
             else:
                 v = _full(valid, off.shape, P)
             if bounds and np.any(v & (rem != 0)):
-                raise _Fail("violation", f"{what} addresses {arg} between its elements (strides {tuple(m.stride)})",
-                            {"program_chunk_index": self.chunk_index})
+                self._bad(np.broadcast_to(v & (rem != 0), (P,) + tuple(off.shape)),
+                          f"{what} addresses {arg} between its elements (strides {tuple(m.stride)})",
+                          {"program_chunk_index": self.chunk_index})
         for i, (s, n) in enumerate(zip(m.stride, m.shape)):
             if i not in coords:
                 coords[i] = np.zeros((1,) + lead, dtype=np.int64)
@@ -830,11 +885,12 @@ class _Typed(KI._Run):
             out = (c < 0) | (c >= n)
             bad = out if valid is None else (valid & out)
             if np.any(bad):
-                idx = _first(np.broadcast_to(bad, (P,) + tuple(off.shape)))
+                full_bad = np.broadcast_to(bad, (P,) + tuple(off.shape))
+                idx = _first(full_bad)
                 cc = np.broadcast_to(c, (P,) + tuple(off.shape))
-                raise _Fail("violation", f"{what} addresses {arg} outside its {tuple(m.shape)} elements (coordinate "
-                                         f"{int(cc[idx])} on axis {i} of size {n})",
-                            {"program_chunk_index": self.chunk_index, "lane": list(idx[1:])})
+                self._bad(full_bad, f"{what} addresses {arg} outside its {tuple(m.shape)} elements (coordinate "
+                                    f"{int(cc[idx])} on axis {i} of size {n})",
+                          {"program_chunk_index": self.chunk_index, "lane": list(idx[1:])})
         for i, (k, pairs) in syms.items():
             basis = _net_basis(pairs)
             ax = m.axes[i] if i < len(m.axes) else None
@@ -844,6 +900,15 @@ class _Typed(KI._Run):
                                                                 "basis": basis})
             coords[i] = Sym(k, basis, coords[i])
         return coords
+
+    def _bad(self, bad, why, example):
+        """Lanes that break the rule: a violation - unless the branch is decided by data and only some programs
+        are hit, when whether the kernel runs them is the data's (noted; the verdict becomes "possible")."""
+        hit = bad.reshape(bad.shape[0], -1).any(axis=1)
+        if self.data_depth and not np.broadcast_to(hit, (self.P,)).all():
+            self.notes.append((why, example))
+            return
+        raise _Fail("violation", why, example)
 
     def _load(self, op, p, mask, bounds=True):
         """A float load as a typed value (masked_zero is set by the caller)."""
@@ -929,7 +994,7 @@ class _Typed(KI._Run):
                                                                           "lane": list(idx[1:]), "axis": key})
             elif cx is not None and cy is not None and isinstance(key, str):
                 if isinstance(cx[0], Sym) or isinstance(cy[0], Sym):
-                    if not _same_coord(cx[0], cy[0]):
+                    if not _same_coord(cx[0], cy[0], both):
                         raise _Fail("unproven", f"whether {how} pairs the same '{key}' depends on data read at "
                                                 f"run time")
                     coords[key] = cx
@@ -1028,16 +1093,13 @@ class _Typed(KI._Run):
         if a.alts is not None or b.alts is not None:
             return _alt_map(lambda x, y: self._dot(x, y, c), a, b)
         for leaf in (a, b):
-            if leaf.leaf is None:
-                raise Unmodelled("a dot whose operands are not loads")
-            if leaf.data_valid:
-                raise _Fail("unproven", f"the lanes of {leaf.leaf} in the dot are masked by data read at run time")
+            name = leaf.leaf or "a value"
+            if not leaf.coords and leaf.const is None:
+                raise Unmodelled("a dot whose operands have no coordinates")
             if not leaf.masked_zero:
-                raise _Fail("unproven", f"masked-out lanes of {leaf.leaf} in the dot are not loaded as zero")
+                raise _Fail("unproven", f"masked-out lanes of {name} in the dot are not loaded as zero")
             if leaf.data_addr:
-                raise _Fail("unproven", f"the dot reads {leaf.leaf} at an address chosen by data ({leaf.data_addr})")
-            if leaf.extras:
-                raise _Fail("unproven", f"the dot reads {leaf.leaf}: {leaf.extras[0]}")
+                raise _Fail("unproven", f"the dot reads {name} at an address chosen by data ({leaf.data_addr})")
         if len(a.shape) != 2 or len(b.shape) != 2:
             raise Unmodelled("a dot of operands that are not 2-D")
         P = self.P
@@ -1061,6 +1123,15 @@ class _Typed(KI._Run):
         for side, v, name in ((a, va, "a"), (b, vb, "b")):
             kax, oax = (2, 1) if name == "a" else (1, 2)       # the lane axis of k, the lane axis of rows / columns
             for key, (arr, g) in side.coords.items():
+                if isinstance(arr, Sym):
+                    off = np.asarray(arr.off)
+                    if off.shape[kax] == 1:
+                        carried[name][key] = (Sym(arr.key, arr.basis, np.take(off, 0, axis=kax)), g)
+                    elif off.shape[oax] == 1:
+                        raise Unmodelled(f"a contraction over '{key}', an axis chosen by data")
+                    else:
+                        raise Unmodelled(f"a coordinate on '{key}' chosen by data that varies along both lanes")
+                    continue
                 if arr.shape[kax] == 1:
                     carried[name][key] = (np.take(arr, 0, axis=kax), g)
                 elif arr.shape[oax] == 1:
@@ -1084,15 +1155,16 @@ class _Typed(KI._Run):
         sums = {}
         for key in shared:
             (ka, ga), (kb, gb) = ca[key], cb[key]
-            if ga != 1 or gb != 1:
-                raise Unmodelled(f"a dot over the grouped axis '{key}'")
+            if ga != 1 and gb != 1:
+                raise Unmodelled(f"a dot over the axis '{key}' grouped on both sides")
             ka, kb = np.broadcast_to(ka, (P, Tn)), np.broadcast_to(kb, (P, Tn))
-            bad = vT & (ka != kb)
+            bad = self._eq(ka, ga, kb, gb, vT)
             self.checks += 1
             if np.any(bad):
                 raise _Fail("violation", f"the two operands are read at different '{key}' for one contraction "
                                          f"index", {"program_chunk_index": self.chunk_index})
-            lo, cnt = _ranges(ka, vT, f"a contraction tile reads one '{key}' twice",
+            fine = ka if ga == 1 else kb                       # the coordinates in base units
+            lo, cnt = _ranges(fine, vT, f"a contraction tile reads one '{key}' twice",
                               f"a contraction tile whose '{key}' are not one range")
             sums[key] = [(lo, cnt)]
         for key in list(ca) + list(cb):
@@ -1100,15 +1172,18 @@ class _Typed(KI._Run):
                 raise _Fail("unproven", f"the dot contracts the axis {key} of one operand against another name")
         coords = {}
         for key, (arr, g) in carried["a"].items():
-            coords[key] = (arr[:, :, None], g)
+            coords[key] = (Sym(arr.key, arr.basis, np.asarray(arr.off)[:, :, None]) if isinstance(arr, Sym)
+                           else arr[:, :, None], g)
         for key, (arr, g) in carried["b"].items():
             if key in coords:
                 raise Unmodelled(f"both operands carry the axis '{key}' into the dot's output")
-            coords[key] = (arr[:, None, :], g)
+            coords[key] = (Sym(arr.key, arr.basis, np.asarray(arr.off)[:, None, :]) if isinstance(arr, Sym)
+                           else arr[:, None, :], g)
         applied = dict(a.applied)
         for k, v in b.applied.items():
             applied[k] = applied.get(k, 0) + v
-        out = V((R, C), coords, rv[:, :, None] & cv[:, None, :], sums, a.serials | b.serials, applied, (), False)
+        out = V((R, C), coords, rv[:, :, None] & cv[:, None, :], sums, a.serials | b.serials, applied,
+                a.extras + b.extras, a.fn or b.fn, data_valid=a.data_valid or b.data_valid)
         if c is not None and not (c.const == 0.0):
             return self._binary("add", c, out)
         return out
@@ -1197,9 +1272,11 @@ class _Typed(KI._Run):
             if isinstance(val, (T, E, Mk)):
                 return self._store_int(ptr, val, mask, m)
             raise Unmodelled(f"a store of a {type(val).__name__}")
-        if isinstance(mask, T):
-            raise Unmodelled("a store of a float value masked by data")
-        stored = None if mask is None else _as_bool_full(mask)
+        known, by_data = _known_part(mask)
+        stored = None if known is None else _as_bool_full(known)
+        if by_data:
+            val = val.copy(data_valid=True) if val.alts is None else \
+                V((), alts=[v.copy(data_valid=True) for v in val.alts])
         for alt in _alts(val):
             try:
                 self._store_one(ptr, alt, stored, m)
@@ -1299,15 +1376,19 @@ class _Typed(KI._Run):
             raise _Fail("violation", "the kernel stores output lanes whose value has no element (masked-out operand "
                                      "lanes)", {"program_chunk_index": self.chunk_index})
         inferred = self.inferred.setdefault(ptr.arg, {})
+        if val.const is not None and not val.coords:        # a constant: nothing to pair, noted
+            inferred["values"] = f"the constant {val.const} is stored" if val.const is not None else "a constant"
         for i, ax in enumerate(m.axes):
             oc = cs[i]
+            if val.const is not None and not val.coords:
+                continue
             if ax.name is not None:
                 c = val.coords.get(ax.name)
                 if c is None:
                     raise _Fail("unproven", f"the value stored has no coordinate on the output's axis '{ax.name}' "
                                             f"(it derives from {sorted(str(k) for k in val.coords) or 'nothing'})")
                 if isinstance(oc, Sym) or isinstance(c[0], Sym):
-                    if not _same_coord(oc, c[0]):
+                    if not _same_coord(oc, c[0], sv):
                         raise _Fail("unproven", f"whether the value is stored at its own '{ax.name}' depends on "
                                                 f"data read at run time")
                     continue
@@ -1323,15 +1404,17 @@ class _Typed(KI._Run):
                 found = None
                 for key, (arr, g) in val.coords.items():
                     if isinstance(oc, Sym) or isinstance(arr, Sym):
-                        if g == 1 and _same_coord(oc, arr):
+                        if g == 1 and _same_coord(oc, arr, sv):
                             found = key
                             break
                         continue
                     if g == 1 and not np.any(self._eq(oc, 1, arr, 1, sv)):
                         found = key
                         break
+                if found is None and isinstance(oc, Sym):
+                    found = f"data-chosen ({oc.basis or 'no known basis'})"
                 if found is None and np.any(sv):
-                    raise _Fail("unproven", f"no coordinate of the value stored matches the output's axis {i}")
+                    found = "unknown (no coordinate of the value stored matches)"     # inference only: a note
                 if found is not None:
                     was = inferred.get(i)
                     if was is not None and was != found:
@@ -1400,20 +1483,23 @@ class _Typed(KI._Run):
             p = args[0]
             mask = args[1] if len(args) > 1 else None
             et = KI._elem(op.rtype)
-            if et.startswith("f") or et.startswith("bf"):
-                if not isinstance(p, Ptr):
-                    raise Unmodelled("a load from a non-pointer")
+            if not isinstance(p, Ptr):
+                raise Unmodelled("a load from a non-pointer")
+            m = self.meanings.get(p.arg)
+            typed_int = not (et.startswith("f") or et.startswith("bf")) and m is not None and p.taint is None \
+                and p.off is not None and m.basis is None and m.kind != "pointers" and any(a.name for a in m.axes)
+            if et.startswith("f") or et.startswith("bf") or typed_int:
                 other = args[2] if len(args) > 2 else None
-                if isinstance(mask, T):
-                    r = self._load(op, p, None, bounds=False)
+                known, by_data = _known_part(mask)
+                if by_data:
+                    r = self._load(op, p, known, bounds=known is not None)
                     r.data_valid = True
                 else:
                     r = self._load(op, p, mask)
-                r.masked_zero = mask is None or (isinstance(other, V) and other.is_zero())
+                r.masked_zero = mask is None or (isinstance(other, V) and other.is_zero()) or \
+                    (not (et.startswith("f") or et.startswith("bf")) and isinstance(other, E) and
+                     not other.v and other.d is None and not np.any(other.s))
             else:
-                if not isinstance(p, Ptr):
-                    raise Unmodelled("a load from a non-pointer")
-                m = self.meanings.get(p.arg)
                 if m is not None and p.taint is None and p.off is not None and \
                         (m.basis is not None or m.kind == "pointers" or any(a.name for a in m.axes)):
                     # an integer with a meaning: its address is held to the tensor's axes like a float's
@@ -1439,6 +1525,42 @@ class _Typed(KI._Run):
                         r = self._leaf(op, m.basis, shape or ())
                 else:
                     return super()._op(op, env)
+        elif n == "arith.andi" and any(isinstance(a, T) for a in args) and \
+                all(isinstance(a, (T, E, Mk)) for a in args):
+            parts, why = [], None
+            for a in args:
+                if isinstance(a, DM):
+                    why = a.why
+                    if a.known is not None:
+                        parts.append(a.known)
+                elif isinstance(a, T):
+                    why = a.why
+                else:
+                    parts.append(a)
+            known = None
+            if parts:
+                fs = []
+                for x in parts:
+                    fs += x.f if isinstance(x, Mk) else [x]
+                known = Mk(shape or parts[0].shape, fs) if len(fs) > 1 else fs[0]
+            r = DM(why, known)
+        elif (n in KI._INT_BINARY or n in KI._INT_CASTS) and any(isinstance(a, V) for a in args):
+            vs = [a for a in args if isinstance(a, V)]
+            if any(a.alts is not None for a in vs):
+                raise Unmodelled(f"{n} of a value chosen by data")
+            if len(vs) == 2:
+                _shape, coords, vx, vy = self._pair(vs[0], vs[1], f"the integer operation {n}")
+                r = V(np.broadcast_shapes(vs[0].shape, vs[1].shape), coords, vx & vy, {},
+                      vs[0].serials | vs[1].serials, {}, vs[0].extras + vs[1].extras + (n,), True,
+                      masked_zero=False, data_valid=vs[0].data_valid or vs[1].data_valid)
+            else:
+                v = vs[0]
+                cast = n in KI._INT_CASTS
+                r = v.copy(shape=tuple(shape or v.shape), fn=v.fn or not cast,
+                           extras=v.extras if cast else v.extras + (n,),
+                           masked_zero=v.masked_zero if cast else False)
+        elif n == "arith.cmpi" and any(isinstance(a, V) for a in args):
+            r = T("a comparison of values read at run time")
         elif (n in KI._INT_BINARY or n in KI._INT_CASTS or n == "arith.cmpi") and any(isinstance(a, S) for a in args):
             r = self._sym_int(n, op, args, shape)
         elif n == "tt.addptr" and (isinstance(args[1], S) or (isinstance(args[0], Ptr) and
@@ -1491,10 +1613,10 @@ class _Typed(KI._Run):
         elif n in KI._FLOAT_CASTS:
             x = args[0]
             if isinstance(x, V):
-                if n in ("arith.truncf", "arith.extf"):
+                if n in ("arith.truncf", "arith.extf", "arith.sitofp", "arith.uitofp"):
                     r = x
                 elif n in ("arith.fptosi", "arith.fptoui"):
-                    r = T(f"{n} of a float value")
+                    r = x.copy(fn=True, extras=x.extras + (n,), masked_zero=False)
                 else:
                     raise Unmodelled(f"{n} of a float")
             elif isinstance(x, (E, Mk)) and n in ("arith.sitofp", "arith.uitofp"):
@@ -1525,8 +1647,7 @@ class _Typed(KI._Run):
                 isinstance(args[0], V):
             r = self._shape_v(n, op, args[0], shape)
         elif n == "tt.bitcast" and isinstance(args[0], V):
-            r = T(f"{n} of a float value") if KI._width(op.rtype) else args[0].copy(fn=True, extras=args[0].extras +
-                                                                                     (f"{n} of a float",))
+            r = args[0].copy(fn=True, extras=args[0].extras + (n,))
         elif n == "tt.reduce":
             x = args[0]
             if isinstance(x, V):
@@ -1620,6 +1741,7 @@ def check_launch(ttir: str, meanings: Dict[str, Meaning], ints: Dict[str, int], 
     checks = 0
     stores = {}
     inferred = {}
+    data_notes = []
     try:
         for ci, start in enumerate(range(0, total, per)):
             run = _Typed(fn, meanings, ints, KI._grid_pids((gx, gy, gz), start, min(total, start + per)), True, ci,
@@ -1627,6 +1749,7 @@ def check_launch(ttir: str, meanings: Dict[str, Meaning], ints: Dict[str, int], 
             run.pointers = pointers or {}
             run.run()
             checks += run.checks
+            data_notes += run.notes
             for k, v in run.stores.items():
                 stores.setdefault(k, []).extend(v)
             for k, v in run.inferred.items():
@@ -1669,6 +1792,11 @@ def check_launch(ttir: str, meanings: Dict[str, Meaning], ints: Dict[str, int], 
             inferred[name] = {("axis_%d" % k if isinstance(k, int) else k):
                               (v if isinstance(v, (str, list, dict)) else str(v)) for k, v in inf.items()}
             notes.append(f"{name}: {inferred[name]}")
+    if data_notes:
+        why, example = data_notes[0]
+        return Verdict("possible", f"for some programs, if data sends them down the branch: {why}" +
+                       (f" (and {len(data_notes) - 1} more)" if len(data_notes) > 1 else ""), checks, total,
+                       time.perf_counter() - t0, example, {k: v for k, v in inferred.items() if v} or None)
     return Verdict("proven", f"every stored element of the output{'s' if len(outs) > 1 else ''} "
                              f"{', '.join(f'{n} {tuple(meanings[n].shape)}' for n in outs)} is stored once from values "
                              f"paired on their meanings ({checks} pairings over {total} programs)" +
