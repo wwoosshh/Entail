@@ -48,7 +48,10 @@ ALLOWED = {"load": None, "kv_contract": None, "epochs": None, "identity_contract
            # the definitions of engine functions that carry none (M19 L3): what a function computes, not a rule
            "definitions": None,
            # the guarantee profile (M19 L5.4a): its producers' issues, its gate and its graph hooks
-           "guarantee": None}
+           "guarantee": None,
+           # its integrity experiment between the operations (M19 L5.4e): the live ranges a Triton launch is checked
+           # against, and what a kernel writes, read from its own TTIR
+           "writeguard": {"live", "check_launch"}, "kernel_ir": {"written_args"}}
 REQUIRED = ("hooks", "read_choice", "handles", "install", "engine", "versions")
 
 

@@ -1,6 +1,7 @@
 """Cost, apart from conservation: python cost.py <out_root> [pairs]   (one measurement:  python cost.py --one ...)
 
-Each measurement is a fresh process (off, guarantee or - from v3 - structure, BFG_COST_MODES), in rounds whose order
+Each measurement is a fresh process (off, guarantee or - from v3 - structure, from v5 also structure_writes and
+structure_inkernel; BFG_COST_MODES), in rounds whose order
 rotates (off first, then the next mode first, ...), `pairs` rounds (default 5). In each process, on the real vLLM path (TritonFp8BlockScaledMMKernel,
 N=6144, K=2560 and N=2560, K=9728: Qwen3-4B's fused QKV-like and down-projection shapes), it times:
   start         process start -> the kernel object and the weights processed (issued, under the profile)
@@ -79,7 +80,7 @@ def one(mode, out_path):
             lau = common.install_launcher(None)
         r["peak_bytes"] = int(torch.cuda.max_memory_allocated())
         r["launches"] = launches + lau.launches
-        if mode in ("guarantee", "structure"):
+        if mode != "off":
             from entail.adapters import vllm_block_fp8_guarantee as ad
             r["entail"] = ad.stats()
     common.write_json(out_path, r)

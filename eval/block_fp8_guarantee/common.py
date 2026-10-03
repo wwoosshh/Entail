@@ -375,6 +375,72 @@ def tile_config_case():
     return table
 
 
+# --- writes between the producer and the consumer (integrity cases; L5.4e adds I3-I8) ----------------------------------
+
+_WRITERS = {}
+_QUIET = {}
+
+
+def writers():
+    """Two Triton kernels that XOR the first n bytes of a buffer with a flag's byte (0: no change): `through` is
+    handed a pointer to the bytes it changes (I3, I7); `past_end` is handed another buffer and writes at an offset
+    past its end (I4: what it changes is not among its arguments)."""
+    if _WRITERS:
+        return _WRITERS
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def flip_through(P, n, Flag, BLOCK: tl.constexpr):
+        i = tl.arange(0, BLOCK)
+        m = i < n
+        f = tl.load(Flag)
+        x = tl.load(P + i, mask=m, other=0)
+        tl.store(P + i, x ^ f, mask=m)
+
+    @triton.jit
+    def flip_past_end(P, off, n, Flag, BLOCK: tl.constexpr):
+        i = tl.arange(0, BLOCK)
+        m = i < n
+        f = tl.load(Flag)
+        q = P + off + i
+        x = tl.load(q, mask=m, other=0)
+        tl.store(q, x ^ f, mask=m)
+
+    _WRITERS["through"] = flip_through
+    _WRITERS["past_end"] = flip_past_end
+    return _WRITERS
+
+
+def quiet_flip():
+    """A custom operator whose schema says it only reads its tensor (I8) - its implementation writes the byte 0x80
+    (-0.0 in fp8) over the first n bytes anyway, through the CUDA driver on the tensor's raw address, as a C++ or
+    CUDA operator with a wrong schema would: no PyTorch operation and no Triton launch writes, and no version counter
+    moves. (Until the v5 freeze the implementation XORed through a PyTorch view; that moved the version counter, so
+    the epoch check saw it: not the case meant.)"""
+    if not _QUIET:
+        import ctypes
+
+        import torch
+
+        cuda = ctypes.CDLL("libcuda.so.1")
+        cuda.cuMemsetD8Async.argtypes = [ctypes.c_uint64, ctypes.c_ubyte, ctypes.c_size_t, ctypes.c_void_p]
+        cuda.cuMemsetD8Async.restype = ctypes.c_int
+        lib = torch.library.Library("entail_eval", "DEF")
+        lib.define("quiet_flip(Tensor x, int n) -> ()")
+
+        def impl(x, n):
+            err = cuda.cuMemsetD8Async(x.data_ptr(), 0x80, n, torch.cuda.current_stream(x.device).cuda_stream)
+            if err:
+                raise RuntimeError(f"cuMemsetD8Async returned {err}")
+
+        lib.impl("quiet_flip", impl, "CUDA")
+        _QUIET["lib"] = lib
+    import torch
+
+    return torch.ops.entail_eval.quiet_flip
+
+
 # --- observation ------------------------------------------------------------------------------------------------------
 
 def rng_state():

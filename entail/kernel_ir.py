@@ -137,22 +137,36 @@ def parse(ttir: str) -> Func:
         m = re.match(r'(%[A-Za-z0-9_]+)\s*:\s*([^{]+)', a)
         if m:
             args.append((m.group(1), m.group(2).strip()))
-    body, _ = _block(lines, i + 1)
+    body, _, _ = _block(lines, i + 1)
     return Func(name, args, body)
 
 
 def _block(lines, i):
+    """The ops of a region, up to its closing line: (ops, the next line, the closing line). A closing "} else {"
+    opens the else region of the op that opened this one (scf.if); a closing "}) : (types) -> type" ends a region in
+    parentheses and gives that op (a generic op such as "tt.reduce") its types."""
     ops = []
     while i < len(lines):
         line = lines[i].strip()
         if line.startswith("}"):
-            return ops, i + 1
+            return ops, i + 1, line
         op = _op(line)
         i += 1
         if line.endswith("{"):
-            op.body, i = _block(lines, i)
+            op.body, i, close = _block(lines, i)
+            if close.startswith("} else"):
+                op.extra["else"], i, close = _block(lines, i)
+            if close.startswith("})"):
+                tail = close[2:].strip()
+                if tail.startswith(":"):
+                    types = tail[1:].strip()
+                    if "->" in types:
+                        src, rt = types.rsplit("->", 1)
+                        op.extra["src"], op.rtype = src.strip(), rt.strip()
+                    else:
+                        op.rtype = types
         ops.append(op)
-    return ops, i
+    return ops, i, ""
 
 
 def _op(line: str) -> Op:
@@ -163,9 +177,22 @@ def _op(line: str) -> Op:
     else:
         rhs = line
     rhs = rhs.rstrip("{").strip()
+    if rhs.startswith('"'):                 # the generic form: "dialect.op"(%operands) <{attributes}> ({ region })
+        q = rhs.index('"', 1)
+        name, rest = rhs[1:q], rhs[q + 1:]
+        op = Op(results, name, [], rest)
+        m = re.match(r'\(([^()]*)\)', rest)
+        op.operands = _VAL.findall(m.group(1)) if m else []
+        ax = re.search(r'axis = (-?\d+)', rest)
+        if ax:
+            op.extra["axis"] = int(ax.group(1))
+        return op
     name = rhs.split()[0]
     rest = rhs[len(name):].strip()
     op = Op(results, name, [], rest)
+    if name == "scf.if":
+        op.operands = _VAL.findall(rest.split("->")[0])[:1]
+        return op
     if name == "scf.for":
         m = re.match(r'(%\S+)\s*=\s*(%\S+)\s+to\s+(%\S+)\s+step\s+(%\S+)(.*)', rest)
         if not m:
@@ -195,6 +222,8 @@ def _op(line: str) -> Op:
         if sep in op.rtype:
             src, op.rtype = op.rtype.rsplit(sep, 1)
             op.extra["src"], op.rtype = src.strip(), op.rtype.strip()
+    if name == "arith.constant" and not op.rtype and rest.strip() in ("true", "false"):
+        op.rtype = "i1"                     # a boolean constant prints without its type
     return op
 
 
@@ -823,9 +852,9 @@ class _Run:
         elif n == "tt.load":
             p = args[0]
             mask = args[1] if len(args) > 1 else None
-            if isinstance(mask, T):
-                raise Unmodelled("a load masked by data read at run time")
             et = _elem(op.rtype)
+            if isinstance(mask, T) and (et.startswith("f") or et.startswith("bf")):
+                raise Unmodelled("a load masked by data read at run time")
             if not isinstance(p, Ptr):
                 raise Unmodelled("a load from a non-pointer")
             if et.startswith("f") or et.startswith("bf"):
@@ -862,6 +891,27 @@ class _Run:
         elif n == "scf.for":
             self._for(op, env)
             return
+        elif n == "scf.if":
+            self._if(op, env, args[0])
+            return
+        elif n == "tt.reduce":
+            x = args[0]
+            if isinstance(x, T):
+                r = T(x.why)
+            else:
+                raise Unmodelled(f"a reduction of a {type(x).__name__} value")
+        elif n == "tt.atomic_rmw":
+            ptr = args[0] if args else None
+            if not isinstance(ptr, Ptr):
+                raise Unmodelled("an atomic through a value that is not a pointer")
+            info = self.binding.get(ptr.arg)
+            if info is not None and info.role == "output":
+                raise _Fail("violation", f"the kernel writes to its output {ptr.arg} with an atomic (each element is "
+                                         f"to be stored once)")
+            if info is None or info.role != "integrity_sums" or "add" not in op.text.split(",")[0]:
+                raise _Fail("violation", f"the kernel writes to {ptr.arg} with an atomic other than an add into an "
+                                         f"integrity sums buffer")
+            r = T("the old value of an atomic add")
         elif n == "scf.yield":
             env["__yield__"] = args
             return
@@ -947,6 +997,36 @@ class _Run:
                 env[f"{base}#{i}"] = v
         if len(op.results) == 1 and carried:
             env[op.results[0]] = carried[0]
+
+    _IN_DATA_BRANCH = ("tt.store", "tt.dot", "tt.atomic_rmw", "scf.for")
+
+    def _if(self, op, env, cond):
+        """scf.if. A condition read from data (the in-kernel integrity check of L5.4e): neither branch is followed;
+        every result is data, and a branch may not store, dot, loop or do an atomic. A condition the launch decides
+        alike for every program: that branch is followed."""
+        branches = [op.body, op.extra.get("else", [])]
+        if isinstance(cond, T):
+            def walk(ops):
+                for o in ops:
+                    if o.name in self._IN_DATA_BRANCH:
+                        raise Unmodelled(f"{o.name} under a condition read from data")
+                    walk(o.body)
+                    walk(o.extra.get("else", []))
+            for b in branches:
+                walk(b)
+            for name in op.results:
+                env[name] = T(f"a value chosen by a condition read from data ({cond.why})")
+            return
+        c = self._int(cond)
+        if not isinstance(c, E) or not c.scalar_only() or np.unique(c.s).size != 1:
+            raise Unmodelled("a branch whose condition differs between programs")
+        inner = dict(env)
+        self._ops(branches[0] if int(c.s.flat[0]) else branches[1], inner)
+        values = inner.get("__yield__", [])
+        if len(values) < len(op.results):
+            raise Unmodelled("a branch that yields fewer values than the op has results")
+        for name, v in zip(op.results, values):
+            env[name] = v
 
     @staticmethod
     def _has_dot(x):
@@ -1558,6 +1638,77 @@ def _grid_pids(grid, start, stop):
     gx, gy, gz = (list(grid) + [1, 1, 1])[:3]
     lin = np.arange(start, stop, dtype=np.int64)
     return [lin % gx, (lin // gx) % gy, lin // (gx * gy)]
+
+
+_POINTER_KEEPS = ("tt.splat", "tt.broadcast", "tt.expand_dims", "tt.reshape", "tt.addptr", "tt.bitcast", "tt.trans",
+                  "tt.advance", "tt.make_tensor_ptr")
+_WRITES = ("tt.store", "tt.atomic_rmw", "tt.atomic_cas", "tt.descriptor_store")
+
+
+def written_args(ttir: str):
+    """The names of a kernel's pointer arguments it may write through (stores and atomics), followed back from each
+    write's pointer to the arguments it was made from, through pointer arithmetic, broadcasts, selects, branches and
+    loop-carried values; None when a written pointer comes from something else (an integer cast to a pointer, a
+    pointer loaded from memory): then every pointer argument may be written. No launch values are needed (writeguard,
+    L5.4e: a Triton launch is refused only for the arguments it writes)."""
+    f = parse(ttir)
+    bases = {name: {name[1:]} for name, typ in f.args if "!tt.ptr" in typ}
+    written = set()
+    unknown = []
+
+    def add(name, srcs):
+        if not srcs:
+            return False
+        cur = bases.setdefault(name, set())
+        if srcs <= cur:
+            return False
+        cur |= srcs
+        return True
+
+    def visit(ops):
+        changed = False
+        for op in ops:
+            n = op.name
+            if n in _POINTER_KEEPS and op.operands and op.results:
+                changed |= add(op.results[0], bases.get(op.operands[0], set()))
+            elif n == "arith.select" and len(op.operands) == 3 and op.results:
+                changed |= add(op.results[0], bases.get(op.operands[1], set()) | bases.get(op.operands[2], set()))
+            elif n == "scf.for":
+                names = [k for k, _v in op.extra.get("iter", [])]
+                for k, v in op.extra.get("iter", []):
+                    changed |= add(k, bases.get(v, set()))
+                changed |= visit(op.body)
+                ys = next((o for o in op.body if o.name == "scf.yield"), None)
+                base = op.results[0].split("#")[0] if op.results else None
+                for i, v in enumerate(ys.operands if ys is not None else []):
+                    if i < len(names):
+                        changed |= add(names[i], bases.get(v, set()))
+                    if base:
+                        changed |= add(f"{base}#{i}", bases.get(v, set()) | bases.get(names[i] if i < len(names)
+                                                                                     else "", set()))
+                if len(op.results) == 1 and names:
+                    changed |= add(op.results[0], bases.get(names[0], set()))
+            elif n == "scf.if":
+                for branch in (op.body, op.extra.get("else", [])):
+                    changed |= visit(branch)
+                    ys = next((o for o in branch if o.name == "scf.yield"), None)
+                    for name, v in zip(op.results, ys.operands if ys is not None else []):
+                        changed |= add(name, bases.get(v, set()))
+            elif n in _WRITES and op.operands:
+                b = bases.get(op.operands[0])
+                if b:
+                    written.update(b)
+                else:
+                    unknown.append(op.operands[0])
+            else:
+                changed |= visit(op.body)
+        return changed
+
+    for _ in range(64):                 # to a fixed point: loops carry pointers around
+        unknown.clear()
+        if not visit(f.body):
+            break
+    return None if unknown else sorted(written)
 
 
 def check_launch(ttir: str, binding: Dict[str, Tensor], ints: Dict[str, int], grid,

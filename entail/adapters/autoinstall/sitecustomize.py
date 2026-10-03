@@ -147,12 +147,13 @@ GUARANTEE_TARGETS = {
     "torch.cuda.graphs": ["entail.adapters.vllm_block_fp8_guarantee:install_graphs"],
 }
 # ENTAIL=structure (M19 L5.4b/L5.4c): the structural check experiment - the same hooks, and the consumer's Triton
-# launch, read before it goes ahead. Not the guarantee.
+# launch, read before it goes ahead. Not the guarantee. Its integrity experiments ENTAIL=structure_writes and
+# ENTAIL=structure_inkernel (M19 L5.4e) install the same.
 STRUCTURE_TARGETS = dict(GUARANTEE_TARGETS)
 STRUCTURE_TARGETS["triton.runtime.jit"] = ["entail.adapters.vllm_block_fp8_guarantee:install_triton"]
 if os.environ.get("ENTAIL", "off") == "guarantee":
     TARGETS = dict(GUARANTEE_TARGETS)
-elif os.environ.get("ENTAIL", "off") == "structure":
+elif os.environ.get("ENTAIL", "off") in ("structure", "structure_writes", "structure_inkernel"):
     TARGETS = dict(STRUCTURE_TARGETS)
 # ENTAIL_ONLY=rope_alias,sglang_adapter installs just those adapters (to measure one of them on its own).
 if os.environ.get("ENTAIL_ONLY"):
@@ -298,7 +299,8 @@ def activate():
     install_now()
 
 
-if os.environ.get("ENTAIL", "off") in ("load", "debug", "guarantee", "structure"):
+if os.environ.get("ENTAIL", "off") in ("load", "debug", "guarantee", "structure", "structure_writes",
+                                       "structure_inkernel"):
     activate()
 
 

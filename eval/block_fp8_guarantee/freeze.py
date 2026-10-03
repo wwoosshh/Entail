@@ -2,8 +2,8 @@
 
 The manifest fixes, before the holdout: the plans (supported envelope, tolerance constants, budgets) - "plan" for the
 guarantee (ENTAIL=guarantee, check "output") and, from v3 (L5.4c), "structure_plan" for the structural check
-experiment (ENTAIL=structure, check "static"); it is also the file ENTAIL_GUARANTEE_PLAN reads, each mode its own
-plan - the oracle's constant, the environment (its fingerprint), the sha256 of every file of the profile and of the
+experiment (ENTAIL=structure, check "static"), from v5 (L5.4e) "structure_writes_plan" and "structure_inkernel_plan"
+for its two integrity experiments; it is also the file ENTAIL_GUARANTEE_PLAN reads, each mode its own plan - the oracle's constant, the environment (its fingerprint), the sha256 of every file of the profile and of the
 harness, the entail commit, and the holdout rule. The holdout's seeds and free parameters are drawn from the sha256 of
 this file, so they exist only once it is written.
 """
@@ -19,7 +19,8 @@ sys.path.insert(0, HERE)
 import common  # noqa: E402
 
 CODE = ("entail/guarantee.py", "entail/kernel_ir.py", "entail/adapters/vllm_block_fp8_guarantee.py",
-        "entail/adapters/autoinstall/sitecustomize.py", "entail/core.py", "entail/policies.py", "entail/record.py")
+        "entail/adapters/autoinstall/sitecustomize.py", "entail/core.py", "entail/policies.py", "entail/record.py",
+        "entail/writeguard.py", "entail/inkernel.py")
 
 
 def main():
@@ -38,9 +39,11 @@ def main():
     ap.add_argument("--engine-modes", default="guarantee,structure")
     ap.add_argument("--engine-rounds", default="",
                     help="rounds per configuration, e.g. graphs=3 (default 1); a round is off, each mode, off")
-    ap.add_argument("--what", default="M19 L5.4d (v4): the guarantee (check output) and, apart, the structural check "
-                                      "experiment (check static): implementation, tolerances and harness frozen "
-                                      "before the holdout")
+    ap.add_argument("--what", default="M19 L5.4e (v5): the structural check experiment with its integrity measured "
+                                      "two ways - between the operations (writes refused) and inside the operation "
+                                      "(the consumer kernel adds up what it reads) - beside the guarantee and the "
+                                      "epoch integrity: implementation, tolerances and harness frozen before the "
+                                      "holdout")
     a = ap.parse_args()
     configs = a.engine_configs.split(",")
     rounds = {c: 1 for c in configs}
@@ -57,6 +60,10 @@ def main():
     plan = g.Plan(c_acc=cal["proposed"]["c_acc"], check="output", integrity="checksum", records="all").to_json()
     structure_plan = g.Plan(name="vllm-0.30-triton-dense-block-fp8-structure", c_acc=cal["proposed"]["c_acc"],
                             check="static", integrity="epoch", records="changes").to_json()
+    writes_plan = g.Plan(name="vllm-0.30-triton-dense-block-fp8-structure-writes", c_acc=cal["proposed"]["c_acc"],
+                         check="static", integrity="writes", records="changes").to_json()
+    inkernel_plan = g.Plan(name="vllm-0.30-triton-dense-block-fp8-structure-inkernel", c_acc=cal["proposed"]["c_acc"],
+                           check="static", integrity="inkernel", records="changes").to_json()
     code = {p: common.sha256_file(os.path.join(common.ENTAIL_ROOT, p)) for p in CODE}
     for p in sorted(glob.glob(os.path.join(HERE, "*.py"))):
         code[os.path.relpath(p, common.ENTAIL_ROOT).replace(os.sep, "/")] = common.sha256_file(p)
@@ -66,6 +73,8 @@ def main():
         "what": a.what,
         "plan": plan,
         "structure_plan": structure_plan,
+        "structure_writes_plan": writes_plan,
+        "structure_inkernel_plan": inkernel_plan,
         "oracle": {"c": cal["proposed"]["oracle_c"], "form": "|out - truth| <= ulp(out dtype, |truth|) + c * "
                                                              "(|a| @ |b|^T), float64 on the CPU, bit-field fp8 decode",
                    "calibration_observed_max": cal["oracle_c_observed_max"]},
@@ -80,7 +89,7 @@ def main():
                       "graphs": "CUDA graphs captured from eager code (torch.cuda.graph); torch.compile refused",
                       "not": ["UE8M0 scales", "expert parallel", "multi-GPU", "fnuz fp8"]},
         "cases": {"file_sha256": common.sha256_file(os.path.join(HERE, "cases.py")),
-                  "normal": 8, "defect": 12, "admission": 4, "integrity": 2,
+                  "normal": 8, "defect": 12, "admission": 4, "integrity": 8,
                   "holdout_rule": "seeds and free parameters = sha256(f'{sha256 of this manifest file}:{case id}')"},
         "cost_budget": {"guarantee_normal_repeat_ratio_max": a.cost_budget,
                         "structure_engine_graphs_steady_ratio_max": a.engine_budget,

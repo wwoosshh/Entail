@@ -294,7 +294,68 @@ def main():
         assert f.verdict != "proven" or not f.dense, (n, f)
     print("ok fast and dense evaluation agree on", len(cases), "launches;",
           f"orig: fast {fast[0].seconds:.4f} s, dense {dense[0].seconds:.4f} s")
+    inkernel_checks()
+    written_checks()
 
+
+def inkernel_binding(M, alt_pair=5, chk_role="integrity_sums"):
+    """The binding of a kernel rewritten with the in-kernel integrity check (entail/inkernel.py, L5.4e): the sums
+    buffer and the two word views of A and B besides the operands."""
+    b = binding(M, alt_pair)
+    b["EntailChk"] = Tensor(chk_role, 0, 0, (8,), (1,))
+    b["EntailAw"] = Tensor("other", 0, 0, (M, K // 4), (K // 4, 1))
+    b["EntailBw"] = Tensor("other", 0, 0, (N, K // 4), (K // 4, 1))
+    return b
+
+
+def inkernel_checks():
+    """L5.4e: vLLM's kernel and the four mutants, rewritten with the in-kernel integrity check (tests/data/kernel_ir/
+    inkernel_*.ttir, Triton 3.7.1 on the RTX 4070 Ti, tiles 64 x 128 x 128) get the verdicts the kernels they were
+    made from get; what the check adds may only add into the sums buffer, under conditions read from data."""
+    src = open(os.path.join(DATA, "inkernel_orig.ttir"), encoding="utf-8").read()
+    v = launch("inkernel_orig", 64, 64, b=inkernel_binding(64), ttir=src)
+    assert v.verdict == "proven" and v.terms == 20 and v.programs == 12, v
+    for name, want in (("interval_0", "unproven"), ("neighbor_0", "unproven"), ("alt_weight_0", "possible"),
+                       ("rows_0", "possible")):
+        v = launch("inkernel_" + name, 64, 64, b=inkernel_binding(64))
+        assert v.verdict == want, (name, v)
+    v = launch("inkernel_alt_weight_0", 64, 64, b=inkernel_binding(64, alt_pair=3))
+    assert v.verdict == "proven", v
+    print("ok the rewritten kernels: the verdicts of the kernels they were made from (vLLM's proven, mutants not)")
+    lines = src.splitlines()                  # the lines to edit are found by what they hold, not by their names
+    first = next(x for x in lines if "tt.atomic_rmw" in x and "%EntailChk," in x)
+    val = first.split("%EntailChk,", 1)[1].split(",")[0].strip()
+    store = next(x for x in lines if "tt.store" in x).split(" loc(")[0]
+    start = next(i for i, x in enumerate(lines) if "scf.if" in x)
+    branch_end = next(x for x in lines[start:] if x.strip().startswith("scf.yield"))
+    cases = [
+        ("the sums buffer bound as an ordinary tensor", src, "violation", inkernel_binding(64, chk_role="other")),
+        ("an atomic add into the output", edit(src, (first, first.replace(f"%EntailChk, {val}", f"%C, {val}")
+                                                     .replace("!tt.ptr<i32>", "!tt.ptr<bf16>"))), "violation", None),
+        ("an atomic exchange into the sums buffer", edit(src, (first, first.replace("add,", "exch,"))), "violation",
+         None),
+        ("a store under a condition read from data",
+         edit(src, (branch_end, "        " + store.strip() + "\n" + branch_end)), "unproven", None),
+    ]
+    for name, ttir, want, b in cases:
+        v = launch("inkernel_orig", 64, 64, b=b or inkernel_binding(64), ttir=ttir)
+        assert v.verdict == want, (name, v.verdict, v.why)
+        print(f"ok {name}: {v.verdict} ({v.why[:100]})")
+
+def written_checks():
+    """L5.4e, approach "between the operations": what a Triton kernel writes, read from its TTIR (written_args) -
+    vLLM's kernel and the mutants write only their output; the rewritten kernels also their sums buffer; a store
+    through a pointer whose origin cannot be followed (here: an unknown value) gives None, every argument written."""
+    for name, want in (("orig", ["C"]), ("interval_0", ["C"]), ("alt_weight_0", ["C"]), ("tile_1", ["C"]),
+                       ("inkernel_orig", ["C", "EntailChk"]), ("inkernel_rows_0", ["C", "EntailChk"])):
+        got = kernel_ir.written_args(open(os.path.join(DATA, name + ".ttir"), encoding="utf-8").read())
+        assert got == want, (name, got)
+    src = open(os.path.join(DATA, "orig.ttir"), encoding="utf-8").read()
+    line = next(x for x in src.splitlines() if "tt.store" in x)
+    ptr = line.split("tt.store", 1)[1].split(",")[0].strip()
+    assert kernel_ir.written_args(src.replace(line, line.replace(ptr, "%unknown_ptr"))) is None
+    print("ok written_args: vLLM's kernel and the mutants write C; the rewritten ones C and the sums buffer; a store "
+          "through a pointer of unknown origin: every argument")
 
 if __name__ == "__main__":
     main()

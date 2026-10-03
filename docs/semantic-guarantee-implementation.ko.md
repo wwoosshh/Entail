@@ -10,15 +10,17 @@
 |---|---|
 | `ENTAIL=guarantee` | 보증 프로파일만 설치한다. 매 호출 출력 전체를 참조와 비교하는 수치 보증(`check: "output"`)이다. 다른 어댑터, DLC, 알림은 설치하지 않는다. 시작 hook(`.pth` 또는 `adapters/autoinstall`)이 엔진의 하위 프로세스까지 적용한다. |
 | `ENTAIL=structure` | 구조 검사 실험이다. 보증이 아니다(아래 "구조 검사 실험"). 생산자 issue와 admission은 보증과 같고, 소비 커널의 실행을 IR 증명으로 정한다. |
-| `ENTAIL_GUARANTEE_PLAN` | 실행 계획 JSON. 동결 manifest의 `plan`은 보증이, `structure_plan`은 구조 실험이 읽는다. 지원 범위, 허용치 상수, 예산을 정한다. 없으면 모드별 기본값을 쓴다. |
+| `ENTAIL=structure_writes`, `ENTAIL=structure_inkernel` | 구조 검사 실험의 무결성을 두 방식으로 재는 실험이다(L5.4e, 아래 "무결성 두 방식 실험"). 보증이 아니다. |
+| `ENTAIL_GUARANTEE_PLAN` | 실행 계획 JSON. 동결 manifest의 `plan`은 보증이, `structure_plan`은 구조 실험이, `structure_writes_plan`과 `structure_inkernel_plan`은 두 무결성 실험이 읽는다. 지원 범위, 허용치 상수, 예산을 정한다. 없으면 모드별 기본값을 쓴다. |
 | `ENTAIL_GUARANTEE_RECORD` | 호출 기록 JSONL 경로. 지정하지 않으면 `entail_logs/guarantee-<날짜>.jsonl`(구조 실험은 `structure-<날짜>.jsonl`)에 쓴다. `off`이면 쓰지 않는다. |
 | 계획의 `check` | 모드가 정한다. `guarantee`는 `output`만, `structure`는 `static`만 돈다. 다른 값을 담은 계획은 `plan`으로 거부한다. |
-| 계획의 `integrity`, `records` | `checksum`·`epoch`, `all`·`changes`. 보증의 기본값은 `checksum`·`all`, 구조 실험은 `epoch`·`changes`다. |
+| 계획의 `integrity`, `records` | `checksum`·`epoch`·`writes`·`inkernel`, `all`·`changes`. 보증의 기본값은 `checksum`·`all`, 구조 실험은 `epoch`·`changes`, 두 무결성 실험은 `writes`·`changes`와 `inkernel`·`changes`다. |
 
 코드:
 
 - `entail/guarantee.py`: 계획, 생산자 issue, 소비 gate, 그래프 판정, 기록을 맡는다. 규칙은 모두 여기에 있다.
 - `entail/kernel_ir.py`: 구조 검사 실험이 쓰는 TTIR 판정이다.
+- `entail/writeguard.py`, `entail/inkernel.py`: 무결성 두 방식 실험(L5.4e)이다.
 - `entail/adapters/vllm_block_fp8_guarantee.py`: vLLM 0.30의 연결 지점과 처리 핸들을 둔다. 규칙은 두지 않는다.
 
 ## 보호 범위와 경계
@@ -94,6 +96,23 @@
 - **함께 쓰는 설정:** `integrity: "epoch"`는 storage, layout, epoch, version만 호스트에서 확인한다(장치 작업 없음). `records: "changes"`는 실행 설정마다의 첫 전달과 그 밖의 결과만 기록한다.
 - **보증이 아닌 까닭:** 곱셈과 누산의 산술(내적, 반올림)은 Triton 컴파일러와 장치를 신뢰한다. 매 호출의 실제 수치를 확인하지 않는다. `integrity: "epoch"`는 버전 카운터와 생산자를 모두 우회한 쓰기를 보지 못한다(시험의 I1·I2가 그 경우다).
 - **비용(v4 측정, 2026-10-03):** 함수 단위 정상 반복 1.05~1.72배, 새 크기의 첫 판정 41 ms. 엔진 그래프 반복 생성은 회전별 1.146·1.089·1.095배, 중앙값 1.095배다(예산 1.10). eager는 2.13배다.
+
+## 무결성 두 방식 실험(L5.4e): 보증이 아니다
+
+구조 검사 실험의 `epoch` 무결성은 버전 카운터와 생산자를 모두 우회한 쓰기를 보지 못한다(I1·I2). 매 호출 다시 계산하지 않고 이것을 막는 두 방식을 같은 사례와 같은 비용 측정으로 비교하려고 만든 실험이다. 둘 다 구조 검사(`kernel_ir` 증명)는 그대로 두고 무결성 부분만 바꾼다.
+
+- **연산 사이(`ENTAIL=structure_writes`, `writeguard.py`):** 생산자가 발급한 값의 메모리 범위를 기록한다. 활성값과 그 스케일은 소비될 때까지, 가중치와 그 스케일은 살아 있는 동안 기록한다. 그 범위에 쓰려는 연산은 실행 전에 거부한다(`Refused`, kind `write`). 커널은 고치지 않는다.
+  - PyTorch 연산: Python dispatch mode가 모든 연산을 보고, 스키마상 쓰는 인자가 기록된 범위와 겹치면 거부한다.
+  - Triton 실행: 실행 hook이 커널의 TTIR에서 실제로 쓰는(store·atomic) 포인터 인자를 찾고(`kernel_ir.written_args`), 그 인자가 범위와 겹치면 거부한다. gate 자신의 소비 실행은 허용한다. 읽기만 하는 인자는 통과한다.
+  - CUDA 그래프: 캡처 때 같은 검사를 한다. 거부된 쓰기는 캡처를 실패시킨다.
+  - 구조상 보지 못하는 것: 인자에 없는 주소로 쓰는 커널(자기 버퍼 밖으로 쓰기), 스키마가 쓰기를 밝히지 않은 C++·CUDA 연산, dispatcher와 Triton 실행기 밖의 쓰기.
+- **연산 안(`ENTAIL=structure_inkernel`, `inkernel.py`):** entail이 소비 커널의 소스를 고친 커널을 만들어 그것을 실행한다.
+  - 고친 커널은 K 루프의 각 단계에서 A·B 타일과 두 스케일을 읽는 자리에서, 같은 주소를 32비트 단위로 다시 읽어 위치 가중 합을 만든다. 행렬곱이 쓰는 타일은 비동기 복사 경로에 그대로 둔다(그 타일을 함께 쓰면 행렬곱이 최대 1.9배 느려졌다).
+  - 같은 합을 생산 직후에 만든다. 활성값은 매 발급마다 작은 Triton 커널로, 가중치는 적재 때 한 번 만든다. vLLM의 활성값 생산자는 CUDA C++ 연산이라 고칠 수 없다.
+  - 두 합을 장치에서 비교하고, 다르면 `torch._assert_async`로 다음 연산 전에 장치를 멈춘다. 그 전에 플래그를 고정 호스트 메모리에 복사한다(그래프는 gate마다, eager는 링 버퍼).
+  - 고친 커널도 `kernel_ir`로 증명한다. 합계 버퍼(`integrity_sums`)로의 atomic 덧셈만 허용하고, 데이터로 정한 조건 분기 안에서는 저장·dot·loop·atomic을 허용하지 않는다.
+  - 소스의 고정 지점(vLLM 0.30 커널의 시그니처, 프로그램 id, 누적 줄, 루프 뒤 변환)이 없는 커널은 고치지 않고 참조 경로로 보낸다.
+  - 합의 정의: 32비트 단어 w의 위치 (r, c)에 대해 S = Σ w·hr(r)·hc(c) mod 2^32. hr, hc는 홀수가 되게 섞은 위치 값이다. 한 단어의 변화는 항상 S를 바꾼다.
 
 ## 지원하지 않는 것
 

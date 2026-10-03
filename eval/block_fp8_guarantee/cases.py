@@ -1,6 +1,8 @@
 """The scenarios (docs/semantic-guarantee-gpu-protocol.ko.md "첫 시나리오 묶음"): normal 8, consumer defects 12
 (four misreads x three timings), admission and unsupported 4; from v3 (L5.4c) also integrity 2 (bytes changed between
-the producer and the consumer, eager and at a graph replay). `cases(split, key)` gives the dev set (fixed seeds, used
+the producer and the consumer, eager and at a graph replay), from v5 (L5.4e) integrity 8 (six more ways to change
+them: a Triton kernel through a pointer to them, a Triton kernel past the end of its own buffer, the weight between
+calls, an activation scale, a Triton write captured in a graph, an operator whose schema says it only reads). `cases(split, key)` gives the dev set (fixed seeds, used
 for development and calibration) or the holdout (seeds and the free parameters drawn from a key that exists only
 after the freeze: the freeze manifest's hash). The holdout varies inputs and timings inside the four published
 misread classes; it is not a measure of new, unseen bug types, and it is not blind (no separate evaluator).
@@ -10,7 +12,9 @@ A step is one of:
   reload    {"op": "reload", "layer": i, "seed": s}        new weight values, processed again by the producer
   capture   {"op": "capture", "layer": i, "M": rows, "seed": s}   warm up, then capture quant + consumer + observer
   replay    {"op": "replay", "seed": s, "mut": 0|1}       new input into the captured buffer, then replay
-            (integrity cases: "corrupt": 0|1 on call and replay steps turns the write after the issue on)
+            (integrity cases: "corrupt": 0|1 on call and replay steps turns the write after the issue on; eagerly,
+            from v5, a step with "corrupt": 0 writes nothing; captured, the write is in the graph and a device flag
+            decides at each replay; "corrupt_how" says how the bytes are written, "alias" when absent)
   direct    {"op": "direct", "layer": i, "M": rows, "seed": s, "quant": "native"}   consumer called with an
             activation another quantizer made (vLLM's QuantFP8.forward_native)
 """
@@ -163,6 +167,51 @@ def integrity_cases(split, key):
     return [i1, i2]
 
 
+def _eager_integrity(cid, how, r, note, layers=1):
+    m = r.choice([32, 64, 128])
+    return {"id": cid, "group": "integrity", "N": N, "K": K, "out": "bfloat16", "layers": layers,
+            "wseed": [_seed(r) for _ in range(layers)], "expect": "integrity", "corrupt_bytes": 16,
+            "corrupt_how": how, "note": note,
+            "steps": [{"op": "call", "layer": 0, "M": m, "seed": _seed(r), "dist": "normal", "corrupt": 0,
+                       "role": "normal call"},
+                      {"op": "call", "layer": 0, "M": m, "seed": _seed(r), "dist": "normal", "corrupt": 1,
+                       "role": "bytes changed after the issue"},
+                      {"op": "call", "layer": 0, "M": m, "seed": _seed(r), "dist": "normal", "corrupt": 1,
+                       "role": "second changed call"}]}
+
+
+def integrity_cases_v5(split, key):
+    """Six cases added for v5 (M19 L5.4e) before its results, beside I1 and I2: other ways the bytes a producer issued
+    change before the consumer reads them. I4 and I8 are ways the approach "between the operations" cannot see by
+    construction (the written bytes are not among the writer's arguments; the writer's schema says it only reads)."""
+    out = [
+        _eager_integrity("I3-integrity-triton-eager", "triton", _rng(split, key, "I3"),
+                         "a Triton kernel handed a pointer to the activation's bytes flips the sign bit of the first "
+                         "values"),
+        _eager_integrity("I4-integrity-past-end-eager", "past_end", _rng(split, key, "I4"),
+                         "a Triton kernel handed another buffer writes past its end onto the activation's first values"),
+        dict(_eager_integrity("I5-integrity-weight-eager", "weight_alias", _rng(split, key, "I5"),
+                              "the weight's row 0 (all K bytes) is overwritten with -0.0 through a second tensor on its "
+                              "storage before the first changed call, and stays so"), corrupt_bytes=K),
+        _eager_integrity("I6-integrity-scale-eager", "scale_alias", _rng(split, key, "I6"),
+                         "the exponent's lowest bit of the first activation scale is flipped through a second tensor "
+                         "on its storage (that group's values doubled or halved)"),
+    ]
+    r = _rng(split, key, "I7")
+    m = r.choice([64, 128, 256])
+    out.append({"id": "I7-integrity-triton-graph", "group": "integrity", "N": N, "K": K, "out": "bfloat16",
+                "layers": 1, "wseed": [_seed(r)], "expect": "integrity", "corrupt_bytes": 16, "corrupt_how": "triton",
+                "note": "the Triton write of I3, captured in the graph; a device flag turns it on at a replay",
+                "steps": [{"op": "capture", "layer": 0, "M": m, "seed": _seed(r), "role": "normal warm-up + capture"},
+                          {"op": "replay", "seed": _seed(r), "corrupt": 0, "role": "normal replay"},
+                          {"op": "replay", "seed": _seed(r), "corrupt": 1, "role": "bytes changed at replay"}]})
+    out.append(_eager_integrity("I8-integrity-quiet-op-eager", "quiet_op", _rng(split, key, "I8"),
+                                "an operator whose schema says it only reads writes -0.0 over the activation's first "
+                                "values through the CUDA driver (no PyTorch write, no Triton launch, no version "
+                                "counter)"))
+    return out
+
+
 def known_dev_cases():
     """Development cases outside the 24: the known tile defect (a tuned table gives BLOCK_SIZE_K 256 at larger
     batches), which must be shown repaired and delivered."""
@@ -173,12 +222,16 @@ def known_dev_cases():
                        {"op": "call", "layer": 0, "M": 300, "seed": 23, "dist": "normal", "mut": 0}]}]
 
 
-def cases(split="dev", key="", integrity=True):
-    """The 24 scenarios, then (v3, integrity=True) the two integrity cases; then, for dev, the development case."""
+def cases(split="dev", key="", integrity=8):
+    """The 24 scenarios, then the integrity cases - 2 (v3, v4; integrity=True means 2), 8 (v5, the default) or none -
+    then, for dev, the development case."""
     out = normal_cases(split, key) + defect_cases(split, key) + admission_cases(split, key)
     assert len(out) == 24, len(out)
-    if integrity:
+    level = 2 if integrity is True else int(integrity or 0)
+    if level >= 2:
         out += integrity_cases(split, key)
+    if level >= 8:
+        out += integrity_cases_v5(split, key)
     if split == "dev":
         out += known_dev_cases()
     for c in out:
