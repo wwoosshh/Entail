@@ -51,11 +51,16 @@ def _storage_key(t):
 
 # --- the facts: a meaning on a tensor's memory, gone when the tensor is -----------------------------------------------
 
-def attach(t, names, kind="value", serial=0, pair=0, groups=None, sums=None, pending=()):
-    """Give the tensor `t` a meaning: a name per axis (None for an axis that means nothing the rule can pair)."""
+def attach(t, names, kind="value", serial=0, pair=0, groups=None, sums=None, pending=(), basis=None, label=None,
+           pointers=None):
+    """Give the tensor `t` a meaning: a name per axis (None for an axis that means nothing the rule can pair); for an
+    integer tensor the basis of its numbers; a label a loaded stride can refer to; for a table of pointers the
+    tensors it points to (each with its own meaning attached)."""
     key = _storage_key(t)
     fact = {"names": list(names), "kind": kind, "serial": serial, "pair": pair,
-            "groups": list(groups or [1] * len(names)), "sums": dict(sums or {}), "pending": list(pending)}
+            "groups": list(groups or [1] * len(names)), "sums": dict(sums or {}), "pending": list(pending),
+            "basis": basis, "label": label,
+            "pointers": None if pointers is None else [_snapshot(x) for x in pointers]}
     entry = [t.data_ptr(), tuple(t.shape), tuple(t.stride()), t.dtype, fact, None]
     with _LOCK:
         lst = _FACTS.setdefault(key, [])
@@ -78,6 +83,22 @@ def attach(t, names, kind="value", serial=0, pair=0, groups=None, sums=None, pen
     return fact
 
 
+def _snapshot(t):
+    """A pointer table's target: its layout and its fact, as they are now."""
+    f = fact_of(t)
+    return {"shape": tuple(int(x) for x in t.shape), "stride": tuple(int(x) for x in t.stride()),
+            "dtype": str(t.dtype), "fact": f}
+
+
+def _meaning_from(shape, stride, f, kind=None):
+    shape, stride = tuple(shape), tuple(stride)
+    if f is None or len(f["names"]) != len(shape):
+        return Meaning(tuple(Axis(None, n) for n in shape), shape, stride, kind or "value")
+    axes = tuple(Axis(nm, n, g) for nm, n, g in zip(f["names"], shape, f["groups"]))
+    return Meaning(axes, shape, stride, kind or f["kind"], f["serial"], f["pair"], basis=f.get("basis"),
+                   label=f.get("label"))
+
+
 def fact_of(t):
     lst = _FACTS.get(_storage_key(t))
     if not lst:
@@ -93,11 +114,7 @@ def meaning_of(t):
     """The Meaning of a tensor handed to a kernel: its layout from the tensor, its axes from its fact (unnamed
     without one)."""
     f = fact_of(t)
-    shape, stride = tuple(int(x) for x in t.shape), tuple(int(x) for x in t.stride())
-    if f is None or len(f["names"]) != len(shape):
-        return Meaning(tuple(Axis(None, n) for n in shape), shape, stride, "value"), None
-    axes = tuple(Axis(nm, n, g) for nm, n, g in zip(f["names"], shape, f["groups"]))
-    return Meaning(axes, shape, stride, f["kind"], f["serial"], f["pair"]), f
+    return _meaning_from(t.shape, t.stride(), f), f
 
 
 def _next_serial():
@@ -281,19 +298,40 @@ def _launch(fn, args, kwargs, grid):
             else:
                 written = kernel_ir.written_args(ttir)
                 meanings = {}
+                pointers = {}
                 # the serials in a cached configuration are those of the first launch; the rule only compares them
                 for k, t in tensors.items():
-                    m, _f = meaning_of(t)
+                    m, f = meaning_of(t)
                     if written is not None and k in written:
                         m.kind = "output"
                     meanings[k] = m
+                    if f is not None and f.get("pointers") is not None:
+                        m.kind = "pointers"
+                        names = []
+                        for i, tgt in enumerate(f["pointers"]):
+                            nm = f"@{k}[{i}]"
+                            tm = _meaning_from(tgt["shape"], tgt["stride"], tgt["fact"])
+                            if written is not None and written == {k}:
+                                pass
+                            meanings[nm] = tm
+                            names.append(nm)
+                        pointers[k] = names
                 if written is None:
-                    v = kernel_types.Verdict("unproven", "the IR does not say which arguments the kernel writes")
-                elif not written:
+                    # a store through a pointer the kernel loaded from a table: the table's targets are its outputs
+                    if pointers:
+                        for k in pointers:
+                            for nm in pointers[k]:
+                                meanings[nm].kind = "output"
+                        written = set()
+                        for k in pointers:
+                            written |= set(pointers[k])
+                    else:
+                        v = kernel_types.Verdict("unproven", "the IR does not say which arguments the kernel writes")
+                if written is not None and not written:
                     v = kernel_types.Verdict("unproven", "the kernel writes no argument")
-                else:
+                elif written is not None:
                     out_name = sorted(written)
-                    v = kernel_types.check_launch(ttir, meanings, scalars, g)
+                    v = kernel_types.check_launch(ttir, meanings, scalars, g, pointers=pointers or None)
                     inferred = v.inferred
                 _cache_put(ckey, {"kernel": name, "output": out_name, "inferred": inferred, "verdict": v.to_json()})
         except Exception as e:  # noqa: BLE001 - the checker failed: nothing is claimed

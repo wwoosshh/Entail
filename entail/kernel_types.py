@@ -76,6 +76,8 @@ class Meaning:
     pair: int = 0              # value: the serial of its scale (0: none); scale: the serial of its value
     reduced: Dict[str, Tuple[int, int]] = field(default_factory=dict)   # output: axes it must cover completely
     strict: bool = False       # output: nothing beyond the paired values and the declared sums may reach it
+    basis: Optional[str] = None    # an integer tensor: what its numbers mean (a position, a kv block, ...)
+    label: Optional[str] = None    # a name a loaded stride refers to ("stride:<label>:<dim>")
 
     def names(self):
         return [a.name for a in self.axes]
@@ -159,6 +161,67 @@ class V:
         return out
 
 
+class S(T):
+    """A symbolic integer: data the kernel read, or made from what it read, as a linear form over opaque leaves
+    (terms: leaf key -> (basis, coefficient: an int, or "stride:<label>:<dim>" for a stride it loaded)) plus a
+    launch-known part (const: E or None), with the basis of what the whole means (None: unknown)."""
+    __slots__ = ("basis", "terms", "const", "shape")
+
+    def __init__(self, why, basis=None, terms=(), const=None, shape=()):
+        super().__init__(why)
+        self.basis, self.terms, self.const, self.shape = basis, dict(terms), const, tuple(shape)
+
+    def leaf(self):
+        """(key, basis) when this is one leaf with coefficient 1, else None."""
+        if len(self.terms) == 1:
+            (k, (b, c)), = self.terms.items()
+            if c == 1:
+                return k, b
+        return None
+
+
+class Sym:
+    """A coordinate chosen by data: a symbolic leaf plus a launch-known offset."""
+    __slots__ = ("key", "basis", "off")
+
+    def __init__(self, key, basis, off):
+        self.key, self.basis, self.off = key, basis, off
+
+    def same(self, other):
+        if not isinstance(other, Sym) or self.key != other.key:
+            return False
+        a, b = np.asarray(self.off), np.asarray(other.off)
+        try:
+            shape = np.broadcast_shapes(a.shape, b.shape)
+            return bool(np.array_equal(np.broadcast_to(a, shape), np.broadcast_to(b, shape)))
+        except ValueError:
+            return False
+
+
+RELATIONS = {}            # (basis a, op, basis b) -> the basis of a op b; declared by whoever attaches the bases
+
+
+def relate(a, op, b, result):
+    """Declare what two bases make: relate("kv_block", "*", "block_size", "kv_slot")."""
+    RELATIONS[(a, op, b)] = result
+
+
+def _basis_of(op, a, b):
+    """The basis of a op b from the relations, or the one side's basis when the other means nothing."""
+    r = RELATIONS.get((a, op, b))
+    if r is not None:
+        return r
+    if op in ("+", "-") and b is None:
+        return a
+    if op == "+" and a is None:
+        return b
+    return None
+
+
+def _opaque(why, key, basis, shape):
+    return S(why, basis, {key: (basis, 1)}, None, shape)
+
+
 def _full(a, shape, P):
     """An array broadcast to (P, *shape) (a view, no copy)."""
     return np.broadcast_to(np.asarray(a), (P,) + tuple(shape))
@@ -199,6 +262,18 @@ def _first(bad):
     return tuple(int(t[0]) for t in np.nonzero(bad))
 
 
+def _same_coord(a, b):
+    """Two coordinates (arrays or Sym) that are the same, lane for lane."""
+    if isinstance(a, Sym) or isinstance(b, Sym):
+        return isinstance(a, Sym) and a.same(b)
+    a, b = np.asarray(a), np.asarray(b)
+    try:
+        shape = np.broadcast_shapes(a.shape, b.shape)
+    except ValueError:
+        return False
+    return bool(np.array_equal(np.broadcast_to(a, shape), np.broadcast_to(b, shape)))
+
+
 # --- evaluation -----------------------------------------------------------------------------------------------------
 
 class _Typed(KI._Run):
@@ -213,6 +288,213 @@ class _Typed(KI._Run):
         self.inferred = {}         # output argument -> {dim: axis name, ...}
         self.stores = {}           # output argument -> [(row lo, rows, column lo, columns) per storing program]
         self.active = np.ones(self.P, dtype=bool)   # the programs the current branch is taken by
+        self.iters = ()            # the loop iterations in progress (a leaf's key tells them apart)
+        self.data_depth = 0        # inside a branch or loop decided by data: stores cover what data decides
+        self.pointers = {}         # argument -> [target meaning names] (a table of pointers it holds)
+
+    def _key(self, op):
+        return (op.results[0] if op.results else op.name, self.iters)
+
+    def _leaf(self, op, basis, shape=()):
+        return _opaque(f"a value loaded from {op.name}", self._key(op), basis, shape)
+
+    # -- symbolic integers --
+
+    def _sym_int(self, n, op, args, shape):  # noqa: C901
+        """An integer operation with a symbolic operand: the linear form and the basis it makes."""
+        shape = tuple(shape or ())
+        why = "a value made from values read at run time"
+        if n in KI._INT_CASTS:
+            x = args[0]
+            return S(x.why, x.basis, x.terms, x.const, shape) if isinstance(x, S) else T(x.why)
+        if n == "arith.cmpi":
+            return T("a comparison with a value read at run time")
+        a, b = args
+        sa, sb = isinstance(a, S), isinstance(b, S)
+        if (isinstance(a, T) and not sa) or (isinstance(b, T) and not sb):
+            return T((a if isinstance(a, T) else b).why)
+        if n in ("arith.addi", "arith.subi"):
+            sign = 1 if n == "arith.addi" else -1
+            sym = "+" if sign == 1 else "-"
+            if sa and sb:
+                ba, bb = a.basis, b.basis
+                rel = RELATIONS.get((ba, sym, bb))
+                if rel is not None:
+                    return _opaque(why, self._key(op), rel, shape)
+                # two meanings added without a rule mean nothing as a value, but as an address each term still
+                # addresses its own axis: the linear form is kept
+                terms = dict(a.terms)
+                for k, (bs, c) in b.terms.items():
+                    c0 = terms.get(k, (None, 0))[1]
+                    if isinstance(c, str) or isinstance(c0, str):
+                        if sign == -1 or k in terms:
+                            return _opaque(why, self._key(op), None, shape)
+                        terms[k] = (bs, c)
+                    elif k in terms:
+                        terms[k] = (terms[k][0], c0 + sign * c)
+                    else:
+                        terms[k] = (bs, c if sign == 1 else -c)
+                terms = {k: v for k, v in terms.items() if v[1] != 0}
+                return S(a.why, _basis_of(sym, ba, bb), terms, self._const_add(a.const, b.const, sign, shape), shape)
+            x, e = (a, b) if sa else (b, a)
+            e = self._int(e)
+            if not isinstance(e, E):
+                raise Unmodelled(f"{n} of a symbolic value and a {type(e).__name__}")
+            if sa:
+                return S(x.why, x.basis, x.terms, self._const_add(x.const, e, sign, shape), shape)
+            terms = {}
+            for k, (bs, c) in x.terms.items():
+                if isinstance(c, str):
+                    return _opaque(why, self._key(op), None, shape)
+                terms[k] = (bs, -c)
+            return S(x.why, None, terms, self._const_add(e, x.const, -1, shape), shape)
+        if n == "arith.muli":
+            if sa and sb:
+                la, lb = a.leaf(), b.leaf()
+                if la and lb and a.const is None and b.const is None:
+                    if lb[1] is not None and str(lb[1]).startswith("stride:"):
+                        return S(a.why, a.basis, {la[0]: (la[1], lb[1])}, None, shape)
+                    if la[1] is not None and str(la[1]).startswith("stride:"):
+                        return S(b.why, b.basis, {lb[0]: (lb[1], la[1])}, None, shape)
+                return _opaque("a product of values read at run time", self._key(op),
+                               RELATIONS.get((a.basis, "*", b.basis)), shape)
+            x, e = (a, b) if sa else (b, a)
+            e = self._int(e)
+            if not isinstance(e, E) or not e.scalar_only() or np.unique(e.s).size != 1:
+                return _opaque("a product of a value read at run time", self._key(op), None, shape)
+            m = int(e.s.flat[0])
+            if m == 1:
+                return S(x.why, x.basis, x.terms, x.const, shape)
+            terms = {}
+            for k, (bs, c) in x.terms.items():
+                if isinstance(c, str):
+                    return _opaque("a product of a value read at run time", self._key(op), None, shape)
+                terms[k] = (bs, c * m)
+            const = None if x.const is None else self._mul(x.const, E((), s=np.full((1,), m, dtype=np.int64),
+                                                                        w=x.const.w))
+            return S(x.why, RELATIONS.get((x.basis, "*", None)), terms, const, shape)
+        if n in ("arith.divsi", "arith.divui", "arith.remsi", "arith.remui", "arith.floordivsi",
+                 "arith.ceildivsi", "arith.ceildivui"):
+            sym = "//" if "div" in n else "%"
+            ba = a.basis if sa else None
+            bb = b.basis if sb else None
+            return _opaque("a quotient of values read at run time", self._key(op), RELATIONS.get((ba, sym, bb)),
+                           shape)
+        return _opaque(why, self._key(op), None, shape)
+
+    def _const_add(self, x, y, sign, shape):
+        """x + sign * y for launch-known parts that may be None."""
+        if x is None and y is None:
+            return None
+        if x is None:
+            return y if sign == 1 else self._mul(y, E((), s=np.full((1,), -1, dtype=np.int64), w=y.w))
+        if y is None:
+            return x
+        if x.shape != y.shape:
+            if not x.shape:
+                x = E(y.shape, s=x.s, w=x.w)
+            elif not y.shape:
+                y = E(x.shape, s=y.s, w=y.w)
+            else:
+                raise Unmodelled("a symbolic sum of launch-known parts of different shapes")
+        return self._add(x, y, sign)
+
+    def _ops(self, ops, env):
+        """kernel_ir's, with cf.cond_br: the two blocks follow, each ending in a return."""
+        i = 0
+        while i < len(ops):
+            op = ops[i]
+            if op.name == "cf.cond_br":
+                labels = ["^" + x for x in re.findall(r'\^(bb\d+)', op.text)]
+                blocks = {}
+                cur = None
+                for o in ops[i + 1:]:
+                    if o.name.startswith("^bb"):
+                        cur = o.name.rstrip(":")
+                        blocks[cur] = []
+                    elif cur is not None:
+                        blocks[cur].append(o)
+                if len(labels) != 2 or any(lb not in blocks for lb in labels):
+                    raise Unmodelled("a conditional branch whose blocks are not found")
+                for lb in labels:
+                    if any(o.name in ("cf.br", "cf.cond_br") for o in blocks[lb]):
+                        raise Unmodelled("a conditional branch whose block branches again")
+                cond = self._get(env, op.operands[0])
+                self._branch(cond, blocks[labels[0]], blocks[labels[1]], env)
+                return
+            if op.name.startswith("^bb"):
+                raise Unmodelled("a block label without a branch to it")
+            self._op(op, env)
+            i += 1
+
+    def _branch(self, cond, then_ops, else_ops, env):
+        """Both blocks of a two-way branch: by program when the launch decides the condition, under data when the
+        kernel reads it."""
+        if isinstance(cond, T):
+            self.data_depth += 1
+            try:
+                for body in (then_ops, else_ops):
+                    inner = dict(env)
+                    self._ops(body, inner)
+            finally:
+                self.data_depth -= 1
+            return
+        c = self._int(cond)
+        if not isinstance(c, E) or not c.scalar_only():
+            raise Unmodelled("a branch whose condition differs between lanes")
+        cv = np.broadcast_to(c.s.astype(bool), (self.P,))
+        saved = self.active
+        try:
+            for take, body in ((cv, then_ops), (~cv, else_ops)):
+                if not (saved & take).any():
+                    continue
+                self.active = saved & take
+                inner = dict(env)
+                self._ops(body, inner)
+        finally:
+            self.active = saved
+
+    def _for(self, op, env):
+        """kernel_ir's loop, or one symbolic iteration when the bounds are read at run time (or differ between
+        programs): the induction variable is a leaf with the bounds' basis, and what the body stores covers what
+        the data decides."""
+        lb, ub, st = (self._get(env, op.extra[k]) for k in ("lb", "ub", "step"))
+        plain = all(isinstance(v, E) and v.scalar_only() and np.unique(v.s).size == 1 for v in (lb, ub, st))
+        if plain:
+            saved = self.iters
+            try:
+                self.iters = saved + ((op.extra["iv"], "unrolled"),)
+                return super()._for(op, env)
+            finally:
+                self.iters = saved
+        if isinstance(st, T) or not isinstance(st, E):
+            raise Unmodelled("a loop whose step is read at run time")
+        basis = None
+        for v in (lb, ub):
+            if isinstance(v, S) and v.basis is not None:
+                basis = v.basis
+                break
+        iv = _opaque("a loop index whose bounds are read at run time", (op.extra["iv"], self.iters), basis, ())
+        carried = [self._get(env, v) for _k, v in op.extra["iter"]]
+        names = [kk for kk, _v in op.extra["iter"]]
+        inner = dict(env)
+        inner[op.extra["iv"]] = iv
+        for kk, v in zip(names, carried):
+            inner[kk] = v
+        saved = self.iters
+        self.data_depth += 1
+        try:
+            self.iters = saved + ((op.extra["iv"], "symbolic"),)
+            self._ops(op.body, inner)
+        finally:
+            self.iters = saved
+            self.data_depth -= 1
+        base = op.results[0].split("#")[0] if op.results else None
+        for i, _v in enumerate(carried):
+            if base:
+                env[f"{base}#{i}"] = T("a value carried by a loop whose bounds are read at run time")
+        if len(op.results) == 1 and carried:
+            env[op.results[0]] = T("a value carried by a loop whose bounds are read at run time")
 
     def _active_lanes(self, ndim):
         return self.active.reshape((-1,) + (1,) * ndim)
@@ -224,7 +506,19 @@ class _Typed(KI._Run):
         others compute): both branches are followed, each with the programs that take it active; what they yield is
         merged program by program. A condition read from data, or one shared by every program: kernel_ir's."""
         if isinstance(cond, T):
-            return super()._if(op, env, cond)
+            branches = [op.body, op.extra.get("else", [])]
+            self.data_depth += 1
+            yields = []
+            try:
+                for body in branches:
+                    inner = dict(env)
+                    self._ops(body, inner)
+                    yields.append(inner.get("__yield__", []))
+            finally:
+                self.data_depth -= 1
+            for name, a, b in zip(op.results, yields[0], yields[1]):
+                env[name] = self._merge_data(a, b)
+            return
         c = self._int(cond)
         if not isinstance(c, E) or not c.scalar_only():
             raise Unmodelled("a branch whose condition differs between lanes")
@@ -244,6 +538,35 @@ class _Typed(KI._Run):
             self.active = saved
         for name, a, b in zip(op.results, yields[0], yields[1]):
             env[name] = self._merge(cv, a, b)
+
+    def _merge_data(self, a, b):
+        """What a branch decided by data yields: a symbolic value when both sides are integers (their common basis,
+        if any), a typed value only when both sides mean the same."""
+        if isinstance(a, V) and isinstance(b, V):
+            if a.const is not None and b.const is not None:
+                return V(a.shape, const=a.const if a.const == b.const else None, fn=a.const != b.const)
+            if a.shape == b.shape and set(a.coords) == set(b.coords) and set(a.sums) == set(b.sums) and \
+                    a.serials == b.serials and a.applied == b.applied and \
+                    all(a.coords[k][1] == b.coords[k][1] and _same_coord(a.coords[k][0], b.coords[k][0])
+                        for k in a.coords):
+                return a.copy(extras=tuple(dict.fromkeys(a.extras + b.extras)), fn=a.fn or b.fn)
+            raise Unmodelled("a value chosen by data read at run time whose two choices differ in meaning")
+        if isinstance(a, V) or isinstance(b, V):
+            raise Unmodelled("a float chosen by data against a non-float")
+        if isinstance(a, Ptr) or isinstance(b, Ptr):
+            raise Unmodelled("a pointer chosen by data read at run time")
+        ba = a.basis if isinstance(a, S) else None
+        bb = b.basis if isinstance(b, S) else None
+        if ba == bb:
+            basis = ba
+        elif bb is None and isinstance(b, E):
+            basis = ba
+        elif ba is None and isinstance(a, E):
+            basis = bb
+        else:
+            basis = None
+        shape = a.shape if isinstance(a, (S, E)) else b.shape if isinstance(b, (S, E)) else ()
+        return _opaque("a value chosen by data read at run time", ("select", self.iters, id(a), id(b)), basis, shape)
 
     def _merge(self, cv, a, b):
         """a where the program's condition holds, else b."""
@@ -339,6 +662,28 @@ class _Typed(KI._Run):
         dims = self._dims(arg, m)
         lead = (1,) * ndim
         coords = None
+        syms = {}
+        if isinstance(off, S):
+            # the symbolic terms, each a multiple of one stride (an int, or the stride the kernel loaded)
+            for k, (basis, c) in off.terms.items():
+                dim = None
+                if isinstance(c, str):
+                    parts = c.split(":")
+                    if len(parts) == 3 and parts[1] == (m.label or arg) and parts[2].isdigit():
+                        dim = int(parts[2])
+                else:
+                    for st, n, i in dims:
+                        if c == st:
+                            dim = i
+                            break
+                if dim is None:
+                    raise _Fail("unproven", f"{what} addresses {arg} by a value read at run time that this module "
+                                            f"cannot take apart by the strides ({off.why})")
+                keys, b0 = syms.get(dim, ((), None))
+                syms[dim] = (keys + (k,), _basis_of("+", b0, basis) if keys else basis)
+            off = off.const if off.const is not None else E(off.shape, s=np.zeros((1,), dtype=np.int64), w=None)
+            if off.shape != tuple(lead) and len(off.shape) != ndim:
+                raise Unmodelled(f"{what}: a symbolic address whose known part has another shape")
         if off.d is None:
             # kept apart: the scalar part in mixed radix, then each lane axis's part a multiple of one stride
             coords = {}
@@ -388,6 +733,8 @@ class _Typed(KI._Run):
             if i not in coords:
                 coords[i] = np.zeros((1,) + lead, dtype=np.int64)
         for s, n, i in dims:
+            if i in syms:
+                continue                     # a coordinate chosen by data: its bounds are the data's
             c = coords[i]
             out = (c < 0) | (c >= n)
             bad = out if valid is None else (valid & out)
@@ -397,6 +744,13 @@ class _Typed(KI._Run):
                 raise _Fail("violation", f"{what} addresses {arg} outside its {tuple(m.shape)} elements (coordinate "
                                          f"{int(cc[idx])} on axis {i} of size {n})",
                             {"program_chunk_index": self.chunk_index, "lane": list(idx[1:])})
+        for i, (k, basis) in syms.items():
+            ax = m.axes[i] if i < len(m.axes) else None
+            if ax is not None and ax.name is not None and basis is not None and ax.name != basis:
+                raise _Fail("violation", f"{what} addresses {arg} along its axis '{ax.name}' with a number that "
+                                         f"means a {basis}", {"program_chunk_index": self.chunk_index, "axis": i,
+                                                                "basis": basis})
+            coords[i] = Sym(k, basis, coords[i])
         return coords
 
     def _load(self, op, p, mask):
@@ -472,6 +826,12 @@ class _Typed(KI._Run):
                                                  f"{int(first[idx[0]])}", {"program_chunk_index": idx[0],
                                                                           "lane": list(idx[1:]), "axis": key})
             elif cx is not None and cy is not None and isinstance(key, str):
+                if isinstance(cx[0], Sym) or isinstance(cy[0], Sym):
+                    if not _same_coord(cx[0], cy[0]):
+                        raise _Fail("unproven", f"whether {how} pairs the same '{key}' depends on data read at "
+                                                f"run time")
+                    coords[key] = cx
+                    continue
                 bad = self._eq(cx[0], cx[1], cy[0], cy[1], both)
                 self.checks += 1
                 if np.any(bad):
@@ -722,12 +1082,12 @@ class _Typed(KI._Run):
             raise _Fail("violation", f"the kernel writes to {ptr.arg}, which is {m.kind} it reads, not its output")
         if ptr.taint is not None:
             raise _Fail("unproven", f"the output address is chosen by data ({ptr.taint})")
-        if isinstance(mask, T):
-            raise Unmodelled("a store masked by data")
         if not isinstance(val, V):
-            if isinstance(val, T):
-                raise _Fail("unproven", "the value stored is data read at run time, not a typed value")
+            if isinstance(val, (T, E, Mk)):
+                return self._store_int(ptr, val, mask, m)
             raise Unmodelled(f"a store of a {type(val).__name__}")
+        if isinstance(mask, T):
+            raise Unmodelled("a store of a float value masked by data")
         stored = None if mask is None else _as_bool_full(mask)
         for alt in _alts(val):
             try:
@@ -736,6 +1096,66 @@ class _Typed(KI._Run):
                 if val.alts is not None and e.verdict == "violation":
                     raise _Fail("possible", f"a value chosen at run time: {e.why}", e.example)
                 raise
+
+    def _store_int(self, ptr, val, mask, m):
+        """An integer stored: its basis must be the output's, and it lands where the address says."""
+        P = self.P
+        shape = tuple(ptr.off.shape)
+        inferred = self.inferred.setdefault(ptr.arg, {})
+        if isinstance(mask, T):
+            sv = None
+            inferred["coverage"] = "data-dependent (a store masked by data)"
+        else:
+            sv = np.ones((P,) + shape, dtype=bool) if mask is None else _full(_as_bool_full(mask), shape, P)
+            if not self.active.all():
+                sv = sv & self._active_lanes(len(shape))
+        cs = self._coords_of(ptr.arg, ptr.off, sv, "a store")
+        basis = val.basis if isinstance(val, S) else None
+        if m.basis is not None:
+            if basis is not None and basis != m.basis:
+                raise _Fail("violation", f"a number that means a {basis} is stored into {ptr.arg}, which holds "
+                                         f"{m.basis}s", {"program_chunk_index": self.chunk_index})
+            if basis is None:
+                inferred["values"] = (f"a value whose basis is not known is stored ({val.why})" if isinstance(val, T)
+                                      else "launch-known values")
+        self.checks += 1
+        if sv is None or self.data_depth or any(isinstance(c, Sym) for c in cs.values()):
+            inferred["coverage"] = inferred.get("coverage") or "data-dependent"
+            return
+        self._footprint(ptr.arg, cs, sv, shape)
+
+    def _footprint(self, arg, cs, sv, shape):
+        P = self.P
+        full = (P,) + shape
+        live = sv.reshape(P, -1).any(axis=1)
+        if len(shape) == 2:
+            sr, sc = sv.any(axis=2), sv.any(axis=1)
+            if not np.array_equal(sv, sr[:, :, None] & sc[:, None, :]):
+                raise Unmodelled("a store mask that is not a set of rows times a set of columns")
+            r = cs[0] if 0 in cs else np.zeros((1, 1, 1), dtype=np.int64)
+            c = cs[1] if 1 in cs else np.zeros((1, 1, 1), dtype=np.int64)
+            rows = np.where(sr, np.broadcast_to(r[:, :, 0], (P, shape[0])), -1) if r.shape[2] == 1 else \
+                np.where(sv, r, -1).max(axis=2)
+            cols = np.where(sc, np.broadcast_to(c[:, 0, :], (P, shape[1])), -1) if c.shape[1] == 1 else \
+                np.where(sv, c, -1).max(axis=1)
+            rlo, rcnt = _ranges(rows, sr, "one output row is stored twice by one program",
+                                "the rows a program stores are not one range", twice="unproven")
+            clo, ccnt = _ranges(cols, sc, "one output column is stored twice by one program",
+                                "the columns a program stores are not one range", twice="unproven")
+            self.stores.setdefault(arg, []).append((rlo[live], rcnt[live], clo[live], ccnt[live]))
+        elif len(shape) == 1:
+            x = np.broadcast_to(cs[0], full)
+            lo, cnt = _ranges(np.where(sv, x, -1), sv, "one output element is stored twice by one program",
+                              "the elements a program stores are not one range", twice="unproven")
+            self.stores.setdefault(arg, []).append((lo[live], cnt[live], np.zeros(int(live.sum()), dtype=np.int64),
+                                                    np.ones(int(live.sum()), dtype=np.int64)))
+        elif len(shape) == 0:
+            x = np.broadcast_to(cs[0], (P,))
+            self.stores.setdefault(arg, []).append((x[live], np.ones(int(live.sum()), dtype=np.int64),
+                                                    np.zeros(int(live.sum()), dtype=np.int64),
+                                                    np.ones(int(live.sum()), dtype=np.int64)))
+        else:
+            raise Unmodelled(f"a store of {len(shape)} lane dimensions")
 
     def _store_one(self, ptr, val, stored, m):
         P = self.P
@@ -747,6 +1167,7 @@ class _Typed(KI._Run):
         if val.data_addr:
             raise _Fail("unproven", f"the value stored was read at an address chosen by data ({val.data_addr})")
         cs = self._coords_of(ptr.arg, ptr.off, sv, "a store")
+        symbolic = any(isinstance(c, Sym) for c in cs.values())
         vv = _ones(shape) if val.valid is None else val.valid
         if np.any(sv & ~vv):
             raise _Fail("violation", "the kernel stores output lanes whose value has no element (masked-out operand "
@@ -759,6 +1180,11 @@ class _Typed(KI._Run):
                 if c is None:
                     raise _Fail("unproven", f"the value stored has no coordinate on the output's axis '{ax.name}' "
                                             f"(it derives from {sorted(str(k) for k in val.coords) or 'nothing'})")
+                if isinstance(oc, Sym) or isinstance(c[0], Sym):
+                    if not _same_coord(oc, c[0]):
+                        raise _Fail("unproven", f"whether the value is stored at its own '{ax.name}' depends on "
+                                                f"data read at run time")
+                    continue
                 bad = self._eq(oc, 1, c[0], c[1], sv)
                 self.checks += 1
                 if np.any(bad):
@@ -770,6 +1196,11 @@ class _Typed(KI._Run):
             else:
                 found = None
                 for key, (arr, g) in val.coords.items():
+                    if isinstance(oc, Sym) or isinstance(arr, Sym):
+                        if g == 1 and _same_coord(oc, arr):
+                            found = key
+                            break
+                        continue
                     if g == 1 and not np.any(self._eq(oc, 1, arr, 1, sv)):
                         found = key
                         break
@@ -786,6 +1217,8 @@ class _Typed(KI._Run):
                 raise _Fail("violation", f"the output is the sum over '{name}', but the value stored is not summed "
                                          f"over it")
         live = sv.reshape(P, -1).any(axis=1)
+        if symbolic or self.data_depth:
+            live = np.zeros(P, dtype=bool)        # nothing is claimed complete under data
         for name, rs in val.sums.items():
             if name in m.reduced:
                 lo, hi = m.reduced[name]
@@ -812,35 +1245,12 @@ class _Typed(KI._Run):
             inferred["pending_scales"] = sorted(k for k, v in val.applied.items() if v == 0)
             if val.extras:
                 inferred["extras"] = list(val.extras)
-        if len(shape) == 2:
-            sr, sc = sv.any(axis=2), sv.any(axis=1)
-            if not np.array_equal(sv, sr[:, :, None] & sc[:, None, :]):
-                raise Unmodelled("a store mask that is not a set of rows times a set of columns")
-            r = cs[0] if 0 in cs else np.zeros((1, 1, 1), dtype=np.int64)
-            c = cs[1] if 1 in cs else np.zeros((1, 1, 1), dtype=np.int64)
-            rows = np.where(sr, np.broadcast_to(r[:, :, 0], (P, shape[0])), -1) if r.shape[2] == 1 else \
-                np.where(sv, r, -1).max(axis=2)
-            cols = np.where(sc, np.broadcast_to(c[:, 0, :], (P, shape[1])), -1) if c.shape[1] == 1 else \
-                np.where(sv, c, -1).max(axis=1)
-            rlo, rcnt = _ranges(rows, sr, "one output row is stored twice by one program",
-                                "the rows a program stores are not one range", twice="unproven")
-            clo, ccnt = _ranges(cols, sc, "one output column is stored twice by one program",
-                                "the columns a program stores are not one range", twice="unproven")
-            self.stores.setdefault(ptr.arg, []).append((rlo[live], rcnt[live], clo[live], ccnt[live]))
-        elif len(shape) == 1:
-            x = np.broadcast_to(cs[0], full)
-            lo, cnt = _ranges(np.where(sv, x, -1), sv, "one output element is stored twice by one program",
-                              "the elements a program stores are not one range", twice="unproven")
-            self.stores.setdefault(ptr.arg, []).append((lo[live], cnt[live], np.zeros(int(live.sum()),
-                                                                                       dtype=np.int64),
-                                                        np.ones(int(live.sum()), dtype=np.int64)))
-        elif len(shape) == 0:
-            x = np.broadcast_to(cs[0], (P,))
-            self.stores.setdefault(ptr.arg, []).append((x[live], np.ones(int(live.sum()), dtype=np.int64),
-                                                        np.zeros(int(live.sum()), dtype=np.int64),
-                                                        np.ones(int(live.sum()), dtype=np.int64)))
-        else:
-            raise Unmodelled(f"a store of {len(shape)} lane dimensions")
+        if symbolic or self.data_depth:
+            if m.strict or m.reduced:
+                raise _Fail("unproven", "whether the declared output is covered depends on data read at run time")
+            inferred["coverage"] = inferred.get("coverage") or "data-dependent"
+            return
+        self._footprint(ptr.arg, cs, sv, shape)
 
     # -- the ops --
 
@@ -873,7 +1283,47 @@ class _Typed(KI._Run):
                 r = self._load(op, p, mask)
                 r.masked_zero = mask is None or (isinstance(other, V) and other.is_zero())
             else:
-                return super()._op(op, env)
+                if not isinstance(p, Ptr):
+                    raise Unmodelled("a load from a non-pointer")
+                m = self.meanings.get(p.arg)
+                if m is not None and p.taint is None and p.off is not None and \
+                        (m.basis is not None or m.kind == "pointers" or any(a.name for a in m.axes)):
+                    # an integer with a meaning: its address is held to the tensor's axes like a float's
+                    valid = None if mask is None or isinstance(mask, T) else _as_bool_full(mask)
+                    if valid is not None and valid.ndim != 1 + len(shape or ()):
+                        valid = valid.reshape((-1,) + tuple(shape or ()))
+                    cs = self._coords_of(p.arg, p.off, valid, "a load")
+                    if m.kind == "pointers":
+                        c0 = cs.get(0)
+                        if isinstance(c0, Sym) or np.unique(np.asarray(c0)).size != 1:
+                            raise Unmodelled(f"a pointer read from {p.arg} at a position this chunk does not share")
+                        which = int(np.asarray(c0).flat[0])
+                        targets = self.pointers.get(p.arg) or []
+                        if not 0 <= which < len(targets):
+                            raise _Fail("violation", f"a pointer read from {p.arg} at {which}, which holds "
+                                                     f"{len(targets)} pointers")
+                        r = _opaque(f"a pointer read from {p.arg}", self._key(op), f"ptr:{targets[which]}",
+                                    shape or ())
+                    else:
+                        r = self._leaf(op, m.basis, shape or ())
+                else:
+                    return super()._op(op, env)
+        elif (n in KI._INT_BINARY or n in KI._INT_CASTS or n == "arith.cmpi") and any(isinstance(a, S) for a in args):
+            r = self._sym_int(n, op, args, shape)
+        elif n == "tt.addptr" and isinstance(args[1], S):
+            p, o = args
+            if p.taint is not None:
+                r = p
+            else:
+                base = p.off
+                if isinstance(base, S):
+                    r = Ptr(p.arg, self._sym_int("arith.addi", op, [base, o], shape or o.shape))
+                else:
+                    known = base is not None and (base.v or base.d is not None or np.any(base.s != 0))
+                    const = self._const_add(o.const, base, 1, shape or o.shape) if known else o.const
+                    r = Ptr(p.arg, S(o.why, o.basis, o.terms, const, shape or o.shape))
+        elif n == "tt.int_to_ptr" and isinstance(args[0], S) and str(args[0].basis).startswith("ptr:"):
+            r = Ptr(args[0].basis[4:], E(()))
         elif n == "tt.dot":
             a, b = args[0], args[1]
             c = args[2] if len(args) > 2 else None
@@ -911,6 +1361,9 @@ class _Typed(KI._Run):
                 r = V(shape or (), fn=True, extras=(f"{n}: a float made from an integer",))
             else:
                 return super()._op(op, env)
+        elif n == "arith.select" and isinstance(args[0], T) and not any(isinstance(a, V) for a in args) and \
+                any(isinstance(a, S) for a in args[1:]):
+            r = self._merge_data(args[1], args[2])
         elif n == "arith.select" and any(isinstance(a, V) for a in args):
             c, a, b = args
             if not (isinstance(a, V) and isinstance(b, V)):
@@ -995,7 +1448,7 @@ def _covers(ranges, lo, hi, live):
 
 
 def check_launch(ttir: str, meanings: Dict[str, Meaning], ints: Dict[str, int], grid,
-                 chunk_elements: int = CHUNK_ELEMENTS) -> Verdict:
+                 chunk_elements: int = CHUNK_ELEMENTS, pointers: Optional[Dict[str, list]] = None) -> Verdict:
     """The verdict on one launch: the kernel's IR, the meaning of each pointer argument (by parameter name), the
     integer (and float) arguments by name, the grid. Every argument of kind "output" is an output: a declared one
     (strict, or with reduced axes) must be covered completely, one whose axes were not named gets its meaning
@@ -1022,6 +1475,7 @@ def check_launch(ttir: str, meanings: Dict[str, Meaning], ints: Dict[str, int], 
         for ci, start in enumerate(range(0, total, per)):
             run = _Typed(fn, meanings, ints, KI._grid_pids((gx, gy, gz), start, min(total, start + per)), True, ci,
                          (gx, gy, gz))
+            run.pointers = pointers or {}
             run.run()
             checks += run.checks
             for k, v in run.stores.items():
@@ -1042,7 +1496,9 @@ def check_launch(ttir: str, meanings: Dict[str, Meaning], ints: Dict[str, int], 
     notes = []
     for name in outs:
         out = meanings[name]
-        declared = out.strict or bool(out.reduced) or all(a.name is not None for a in out.axes)
+        declared = out.strict or bool(out.reduced)          # a declared output must be covered completely
+        if not declared and "coverage" in (inferred.get(name) or {}):
+            continue                                         # what the launch covers is the data's; nothing claimed
         if len(out.shape) == 2:
             M, N = (int(x) for x in out.shape)
         elif len(out.shape) == 1:
