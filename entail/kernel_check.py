@@ -239,9 +239,31 @@ def _cache_path():
     return os.path.join(os.environ.get("ENTAIL_LOG_DIR", "entail_logs"), "types-cache.jsonl")
 
 
+_VERSION = None
+
+
+def _checker_version():
+    """The checker's own code, hashed: a verdict of an older checker is not reused."""
+    global _VERSION
+    if _VERSION is None:
+        import hashlib
+
+        h = hashlib.sha256()
+        here = os.path.dirname(os.path.abspath(__file__))
+        for name in ("kernel_ir.py", "kernel_types.py", "kernel_check.py"):
+            try:
+                with open(os.path.join(here, name), "rb") as f:
+                    h.update(f.read())
+            except OSError:
+                h.update(name.encode())
+        _VERSION = h.hexdigest()[:16]
+    return _VERSION
+
+
 def _cache():
     """The verdicts earlier processes decided, read once: a launch configuration is decided once per machine, not
-    once per process (the kernel's IR text, the meanings, the integer arguments and the grid make the key)."""
+    once per process (the checker's code, the kernel's IR text, the meanings, the integer arguments and the grid
+    make the key)."""
     global _CACHE
     if _CACHE is None:
         _CACHE = {}
@@ -295,8 +317,8 @@ def _launch(fn, args, kwargs, grid):
         cached = False
         try:
             ttir = fn.warmup(*args, grid=grid, **kwargs).asm["ttir"]
-            ckey = hashlib.sha256(json.dumps([ttir, [list(x) for x in sig], sorted(scalars.items()), list(g)],
-                                             default=str).encode()).hexdigest()
+            ckey = hashlib.sha256(json.dumps([_checker_version(), ttir, [list(x) for x in sig],
+                                              sorted(scalars.items()), list(g)], default=str).encode()).hexdigest()
             old = _cache().get(ckey)
             if old is not None:
                 v = kernel_types.Verdict(**{k: old["verdict"].get(k) for k in ("verdict", "why", "checks", "programs",
