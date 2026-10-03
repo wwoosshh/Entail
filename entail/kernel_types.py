@@ -585,7 +585,13 @@ class _Typed(KI._Run):
         other value, noted as sometimes replaced by a constant); by a launch-known condition (cond: an i1 E over the
         lanes) they are taken lane by lane."""
         if a.alts is not None or b.alts is not None:
-            return _combine_alts(_alts(a) + _alts(b))
+            alts = _alts(a) + _alts(b)
+            typed = [v for v in alts if v.const is None]
+            consts = [v for v in alts if v.const is not None]
+            if typed and consts:
+                note = "some elements replaced by the constants " + ", ".join(str(v.const) for v in consts)
+                return _combine_alts([v.copy(extras=v.extras + (note,), fn=True) for v in typed])
+            return _combine_alts(alts)
         if a.const is not None and b.const is not None:
             return V(np.broadcast_shapes(a.shape, b.shape), const=a.const if a.const == b.const else None,
                      fn=a.const != b.const)
@@ -727,7 +733,7 @@ class _Typed(KI._Run):
                         dim = int(parts[2])
                 else:
                     for st, n, i in dims:
-                        if c == st:
+                        if abs(c) == st:                 # a term subtracted (end - count) addresses the same axis
                             dim = i
                             break
                     if dim is None and not dims and m.shape:
@@ -740,7 +746,8 @@ class _Typed(KI._Run):
                     continue
                 keys, b0 = syms.get(dim, ((), None))
                 basis = _coordinate_basis(basis)
-                syms[dim] = (keys + (k,), _basis_of("+", b0, basis) if keys else basis)
+                sign = -1 if (not isinstance(c, str) and c < 0) else 1
+                syms[dim] = (keys + ((k, sign),), _basis_of("+" if sign == 1 else "-", b0, basis) if keys else basis)
             off = off.const if off.const is not None else E(off.shape, s=np.zeros((1,), dtype=np.int64), w=None)
             if off.shape != tuple(lead) and len(off.shape) != ndim:
                 raise Unmodelled(f"{what}: a symbolic address whose known part has another shape")
@@ -782,6 +789,10 @@ class _Typed(KI._Run):
                 c = np.floor_divide(rem, s)
                 rem = rem - c * s
                 coords[i] = c
+            if not dims and m.shape:
+                coords[0] = rem
+                rem = np.zeros_like(rem)
+                dims = [(1, 1, 0)]
             if valid is None:
                 v = True
             else:
@@ -1103,7 +1114,9 @@ class _Typed(KI._Run):
         for key, (arr, g) in x.coords.items():
             if arr.shape[lane] == 1:
                 coords[key] = (np.take(arr, 0, axis=lane), g)       # constant along the reduced lanes: carried
-            elif kind == "sum" and isinstance(key, str):
+            elif kind == "sum" and not isinstance(key, str):
+                continue                                           # an axis without a name: nothing to cover
+            elif kind == "sum":
                 if g != 1:
                     raise Unmodelled(f"a sum over the grouped axis '{key}'")
                 if any(s != 1 for i, s in enumerate(arr.shape) if i not in (0, lane)):
@@ -1470,6 +1483,9 @@ class _Typed(KI._Run):
                     raise Unmodelled(f"{n} of a float")
             elif isinstance(x, (E, Mk)) and n in ("arith.sitofp", "arith.uitofp"):
                 r = V(shape or (), fn=True, extras=(f"{n}: a float made from an integer",))
+            elif isinstance(x, T) and n in ("arith.sitofp", "arith.uitofp"):
+                r = V(shape or (), fn=True, extras=(f"{n}: a float made from data read at run time",),
+                      data_valid=True)
             else:
                 return super()._op(op, env)
         elif n == "arith.select" and isinstance(args[0], T) and not any(isinstance(a, V) for a in args) and \
