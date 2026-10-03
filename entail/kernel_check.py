@@ -241,8 +241,14 @@ def install_marlin_weights():
 _GRAPHS = []
 
 
-def _graph_key(cache_dir):
-    return f"graph:{_checker_version()}:{cache_dir}"
+def _graph_key(config, prefix=""):
+    """One key per engine configuration and compiled part: the configuration's own hash (what vLLM keys its compile
+    cache by), which both the compile backend and the loader of a cached compiled model know."""
+    try:
+        h = config.compute_hash()
+    except Exception:  # noqa: BLE001
+        h = "unknown"
+    return f"graph:{_checker_version()}:{h}:{prefix}"
 
 
 def _graph(graph, example_inputs):
@@ -273,9 +279,8 @@ def install_compile():
                 _write({"kind": "types_graph", "verdict": "unproven", "why": f"the check raised {type(e).__name__}: {e}"})
             out = orig(self, graph, example_inputs)
             try:
-                cache_dir = getattr(self.compilation_config, "local_cache_dir", None)
-                if v is not None and cache_dir:
-                    _cache_put(_graph_key(cache_dir), {"graph": v})
+                if v is not None:
+                    _cache_put(_graph_key(self.vllm_config, getattr(self, "prefix", "")), {"graph": v})
             except Exception:  # noqa: BLE001
                 _count("graph_cache_write_failed")
             return out
@@ -295,20 +300,21 @@ def install_compile_cache():
         @functools.wraps(orig)
         def load(self, path, *args, **kwargs):
             try:
-                cache_dir = os.path.dirname(os.path.dirname(str(path)))
-                old = _cache().get(_graph_key(cache_dir))
-                if old is None:
+                head = _graph_key(self.vllm_config)
+                olds = [rec for key, rec in _cache().items() if key.startswith(head)]
+                if not olds:
                     _count("graph_cache_declined")
                     _write({"kind": "types_graph", "verdict": "deferred", "why": "the compiled model in vLLM's cache "
                             "has no verdict from this checker; it is compiled once more so the rule sees its graph",
-                            "cache_dir": cache_dir})
+                            "path": str(path)})
                     return None
-                v = old.get("graph")
-                if v:
-                    _GRAPHS.append(v)
-                    _count(f"graph_{v.get('verdict', 'unproven')}")
-                    _count("graph_from_cache")
-                    _write(dict(v, kind="types_graph", cached=True))
+                for old in olds:
+                    v = old.get("graph")
+                    if v:
+                        _GRAPHS.append(v)
+                        _count(f"graph_{v.get('verdict', 'unproven')}")
+                        _count("graph_from_cache")
+                        _write(dict(v, kind="types_graph", cached=True))
             except Exception:  # noqa: BLE001
                 _count("graph_cache_failed")
             return orig(self, path, *args, **kwargs)
@@ -430,6 +436,16 @@ def _launch(fn, args, kwargs, grid):
         cached = False
         try:
             ttir = fn.warmup(*args, grid=grid, **kwargs).asm["ttir"]
+            dump = os.environ.get("ENTAIL_TYPES_DUMP_TTIR")
+            if dump:                     # a research aid: the IR the verdict was decided on, to replay it offline
+                try:
+                    os.makedirs(dump, exist_ok=True)
+                    short = hashlib.sha256(ttir.encode()).hexdigest()[:8]
+                    with open(os.path.join(dump, f"{name.rsplit('.', 1)[-1]}-{short}.ttir"), "w",
+                              encoding="utf-8") as f:
+                        f.write(ttir)
+                except OSError:
+                    pass
             ckey = hashlib.sha256(json.dumps([_checker_version(), ttir, [list(x) for x in sig],
                                               sorted(scalars.items()), list(g)], default=str).encode()).hexdigest()
             old = _cache().get(ckey)
