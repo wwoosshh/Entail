@@ -128,11 +128,12 @@ class V:
     """A float tensor value in the kernel, typed by where its elements come from. Every array has the rank
     1 + len(shape) (the program axis first) and is as small as its variation: a size of 1 where it is constant."""
     __slots__ = ("shape", "coords", "valid", "sums", "serials", "applied", "extras", "fn", "const", "leaf",
-                 "masked_zero", "data_addr", "alts", "scale_of", "scale_serial", "data_valid")
+                 "masked_zero", "data_addr", "alts", "scale_of", "scale_serial", "data_valid", "sym")
 
     def __init__(self, shape, coords=None, valid=None, sums=None, serials=frozenset(), applied=None, extras=(),
                  fn=False, const=None, leaf=None, masked_zero=True, data_addr=None, alts=None, scale_of=0,
-                 scale_serial=0, data_valid=False):
+                 scale_serial=0, data_valid=False, sym=None):
+        self.sym = sym                        # an integer value's reading as a number (an S), when it has one
         self.data_valid = data_valid          # which lanes hold elements is decided by data the kernel read
         self.shape = tuple(shape)
         self.coords = dict(coords or {})      # name -> (array, group)
@@ -156,7 +157,7 @@ class V:
     def copy(self, **kw):
         out = V(self.shape, self.coords, self.valid, self.sums, self.serials, self.applied, self.extras, self.fn,
                 self.const, self.leaf, self.masked_zero, self.data_addr, self.alts, self.scale_of,
-                self.scale_serial, self.data_valid)
+                self.scale_serial, self.data_valid, self.sym)
         for k, v in kw.items():
             setattr(out, k, v)
         return out
@@ -348,6 +349,23 @@ class _Typed(KI._Run):
         return _opaque(f"a value loaded from {op.name}", self._key(op), basis, shape)
 
     # -- symbolic integers --
+
+    def _int_sym(self, n, op, args, shape):
+        """The number an integer operation on typed integers makes (None when a value has no number reading, or the
+        operation none this module follows)."""
+        ints = []
+        for a in args:
+            if isinstance(a, V):
+                if a.sym is None:
+                    return None
+                ints.append(a.sym)
+            else:
+                ints.append(a)
+        try:
+            r = self._sym_int(n, op, ints, shape)
+        except Unmodelled:
+            return None
+        return r if isinstance(r, S) else None
 
     def _sym_int(self, n, op, args, shape):  # noqa: C901
         """An integer operation with a symbolic operand: the linear form and the basis it makes."""
@@ -631,8 +649,11 @@ class _Typed(KI._Run):
                     a.serials == b.serials and a.applied == b.applied and \
                     all(a.coords[k][1] == b.coords[k][1] and _same_coord(a.coords[k][0], b.coords[k][0])
                         for k in a.coords):
-                return a.copy(extras=tuple(dict.fromkeys(a.extras + b.extras)), fn=a.fn or b.fn)
-            return self._select_v(None, a, b)
+                return a.copy(extras=tuple(dict.fromkeys(a.extras + b.extras)), fn=a.fn or b.fn,
+                              sym=self._both_sym(a, b))
+            r = self._select_v(None, a, b)
+            r.sym = self._both_sym(a, b)
+            return r
         if isinstance(a, V) or isinstance(b, V):
             raise Unmodelled("a float chosen by data against a non-float")
         if isinstance(a, Ptr) or isinstance(b, Ptr):
@@ -728,7 +749,8 @@ class _Typed(KI._Run):
                            for (la, ca), (lb, cb) in zip(a.sums[k], b.sums[k])]
             return V(a.shape, coords, np.where(sel, va, vb), sums, a.serials, a.applied,
                      tuple(dict.fromkeys(a.extras + b.extras)), a.fn or b.fn,
-                     masked_zero=a.masked_zero and b.masked_zero, data_addr=a.data_addr or b.data_addr)
+                     masked_zero=a.masked_zero and b.masked_zero, data_addr=a.data_addr or b.data_addr,
+                     sym=self._both_sym(a, b))
         if isinstance(a, Ptr) and isinstance(b, Ptr):
             if a.arg != b.arg or a.taint is not None or b.taint is not None:
                 raise Unmodelled("a branch that yields pointers into different tensors")
@@ -1268,6 +1290,8 @@ class _Typed(KI._Run):
             raise _Fail("violation", f"the kernel writes to {ptr.arg}, which is {m.kind} it reads, not its output")
         if ptr.taint is not None:
             raise _Fail("unproven", f"the output address is chosen by data ({ptr.taint})")
+        if isinstance(val, V) and val.sym is not None:
+            val = val.sym
         if not isinstance(val, V):
             if isinstance(val, (T, E, Mk)):
                 return self._store_int(ptr, val, mask, m)
@@ -1468,6 +1492,8 @@ class _Typed(KI._Run):
         args = [self._get(env, a) for a in op.operands]
         shape = KI._shape(op.rtype)
         r = None
+        if n == "tt.addptr" and len(args) == 2 and isinstance(args[1], V) and args[1].sym is not None:
+            args = [args[0], args[1].sym]
         if n == "arith.constant":
             et = KI._elem(op.rtype)
             if et.startswith("f") or et.startswith("bf"):
@@ -1499,6 +1525,8 @@ class _Typed(KI._Run):
                 r.masked_zero = mask is None or (isinstance(other, V) and other.is_zero()) or \
                     (not (et.startswith("f") or et.startswith("bf")) and isinstance(other, E) and
                      not other.v and other.d is None and not np.any(other.s))
+                if typed_int:
+                    r.sym = self._leaf(op, m.basis, shape or ())
             else:
                 if m is not None and p.taint is None and p.off is not None and \
                         (m.basis is not None or m.kind == "pointers" or any(a.name for a in m.axes)):
@@ -1559,6 +1587,7 @@ class _Typed(KI._Run):
                 r = v.copy(shape=tuple(shape or v.shape), fn=v.fn or not cast,
                            extras=v.extras if cast else v.extras + (n,),
                            masked_zero=v.masked_zero if cast else False)
+            r.sym = self._int_sym(n, op, args, shape)
         elif n == "arith.cmpi" and any(isinstance(a, V) for a in args):
             r = T("a comparison of values read at run time")
         elif (n in KI._INT_BINARY or n in KI._INT_CASTS or n == "arith.cmpi") and any(isinstance(a, S) for a in args):
@@ -1632,8 +1661,12 @@ class _Typed(KI._Run):
         elif n == "arith.select" and any(isinstance(a, V) for a in args):
             c, a, b = args
             if not (isinstance(a, V) and isinstance(b, V)):
-                raise Unmodelled("a select between a float and something else")
-            if isinstance(c, T):
+                ia = a.sym if isinstance(a, V) else a
+                ib = b.sym if isinstance(b, V) else b
+                if ia is None or ib is None or not all(isinstance(x, (S, E, Mk, T)) for x in (ia, ib)):
+                    raise Unmodelled("a select between a float and something else")
+                r = self._merge_data(ia, ib)
+            elif isinstance(c, T):
                 r = self._select_v(None, a, b)
             else:
                 cc = self._int(c)
@@ -1643,6 +1676,8 @@ class _Typed(KI._Run):
                     r = a if int(cc.s.flat[0]) else b
                 else:
                     r = self._select_v(cc, a, b)
+            if isinstance(r, V) and r is not a and r is not b:
+                r.sym = self._both_sym(a, b)
         elif n in ("tt.splat", "tt.broadcast", "tt.expand_dims", "tt.reshape", "tt.trans") and \
                 isinstance(args[0], V):
             r = self._shape_v(n, op, args[0], shape)
@@ -1684,8 +1719,24 @@ class _Typed(KI._Run):
             r = T("a comparison of float values")
         else:
             return super()._op(op, env)
+        if isinstance(r, V) and r.sym is not None and not (n == "tt.load" or n in KI._INT_BINARY or
+                                                           n in KI._INT_CASTS or n == "arith.select" or
+                                                           n in _SHAPE_OPS):
+            r = r.copy(sym=None)
         for name in op.results[:1]:
             env[name] = r
+
+    def _both_sym(self, a, b):
+        """The number reading of a value that is a or b (typed integers), when both have one."""
+        if not (isinstance(a, V) and isinstance(b, V)) or a.sym is None or b.sym is None:
+            return None
+        try:
+            return self._merge_data(a.sym, b.sym)
+        except Unmodelled:
+            return None
+
+
+_SHAPE_OPS = ("tt.splat", "tt.broadcast", "tt.expand_dims", "tt.reshape", "tt.trans")
 
 
 def _covers(ranges, lo, hi, live):
