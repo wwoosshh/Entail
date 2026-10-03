@@ -499,7 +499,7 @@ class _Typed(KI._Run):
             for o in ops:
                 self._op(o, env)
             return
-        self._block_ops(entry, env, labels, frozenset())
+        self._block_ops(entry, env, labels, frozenset({"^entry"}))
 
     def _block_ops(self, block, env, labels, visited):
         for o in block:
@@ -510,7 +510,7 @@ class _Typed(KI._Run):
                 if any(t in visited for t in targets):
                     raise Unmodelled("a branch back to an earlier block (a loop made of blocks)")
                 cond = self._get(env, o.operands[0])
-                self._branch(cond, labels[targets[0]], labels[targets[1]], env, labels, visited | set(targets))
+                self._branch(cond, targets[0], targets[1], env, labels, visited)
                 return
             if o.name == "cf.br":
                 targets = ["^" + x for x in re.findall(r'\^(bb\d+)', o.text)]
@@ -528,7 +528,10 @@ class _Typed(KI._Run):
         labels = labels or {}
 
         def run(body, inner):
-            self._block_ops(body, inner, labels, visited)
+            if isinstance(body, str):            # a block, named: on the path from here on
+                self._block_ops(labels[body], inner, labels, visited | {body})
+            else:
+                self._block_ops(body, inner, labels, visited)
 
         if isinstance(cond, T):
             self.data_depth += 1
@@ -831,6 +834,10 @@ class _Typed(KI._Run):
                     if dim is None and not dims and m.shape:
                         dim = 0
                 if dim is None:
+                    if not isinstance(c, str) and dims and not any(abs(c) % st == 0 for st, n, i in dims):
+                        raise _Fail("violation", f"{what} addresses {arg} between its elements: a value read at run "
+                                                 f"time steps it by {abs(c)}, its strides are {tuple(m.stride)}",
+                                    {"program_chunk_index": self.chunk_index, "step": abs(c)})
                     raise _Fail("unproven", f"{what} addresses {arg} by a value read at run time that this module "
                                             f"cannot take apart by the strides ({off.why})")
                 if kn is not None:                   # a launch-known coordinate on this axis
@@ -1518,7 +1525,7 @@ class _Typed(KI._Run):
                 other = args[2] if len(args) > 2 else None
                 known, by_data = _known_part(mask)
                 if by_data:
-                    r = self._load(op, p, known, bounds=known is not None)
+                    r = self._load(op, p, known, bounds=False)   # lanes chosen by data: their bounds are the data's
                     r.data_valid = True
                 else:
                     r = self._load(op, p, mask)
@@ -1531,13 +1538,19 @@ class _Typed(KI._Run):
                 if m is not None and p.taint is None and p.off is not None and \
                         (m.basis is not None or m.kind == "pointers" or any(a.name for a in m.axes)):
                     # an integer with a meaning: its address is held to the tensor's axes like a float's
-                    valid = None if mask is None or isinstance(mask, T) else _as_bool_full(mask)
+                    known, by_data = _known_part(mask)
+                    valid = None if known is None else _as_bool_full(known)
                     if valid is not None and valid.ndim != 1 + len(shape or ()):
                         valid = valid.reshape((-1,) + tuple(shape or ()))
                     if not self.active.all():
                         valid = self._active_lanes(len(shape or ())) & (_ones(shape or ()) if valid is None
                                                                         else valid)
-                    cs = self._coords_of(p.arg, p.off, valid, "a load", bounds=not isinstance(mask, T))
+                    if valid is not None and not np.any(valid) and len(args) > 2 and \
+                            isinstance(args[2], (E, S, T, Mk)):
+                        for name in op.results[:1]:
+                            env[name] = args[2]
+                        return
+                    cs = self._coords_of(p.arg, p.off, valid, "a load", bounds=not by_data)
                     if m.kind == "pointers":
                         c0 = cs.get(0)
                         if isinstance(c0, Sym) or np.unique(np.asarray(c0)).size != 1:
