@@ -452,8 +452,12 @@ class _Typed(KI._Run):
             sym = "//" if "div" in n else "%"
             ba = a.basis if sa else None
             bb = b.basis if sb else None
-            return _opaque("a quotient of values read at run time", self._key(op), RELATIONS.get((ba, sym, bb)),
-                           shape)
+            key = self._key(op)
+            if sa and not sb:
+                la, e = a.leaf(), self._int(b)
+                if la and a.const is None and isinstance(e, E) and e.scalar_only() and np.unique(e.s).size == 1:
+                    key = (sym, la[0], int(e.s.flat[0]))   # the same quotient wherever the kernel computes it
+            return _opaque("a quotient of values read at run time", key, RELATIONS.get((ba, sym, bb)), shape)
         return _opaque(why, self._key(op), None, shape)
 
     def _const_add(self, x, y, sign, shape):
@@ -1265,6 +1269,8 @@ class _Typed(KI._Run):
         ndim = len(shape)
 
         def f(arr):
+            if isinstance(arr, Sym) and n != "tt.reshape":
+                return Sym(arr.key, arr.basis, f(arr.off))      # a coordinate chosen by data: its known offset moves
             if n == "tt.splat":
                 return np.asarray(arr).reshape((-1,) + (1,) * ndim)
             if n == "tt.expand_dims":
@@ -1634,7 +1640,11 @@ class _Typed(KI._Run):
             if not (isinstance(a, V) and isinstance(b, V)):
                 raise Unmodelled("a dot whose operands are not float values")
             if c is not None and not isinstance(c, V):
-                raise Unmodelled("a dot that accumulates into a non-float")
+                cc = self._int(c) if isinstance(c, (E, Mk)) else c
+                if isinstance(cc, E) and not cc.v and cc.d is None and not np.any(cc.s):
+                    c = V(shape or (), const=0.0)        # an integer accumulator that starts at zero
+                else:
+                    raise Unmodelled("a dot that accumulates into a non-float")
             r = self._dot(a, b, c)
         elif n in _ELEMENTWISE_BINARY:
             x, y = args
