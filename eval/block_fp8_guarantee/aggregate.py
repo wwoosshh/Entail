@@ -20,6 +20,11 @@ Until 2026-10-03 (L5.4c) a replay whose next operation read only NaN counted as 
 without a permit, not a block. No step of the v1 and v2 runs read only NaN, so their numbers do not change.
 Per defect or integrity case: the off baseline (off A) must be beyond the tolerance on a defective step
 (mutation_effective); otherwise the case is incomplete, and it is never dropped.
+
+Completeness (L5.4d): every case the split schedules is judged in every mode of the run, also when it has no results
+(missing). A run of one case in one mode is complete when it exited 0, recorded every planned step (a step not run is
+recorded with the reason), ran the scheduled case spec and was bound to the run's freeze manifest. A mode with an
+unfinished run, or a run started on a part of the split (--only, --modes), is "partial", never "passed".
 """
 import json
 import os
@@ -100,7 +105,34 @@ def step_outcome(step, label):
     return "repaired_delivered" if repaired_by_entail(step, label) else "normal_delivered"
 
 
-def judge_case(out_root, case):
+def run_status(out_root, case, label, r, freeze_sha):
+    """"complete", "missing", or why one case's run in one mode is not complete: a non-zero exit, steps not all
+    recorded (a step not run is recorded with the reason), steps or a case spec other than the scheduled ones, a run
+    bound to another freeze manifest."""
+    if r is None:
+        return "missing"
+    run = os.path.join(out_root, case["id"], label, "run.json")
+    if os.path.exists(run):
+        with open(run, encoding="utf-8") as f:
+            ex = json.load(f).get("exit")
+        if ex != 0:
+            return f"exit {ex}"
+    planned = case["steps"]
+    if len(r.get("steps", [])) != len(planned):
+        return f"{len(r.get('steps', []))} of {len(planned)} steps recorded"
+    if any(s.get("op") != p.get("op") for s, p in zip(r["steps"], planned)):
+        return "the steps recorded are not the scheduled case's"
+    got, want = dict(r.get("case") or {}), dict(case)
+    got.pop("split", None)
+    want.pop("split", None)
+    if got != want:
+        return "the run's case is not the scheduled one"
+    if freeze_sha and r.get("freeze_sha256") != freeze_sha:
+        return "the run was bound to another freeze manifest"
+    return "complete"
+
+
+def judge_case(out_root, case, freeze_sha=None):
     res = {"id": case["id"], "group": case["group"], "modes": {}}
     runs = {lab: load(out_root, case["id"], lab) for lab in LABELS}
     offA = runs["offA"][0]
@@ -119,7 +151,7 @@ def judge_case(out_root, case):
                                       and k in zb.files)
     for lab in LABELS:
         r, z = runs[lab]
-        m = {"present": r is not None}
+        m = {"present": r is not None, "run": run_status(out_root, case, lab, r, freeze_sha)}
         if r is None:
             res["modes"][lab] = m
             continue
@@ -194,13 +226,47 @@ def judge_case(out_root, case):
 def summarize(out_root):
     with open(os.path.join(out_root, "cases.json"), encoding="utf-8") as f:
         meta = json.load(f)
-    cases = [c for c in meta["cases"] if not c["id"].startswith("dev-")]
-    extra = [c for c in meta["cases"] if c["id"].startswith("dev-")]
-    judged = [judge_case(out_root, c) for c in cases]
-    judged_extra = [judge_case(out_root, c) for c in extra]
+    scheduled = meta["cases"]                  # every case the split schedules (since L5.4d, also the ones not run)
+    freeze_sha = meta.get("freeze_sha256") or (meta["key"] if meta["split"] == "holdout" else None)
+    cases = [c for c in scheduled if not c["id"].startswith("dev-")]
+    extra = [c for c in scheduled if c["id"].startswith("dev-")]
+    judged = [judge_case(out_root, c, freeze_sha) for c in cases]
+    judged_extra = [judge_case(out_root, c, freeze_sha) for c in extra]
     out = {"split": meta["split"], "key": meta["key"], "per_case": judged, "dev_extra": judged_extra, "modes": {}}
-    present = [lab for lab in LABELS if any(j["modes"].get(lab, {}).get("present") for j in judged)]
-    for lab in [x for x in ("load", "guarantee", "structure", "offA") if x in present]:
+    labels = meta.get("labels") or [lab for lab in LABELS
+                                    if any(j["modes"].get(lab, {}).get("present") for j in judged + judged_extra)]
+    try:                                       # the scheduled list against what cases.py schedules now
+        import cases as C
+
+        now = C.cases(meta["split"], meta["key"])
+        out["cases_py_now_matches"] = [c["id"] for c in now] == [c["id"] for c in scheduled] and now == scheduled
+    except Exception as e:  # noqa: BLE001
+        out["cases_py_now_matches"] = f"not compared: {type(e).__name__}: {e}"
+    if "scheduled" not in meta:
+        # written before L5.4d, the runner listed only the cases it ran: whether that was the whole split is read
+        # from cases.py, with and without the integrity cases (v1/v2 schedules had none)
+        try:
+            import cases as C
+
+            ids = {c["id"] for c in scheduled}
+            fulls = [{c["id"] for c in C.cases(meta["split"], meta["key"], integrity=i)} for i in (False, True)]
+            meta["partial"] = ids not in fulls
+            out["partial_read_from_cases_py"] = True
+        except Exception as e:  # noqa: BLE001
+            out["partial_read_from_cases_py"] = f"not read: {type(e).__name__}: {e}"
+    out["partial"] = bool(meta.get("partial", False))
+    out["scheduled"] = [c["id"] for c in scheduled]
+    out["selected"] = meta.get("selected", out["scheduled"])
+    out["labels"] = labels
+    unfinished_all = {}
+    for lab in labels:
+        unfinished = [(j["id"], j["modes"].get(lab, {}).get("run")) for j in judged + judged_extra
+                      if j["modes"].get(lab, {}).get("run") != "complete"]
+        if unfinished:
+            unfinished_all[lab] = unfinished
+    out["complete"] = not unfinished_all and not meta.get("partial", False)
+    out["unfinished_runs"] = unfinished_all
+    for lab in [x for x in ("load", "guarantee", "structure", "offA") if x in labels]:
         cnt = {k: 0 for k in COUNTS}
         cnt["scheduled"] = len(judged)
         normal_fail, adm_fail, incomplete = [], [], []
@@ -252,14 +318,22 @@ def summarize(out_root):
                    ("wrong_escaped", "refused_after_use")]
         unresolved = [j["id"] for j in effective if j["modes"].get(lab, {}).get("verdict") in
                       ("unknown", "error", "normal_delivered", None)]
+        lab_unfinished = unfinished_all.get(lab, [])
+        # failed: something went wrong in what ran. partial: not every scheduled case ran to its end in this mode
+        # (or the run was started on a part of the split). incomplete: all ran, but a defect had no effect in off or
+        # a verdict is unresolved. passed: none of these.
         if escaped or normal_fail or (lab in ("guarantee", "structure") and adm_fail):
             state = "failed"
+        elif lab_unfinished or meta.get("partial", False):
+            state = "partial"
         elif incomplete or unresolved or not effective:
             state = "incomplete"
         else:
             state = "passed"
         defects = [j for j in effective if j["group"] == "defect"]
-        out["modes"][lab] = {"counts": cnt, "state": state, "wrong_escaped": escaped, "unresolved": unresolved,
+        out["modes"][lab] = {"counts": cnt, "state": state,
+                             "complete": not lab_unfinished and not meta.get("partial", False),
+                             "unfinished_runs": lab_unfinished, "wrong_escaped": escaped, "unresolved": unresolved,
                              "normal_failures": normal_fail, "admission_failures": adm_fail,
                              "incomplete": incomplete, "by_group": by_group,
                              "defects_effective": len(defects),
@@ -276,6 +350,8 @@ if __name__ == "__main__":
     path = sys.argv[2] if len(sys.argv) > 2 else os.path.join(root, "summary.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(s, f, indent=1)
+    print("complete:", s["complete"], "| unfinished runs:", {k: len(v) for k, v in s["unfinished_runs"].items()},
+          "| cases.py now matches the scheduled list:", s["cases_py_now_matches"])
     for lab, m in s["modes"].items():
         print(lab, m["state"], m["counts"], "escaped:", m["wrong_escaped"], "normal fail:", m["normal_failures"],
               "admission fail:", m["admission_failures"], "incomplete:", m["incomplete"],

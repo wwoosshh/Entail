@@ -191,10 +191,10 @@ def _op(line: str) -> Op:
             break
     op.operands = _VAL.findall(rest[:cut])
     op.rtype = rest[cut + 1:].strip() if cut < len(rest) else ""
-    if "->" in op.rtype:
-        op.rtype = op.rtype.split("->")[-1].strip()
-    if " to " in op.rtype:                  # a conversion prints "source type to result type"
-        op.rtype = op.rtype.split(" to ")[-1].strip()
+    for sep in ("->", " to "):              # "source type -> result type"; a conversion: "source type to result type"
+        if sep in op.rtype:
+            src, op.rtype = op.rtype.rsplit(sep, 1)
+            op.extra["src"], op.rtype = src.strip(), op.rtype.strip()
     return op
 
 
@@ -222,13 +222,52 @@ def _elem(t: str) -> str:
 # strides, offsets). Operations that keep the form keep it; an operation over one axis is done on that axis's vector;
 # anything else makes the value dense (every element, for every program). So a tile of 64 x 128 addresses costs 192
 # numbers per program, not 8192, and the check below works on the vectors.
+#
+# Integer meaning (2026-10-03, L5.4d): every integer value has its bit width w (i1 .. i64; index is 64) and every
+# element holds exactly what the IR holds - the w-bit two's complement pattern, read signed (an i1 is 0 or 1). Each
+# operation is computed as MLIR's arith defines it: add, sub, mul and shl wrap modulo 2^w; signed and unsigned
+# readings are chosen by the operation (divsi / divui, cmpi slt / ult, extsi / extui, shrsi / shrui, minsi / minui);
+# truncation keeps the low bits; extension sign- or zero-extends. Poison and undefined behaviour (nsw / nuw overflow,
+# a shift by w or more, division by zero, the signed minimum over -1) and anything outside the exact range of the
+# arithmetic (|value| > 2^60) are not modelled: the launch is unproven. Before, values were plain int64: unsigned
+# operations read negative values as negative, extensions and truncations kept the value, only i32 results were
+# range-checked.
+
+_W = {"i1": 1, "i8": 8, "i16": 16, "i32": 32, "i64": 64, "index": 64}
+_LIMIT = 1 << 58             # magnitudes computed exactly (int64 sums of a few of these cannot overflow)
+
+
+def _width(t) -> Optional[int]:
+    """The bit width of an integer type (i1 .. i64, index, or a tensor of them); None for anything else."""
+    return _W.get(_elem(t).strip()) if t else None
+
+
+def _int_lit(text):
+    """The integer literal of an arith.constant (decimal, hexadecimal, true / false), or None."""
+    m = re.match(r'\s*(?:dense<)?\s*(true|false|-?0x[0-9a-fA-F]+|-?\d+)(?![\d.eE])', text)
+    if not m:
+        return None
+    v = m.group(1)
+    if v in ("true", "false"):
+        return int(v == "true")
+    return int(v, 16) if "0x" in v else int(v)
+
+
+def _fits(lo, hi, w) -> bool:
+    """Whether every value in lo..hi is a w-bit signed value (an i1: 0 or 1)."""
+    if w == 1:
+        return lo >= 0 and hi <= 1
+    return -(1 << (w - 1)) <= lo and hi < (1 << (w - 1))
+
 
 class E:
-    """An integer (or 0/1 boolean: b) tensor over the programs: s (P|1,), v {axis: (P|1, n)}, or dense d."""
-    __slots__ = ("shape", "s", "v", "d", "b")
+    """An integer (or 0/1 boolean: b) tensor over the programs: s (P|1,), v {axis: (P|1, n)}, or dense d; w its bit
+    width (None for a pointer's offset, which is address arithmetic)."""
+    __slots__ = ("shape", "s", "v", "d", "b", "w")
 
-    def __init__(self, shape, s=None, v=None, d=None, b=False):
+    def __init__(self, shape, s=None, v=None, d=None, b=False, w=None):
         self.shape, self.s, self.v, self.d, self.b = tuple(shape), s, dict(v or {}), d, b
+        self.w = 1 if b else w
         if self.s is None and self.d is None:
             self.s = np.zeros((1,), dtype=np.int64)
 
@@ -395,23 +434,21 @@ class _Dense(Exception):
 
 _CMP = {"eq": np.equal, "ne": np.not_equal, "slt": np.less, "sle": np.less_equal, "sgt": np.greater,
         "sge": np.greater_equal, "ult": np.less, "ule": np.less_equal, "ugt": np.greater, "uge": np.greater_equal}
+_SIGNED_CMP = ("slt", "sle", "sgt", "sge")
+_UNSIGNED_CMP = ("ult", "ule", "ugt", "uge")
+_INT_BINARY = ("arith.addi", "arith.subi", "arith.muli", "arith.divsi", "arith.divui", "arith.remsi", "arith.remui",
+               "arith.floordivsi", "arith.ceildivsi", "arith.ceildivui", "arith.minsi", "arith.maxsi",
+               "arith.minui", "arith.maxui", "arith.andi", "arith.ori", "arith.xori", "arith.shli", "arith.shrsi",
+               "arith.shrui")
+_INT_CASTS = ("arith.extsi", "arith.extui", "arith.trunci", "arith.index_cast", "arith.index_castui")
+_FLOAT_CASTS = ("arith.truncf", "arith.extf", "arith.sitofp", "arith.uitofp", "arith.fptosi", "arith.fptoui")
+_ELEM_BYTES = {"i1": 1, "i8": 1, "i16": 2, "i32": 4, "i64": 8, "f16": 2, "bf16": 2, "f32": 4, "f64": 8}
 
 
-def _tdiv(a, b):
-    if np.any(b == 0):
-        raise Unmodelled("a division by zero in the index arithmetic")
-    q = np.abs(a) // np.abs(b)
-    return np.where((a < 0) ^ (b < 0), -q, q)
-
-
-_GENERAL = {"arith.muli": np.multiply, "arith.minsi": np.minimum, "arith.maxsi": np.maximum,
-            "arith.minui": np.minimum, "arith.maxui": np.maximum,
-            "arith.andi": np.bitwise_and, "arith.ori": np.bitwise_or, "arith.xori": np.bitwise_xor,
-            "arith.divsi": _tdiv, "arith.divui": _tdiv,
-            "arith.remsi": lambda a, b: a - b * _tdiv(a, b), "arith.remui": lambda a, b: a - b * _tdiv(a, b),
-            "arith.shli": np.left_shift, "arith.shrsi": np.right_shift, "arith.shrui": np.right_shift}
-_PASS = ("arith.extsi", "arith.extui", "arith.trunci", "arith.index_cast", "arith.truncf", "arith.extf",
-         "tt.bitcast", "arith.sitofp", "arith.fptosi")
+def _elem_bytes(t):
+    """Bytes of one element of type t (f8 kinds: 1); None when unknown."""
+    t = t.strip()
+    return 1 if t.startswith("f8") else _ELEM_BYTES.get(t)
 
 
 class _Run:
@@ -425,44 +462,223 @@ class _Run:
 
     # -- kept-apart arithmetic --
 
-    def _dense(self, shape, arr, b=False):
+    def _dense(self, shape, arr, b=False, w=None):
         if not self.allow_dense:
             raise _Dense()
         self.went_dense = True
-        return E(shape, d=np.asarray(arr), b=b)
+        return E(shape, d=np.asarray(arr), b=b, w=w)
 
-    def _general(self, f, args, shape, b=False):
+    def _general(self, f, args, shape, b=False, w=None):
         """f over operands (E) of one shape: on the scalars, on the one axis they vary along, or dense."""
         if any(a.d is not None for a in args) or len(set().union(*(a.axes() for a in args))) > 1:
-            return self._dense(shape, np.asarray(f(*[a.full() for a in args])).astype(np.int64), b)
+            return self._dense(shape, np.asarray(f(*[a.full() for a in args])).astype(np.int64), b, w)
         axes = set().union(*(a.axes() for a in args))
         if not axes:
-            return E(shape, s=np.asarray(f(*[a.s for a in args])).astype(np.int64), b=b)
+            return E(shape, s=np.asarray(f(*[a.s for a in args])).astype(np.int64), b=b, w=w)
         pos = axes.pop()
         n = shape[pos]
         vals = [a.along(pos, n) for a in args]
-        return E(shape, v={pos: np.asarray(f(*vals)).astype(np.int64)}, b=b)
+        return E(shape, v={pos: np.asarray(f(*vals)).astype(np.int64)}, b=b, w=w)
 
     def _add(self, a, b, sign=1):
+        """The exact sum (no wrap; the caller holds it in its width)."""
         if a.d is not None or b.d is not None:
-            return self._dense(a.shape, a.full() + sign * b.full())
+            return self._dense(a.shape, a.full() + sign * b.full(), w=a.w)
         v = dict(a.v)
         for pos, arr in b.v.items():
             v[pos] = v[pos] + sign * arr if pos in v else sign * arr
-        return E(a.shape, s=a.s + sign * b.s, v=v)
+        return E(a.shape, s=a.s + sign * b.s, v=v, w=a.w)
 
     def _mul(self, a, b):
+        """The exact product (no wrap; the caller holds it in its width)."""
         if a.d is None and b.d is None and (a.scalar_only() or b.scalar_only()):
             sc, other = (a, b) if a.scalar_only() else (b, a)
             x = sc.s
-            return E(other.shape, s=other.s * x, v={p: arr * x.reshape(-1, 1) for p, arr in other.v.items()})
-        return self._general(np.multiply, [a, b], a.shape)
+            return E(other.shape, s=other.s * x, v={p: arr * x.reshape(-1, 1) for p, arr in other.v.items()},
+                     w=a.w)
+        return self._general(np.multiply, [a, b], a.shape, w=a.w)
 
     def _int(self, x):
         """An E for an integer operand (a mask becomes its dense product)."""
         if isinstance(x, Mk):
-            return self._dense(x.shape, x.full().astype(np.int64), True)
+            return self._dense(x.shape, x.full().astype(np.int64), True, 1)
         return x
+
+    # -- integer meaning: widths, two's complement, signed and unsigned readings --
+
+    def _typed(self, x, w, b=None):
+        """x as a w-bit value (its elements unchanged: they already are w-bit values)."""
+        return E(x.shape, s=x.s, v=x.v, d=x.d, b=(w == 1) if b is None else b, w=w)
+
+    def _each(self, x, f, w, b=False):
+        """f on every element of x, keeping the form where it can (a scalar per program, one axis), else dense."""
+        if x.d is not None:
+            return self._dense(x.shape, f(np.asarray(x.d)), b, w)
+        if not x.v:
+            return E(x.shape, s=np.asarray(f(np.asarray(x.s))), b=b, w=w)
+        if len(x.v) == 1:
+            pos = next(iter(x.v))
+            return E(x.shape, v={pos: np.asarray(f(np.asarray(x.along(pos))))}, b=b, w=w)
+        return self._dense(x.shape, f(np.asarray(x.full())), b, w)
+
+    def _wrap(self, x, w):
+        """x held in w bits as the IR holds it: the low w bits, read signed (two's complement); an i1 is its low bit.
+        Exact: elements outside the range wrap one by one."""
+        lo, hi = _bounds(x)
+        if _fits(lo, hi, w):
+            return self._typed(x, w)
+        if w == 1:
+            return self._each(x, lambda a: a & 1, 1, b=True)
+        half, span = 1 << (w - 1), 1 << w
+        return self._each(x, lambda a: ((a + half) % span) - half, w)
+
+    def _unsigned(self, x, w):
+        """The elements of x read unsigned (w bits): a negative one is itself plus 2^w."""
+        if w == 1:
+            return x
+        lo, _hi = _bounds(x)
+        if lo >= 0:
+            return x
+        if w >= 62:
+            raise Unmodelled("a negative 64-bit value read unsigned: beyond the checker's exact integer range")
+        span = 1 << w
+        return self._each(x, lambda a: np.where(a < 0, a + span, a), w)
+
+    def _signed(self, x, w):
+        """The elements of x read signed: an i1 that is true is -1."""
+        if w == 1:
+            return self._each(x, lambda a: -a, 1)
+        return x
+
+    def _operands(self, n, args, w):
+        out = []
+        for x in args:
+            x = self._int(x)
+            if not isinstance(x, E):
+                raise Unmodelled(f"{n} of a {type(x).__name__}")
+            if x.w != w:
+                raise Unmodelled(f"{n}: a {x.w}-bit operand in a {w}-bit operation")
+            out.append(x)
+        return out
+
+    def _int_op(self, n, op, args, shape):
+        """An integer operation exactly as MLIR's arith defines it. What it cannot compute exactly (poison,
+        undefined behaviour, values beyond the exact range) is not modelled: the launch is unproven."""
+        if n in _INT_CASTS:
+            return self._cast(n, op, args[0])
+        w = _width(op.rtype)
+        if w is None:
+            raise Unmodelled(f"{n} on {op.rtype or 'a type it does not print'}: not an integer type this module "
+                             f"models")
+        m = re.search(r'overflow<([^>]*)>', op.text)
+        flags = {f.strip() for f in m.group(1).split(",")} if m else set()
+        if n == "arith.andi" and all(isinstance(x, Mk) or (isinstance(x, E) and x.b) for x in args):
+            fs = []
+            for x in args:
+                fs += x.f if isinstance(x, Mk) else [x]
+            return Mk(shape or args[0].shape, fs) if len(fs) > 1 else fs[0]
+        xs = self._operands(n, args, w)
+        if w == 1 and n not in ("arith.andi", "arith.ori", "arith.xori"):
+            raise Unmodelled(f"{n} on i1 values")
+        if n in ("arith.andi", "arith.ori", "arith.xori"):
+            # bitwise on sign-extended w-bit values gives the sign-extended w-bit result: the form is kept
+            f = {"arith.andi": np.bitwise_and, "arith.ori": np.bitwise_or, "arith.xori": np.bitwise_xor}[n]
+            return self._general(f, xs, xs[0].shape, b=(w == 1), w=w)
+        a, b = xs
+        (la, ha), (lb, hb) = _bounds(a), _bounds(b)
+        if n in ("arith.addi", "arith.subi", "arith.muli"):
+            if n == "arith.muli":
+                if max(abs(la), abs(ha)) * max(abs(lb), abs(hb)) > _LIMIT:
+                    raise Unmodelled(f"{n}: a product beyond the checker's exact integer range")
+                r = self._mul(a, b)
+            else:
+                if max(abs(la), abs(ha)) + max(abs(lb), abs(hb)) > _LIMIT:
+                    raise Unmodelled(f"{n}: a sum beyond the checker's exact integer range")
+                r = self._add(a, b, 1 if n == "arith.addi" else -1)
+            return self._poison_or_wrap(n, r, a, b, w, flags)
+        if n in ("arith.divsi", "arith.remsi", "arith.floordivsi", "arith.ceildivsi"):
+            half = 1 << (w - 1)
+
+            def sdiv(x, y, n=n, half=half):
+                if np.any(y == 0):
+                    raise Unmodelled(f"{n}: a division by zero (undefined)")
+                if np.any((x == -half) & (y == -1)):
+                    raise Unmodelled(f"{n}: the signed minimum divided by -1 overflows (undefined)")
+                q = np.abs(x) // np.abs(y)
+                q = np.where((x < 0) ^ (y < 0), -q, q)          # truncated toward zero
+                if n == "arith.divsi":
+                    return q
+                if n == "arith.remsi":
+                    return x - y * q                             # the sign of the dividend
+                if n == "arith.floordivsi":
+                    return np.floor_divide(x, y)
+                return -np.floor_divide(-x, y)                   # ceildivsi
+            return self._wrap(self._general(sdiv, [a, b], a.shape, w=w), w)
+        if n in ("arith.divui", "arith.remui", "arith.ceildivui"):
+            ua, ub = self._unsigned(a, w), self._unsigned(b, w)
+
+            def udiv(x, y, n=n):
+                if np.any(y == 0):
+                    raise Unmodelled(f"{n}: a division by zero (undefined)")
+                if n == "arith.divui":
+                    return x // y
+                if n == "arith.remui":
+                    return x % y
+                return -((-x) // y)                              # ceildivui
+            return self._wrap(self._general(udiv, [ua, ub], a.shape, w=w), w)
+        if n in ("arith.minsi", "arith.maxsi"):
+            return self._general(np.minimum if n == "arith.minsi" else np.maximum, [a, b], a.shape, w=w)
+        if n in ("arith.minui", "arith.maxui"):
+            ua, ub = self._unsigned(a, w), self._unsigned(b, w)
+            r = self._general(np.minimum if n == "arith.minui" else np.maximum, [ua, ub], a.shape, w=w)
+            return self._wrap(r, w)
+        if n in ("arith.shli", "arith.shrsi", "arith.shrui"):
+            ub = self._unsigned(b, w)
+            hi_shift = _bounds(ub)[1]
+            if hi_shift >= w:
+                raise Unmodelled(f"{n} by {hi_shift} bits of a {w}-bit value: the result is poison")
+            if n == "arith.shli":
+                if max(abs(la), abs(ha)) * (1 << max(hi_shift, 0)) > _LIMIT:
+                    raise Unmodelled(f"{n}: a shift beyond the checker's exact integer range")
+                r = self._general(np.left_shift, [a, ub], a.shape, w=w)
+                return self._poison_or_wrap(n, r, a, ub, w, flags)
+            if n == "arith.shrsi":
+                return self._general(np.right_shift, [a, ub], a.shape, w=w)     # arithmetic: the sign is kept
+            return self._wrap(self._general(np.right_shift, [self._unsigned(a, w), ub], a.shape, w=w), w)
+        raise Unmodelled(f"the op {n} is not modelled")
+
+    def _poison_or_wrap(self, n, r, a, b, w, flags):
+        """r (exact) as the w-bit result; with nsw / nuw, an overflow makes poison (not modelled)."""
+        if "nsw" in flags and not _fits(*_bounds(r), w):
+            raise Unmodelled(f"{n} with nsw overflows {w} bits: the result is poison")
+        if "nuw" in flags:
+            ua, ub = self._unsigned(a, w), self._unsigned(b, w)
+            ru = (self._add(ua, ub, 1) if n == "arith.addi" else self._add(ua, ub, -1) if n == "arith.subi" else
+                  self._mul(ua, ub) if n == "arith.muli" else
+                  self._general(np.left_shift, [ua, ub], ua.shape, w=w))
+            lo, hi = _bounds(ru)
+            if lo < 0 or hi >= (1 << w):
+                raise Unmodelled(f"{n} with nuw overflows {w} bits: the result is poison")
+        return self._wrap(_exact(r, n), w)
+
+    def _cast(self, n, op, x):
+        """extsi, extui, trunci, index_cast(ui): the value as the IR converts it."""
+        ws, wd = _width(op.extra.get("src", "")), _width(op.rtype)
+        if ws is None or wd is None:
+            raise Unmodelled(f"{n} from {op.extra.get('src')} to {op.rtype}: not integer types this module models")
+        x = self._operands(n, [x], ws)[0]
+        widen = wd > ws
+        if n in ("arith.extsi", "arith.extui") and not widen:
+            raise Unmodelled(f"{n} to as many or fewer bits")
+        if n == "arith.trunci" and widen:
+            raise Unmodelled(f"{n} to more bits")
+        if wd == ws:
+            return self._typed(x, wd)
+        if widen:
+            if n in ("arith.extsi", "arith.index_cast"):
+                return self._typed(self._signed(x, ws), wd, b=False)      # sign extension keeps the signed value
+            return self._typed(self._unsigned(x, ws), wd, b=False)       # zero extension: the unsigned value
+        return self._wrap(x, wd)                                          # truncation: the low wd bits
 
     def run(self):
         env = {}
@@ -471,7 +687,13 @@ class _Run:
             if typ.startswith("!tt.ptr"):
                 env[name] = Ptr(key, E(()))
             elif key in self.ints:
-                env[name] = E((), s=np.full((1,), int(self.ints[key]), dtype=np.int64))
+                w = _width(typ)
+                v = int(self.ints[key])
+                if w is None:
+                    raise Unmodelled(f"argument {key} has the type {typ}, not an integer type this module models")
+                if not _fits(v, v, w) or abs(v) > _LIMIT:
+                    raise Unmodelled(f"argument {key} = {v} is not a value of its type {typ}")
+                env[name] = E((), s=np.full((1,), v, dtype=np.int64), b=(w == 1), w=w)
             else:
                 raise Unmodelled(f"argument {key} has no value in the launch")
         self._ops(self.fn.body, env)
@@ -491,53 +713,47 @@ class _Run:
         shape = _shape(op.rtype)
         r = None
         if n == "arith.constant":
-            m = re.match(r'(?:dense<)?([-0-9.eE+a-z]+)>?', op.text)
             et = _elem(op.rtype)
             if et.startswith("f") or et.startswith("bf"):
+                m = re.match(r'(?:dense<)?([-0-9.eE+a-z]+)>?', op.text)
                 try:
                     val = float(m.group(1)) if m else None
                 except ValueError:             # a hex bit pattern: not read here
                     val = None
                 r = F("opaque", stash={"const": True, "value": val})
             else:
-                v = m.group(1)
-                v = 1 if v == "true" else 0 if v == "false" else int(float(v))
-                r = E(shape, s=np.full((1,), v, dtype=np.int64), b=et == "i1")
+                w, v = _width(op.rtype), _int_lit(op.text)
+                if w is None or v is None:
+                    raise Unmodelled(f"a constant of type {op.rtype} this module does not read: {op.text[:60]}")
+                # a w-bit literal is printed signed, or (up to 2^w - 1) unsigned; beyond the exact range: not modelled
+                if not -(1 << (w - 1)) <= v < (1 << w) or abs(v) > max(_LIMIT, 1):
+                    raise Unmodelled(f"a constant {v} of type {op.rtype} beyond the checker's exact integer range")
+                r = self._wrap(E(shape, s=np.full((1,), v, dtype=np.int64), w=64), w)
         elif n == "tt.get_program_id":
             axis = {"x": 0, "y": 1, "z": 2}[op.text.split()[0]]
-            r = E((), s=self.pids[axis])
+            r = E((), s=self.pids[axis], w=32)
         elif n == "tt.make_range":
             s = int(re.search(r'start = (-?\d+)', op.text).group(1))
             e = int(re.search(r'end = (-?\d+)', op.text).group(1))
-            r = E((e - s,), v={0: np.arange(s, e, dtype=np.int64)[None, :]})
-        elif n in ("arith.addi", "arith.subi"):
-            a, b = args
-            if isinstance(a, T) or isinstance(b, T):
-                r = T(a.why if isinstance(a, T) else b.why)
-            else:
-                r = self._add(self._int(a), self._int(b), 1 if n == "arith.addi" else -1)
-        elif n == "arith.andi" and all(isinstance(x, (E, Mk)) and (isinstance(x, Mk) or x.b) for x in args):
-            fs = []
-            for x in args:
-                fs += x.f if isinstance(x, Mk) else [x]
-            r = Mk(shape or args[0].shape, fs) if len(fs) > 1 else fs[0]
-        elif n in _GENERAL:
-            a, b = args
-            if isinstance(a, T) or isinstance(b, T):
-                r = T(a.why if isinstance(a, T) else b.why)
-            elif n == "arith.muli":
-                r = self._mul(self._int(a), self._int(b))
-            else:
-                a, b = self._int(a), self._int(b)
-                r = self._general(_GENERAL[n], [a, b], a.shape, b=a.b and b.b)
+            r = E((e - s,), v={0: np.arange(s, e, dtype=np.int64)[None, :]}, w=32)
+        elif n in _INT_BINARY or n in _INT_CASTS:
+            ts = [x for x in args if isinstance(x, T)]
+            r = T(ts[0].why) if ts else self._int_op(n, op, args, shape)
         elif n == "arith.cmpi":
             pred = op.text.split(",")[0].strip()
-            a, b = args
-            if isinstance(a, T) or isinstance(b, T):
-                r = T(a.why if isinstance(a, T) else b.why)
+            ts = [x for x in args if isinstance(x, T)]
+            if ts:
+                r = T(ts[0].why)
             else:
-                a, b = self._int(a), self._int(b)
-                r = self._general(_CMP[pred], [a, b], a.shape, b=True)
+                w = _width(op.rtype)                          # cmpi prints its operands' type
+                if w is None or pred not in _CMP:
+                    raise Unmodelled(f"cmpi {pred} on {op.rtype}")
+                a, b = self._operands(n, args, w)
+                if pred in _SIGNED_CMP:
+                    a, b = self._signed(a, w), self._signed(b, w)
+                elif pred in _UNSIGNED_CMP:
+                    a, b = self._unsigned(a, w), self._unsigned(b, w)
+                r = self._general(_CMP[pred], [a, b], a.shape, b=True, w=1)
         elif n == "arith.select":
             c, a, b = args
             if isinstance(a, F) or isinstance(b, F):
@@ -548,25 +764,62 @@ class _Run:
                 raise Unmodelled("a select between pointers")
             else:
                 c, a, b = self._int(c), self._int(a), self._int(b)
-                r = self._general(lambda x, y, z: np.where(x.astype(bool), y, z), [c, a, b], a.shape)
+                if c.w != 1 or a.w != b.w:
+                    raise Unmodelled("a select whose condition is not i1 or whose values differ in width")
+                r = self._general(lambda x, y, z: np.where(x.astype(bool), y, z), [c, a, b], a.shape,
+                                  b=a.b and b.b, w=a.w)
         elif n in ("tt.splat", "tt.broadcast", "tt.expand_dims", "tt.reshape"):
             r = self._shape_op(n, op, args[0], shape)
-        elif n in _PASS:
-            r = args[0]
-            if isinstance(r, F) and n not in ("arith.truncf", "arith.extf"):
-                # a float made into an integer or reinterpreted: a value that depends on data from here on
-                r = T(f"{n} of a float value") if not _elem(op.rtype).startswith(("f", "bf")) else \
-                    F("opaque", stash={"why": f"{n} of a float value"})
+        elif n in _FLOAT_CASTS:
+            x = args[0]
+            if isinstance(x, F):
+                if n in ("arith.truncf", "arith.extf"):
+                    r = x
+                elif n in ("arith.fptosi", "arith.fptoui"):
+                    r = T(f"{n} of a float value")         # an integer that depends on data from here on
+                else:
+                    raise Unmodelled(f"{n} of a float")
+            elif isinstance(x, (E, Mk)) and n in ("arith.sitofp", "arith.uitofp"):
+                r = F("opaque", stash={"why": f"{n}: a float made from an integer"})
+            elif isinstance(x, T):
+                r = T(x.why)
+            else:
+                raise Unmodelled(f"{n} of a {type(x).__name__}")
+        elif n == "tt.bitcast":
+            x = args[0]
+            src, dst = op.extra.get("src", ""), op.rtype
+            if isinstance(x, Ptr):
+                bs, bd = _elem_bytes(_elem(src)), _elem_bytes(_elem(dst))
+                if bs is None or bs != bd:
+                    raise Unmodelled(f"a pointer cast from {_elem(src)} to {_elem(dst)}: offsets would count "
+                                     f"other elements")
+                r = x
+            elif isinstance(x, F):
+                r = T(f"{n} of a float value") if _width(dst) else F("opaque", stash={"why": f"{n} of a float"})
+            elif isinstance(x, T):
+                r = T(x.why)
+            else:
+                ws, wd = _width(src), _width(dst)
+                if ws is None or ws != wd:
+                    raise Unmodelled(f"{n} from {src} to {dst}")
+                r = self._typed(self._operands(n, [x], ws)[0], wd)
         elif n == "tt.addptr":
             p, o = args
             if isinstance(o, T) or p.taint is not None:
                 r = Ptr(p.arg, p.off, taint=(o.why if isinstance(o, T) else p.taint))
             else:
                 o = self._int(o)
+                if not isinstance(o, E) or o.w is None or o.w == 1:
+                    raise Unmodelled("a pointer offset that is not an integer")
                 off = p.off
                 if off.shape != o.shape:
                     off = self._shape_op("tt.splat", op, off, o.shape) if not off.shape else off
-                r = Ptr(p.arg, self._add(off, o))
+                lo, hi = _bounds(o)
+                lo2, hi2 = _bounds(off)
+                if max(abs(lo), abs(hi)) + max(abs(lo2), abs(hi2)) > _LIMIT:
+                    raise Unmodelled("a pointer offset beyond the checker's exact integer range")
+                s = self._add(off, o)                   # address arithmetic: exact, the offset read signed
+                r = Ptr(p.arg, E(s.shape, s=s.s, v=s.v, d=s.d, w=None))
         elif n == "tt.load":
             p = args[0]
             mask = args[1] if len(args) > 1 else None
@@ -619,10 +872,6 @@ class _Run:
             return
         else:
             raise Unmodelled(f"the op {n} is not modelled")
-        if isinstance(r, E) and not r.b and n.startswith("arith.") and _elem(op.rtype) == "i32":
-            lo, hi = _int_range(r)
-            if lo < -2 ** 31 or hi > 2 ** 31 - 1:
-                raise Unmodelled(f"an i32 index computation ({n}) leaves the i32 range ({lo}..{hi}); the IR wraps")
         for name in op.results[:1]:
             env[name] = r
 
@@ -649,38 +898,45 @@ class _Run:
         if n == "tt.splat":
             if x.shape:
                 raise Unmodelled("a splat of a tensor")
-            return E(shape, s=x.s, b=x.b)
+            return E(shape, s=x.s, b=x.b, w=x.w)
         if n == "tt.expand_dims":
             axis = int(re.search(r'axis = (\d+)', op.text).group(1))
             new = x.shape[:axis] + (1,) + x.shape[axis:]
             if x.d is not None:
-                return E(new, d=np.expand_dims(x.d, axis + 1), b=x.b)
-            return E(new, s=x.s, v={(p + 1 if p >= axis else p): a for p, a in x.v.items()}, b=x.b)
+                return E(new, d=np.expand_dims(x.d, axis + 1), b=x.b, w=x.w)
+            return E(new, s=x.s, v={(p + 1 if p >= axis else p): a for p, a in x.v.items()}, b=x.b, w=x.w)
         if n == "tt.broadcast":
             if x.d is not None:
-                return E(shape, d=np.broadcast_to(x.d, (x.d.shape[0],) + tuple(shape)), b=x.b)
+                return E(shape, d=np.broadcast_to(x.d, (x.d.shape[0],) + tuple(shape)), b=x.b, w=x.w)
             s, v = x.s, {}
             for p, a in x.v.items():
                 if x.shape[p] == 1 and shape[p] > 1:
                     s = s + a[:, 0]
                 else:
                     v[p] = a
-            return E(shape, s=s, v=v, b=x.b)
-        return self._dense(shape, x.full().reshape((-1,) + tuple(shape)), x.b)
+            return E(shape, s=s, v=v, b=x.b, w=x.w)
+        return self._dense(shape, x.full().reshape((-1,) + tuple(shape)), x.b, x.w)
 
     def _for(self, op, env):
         lb, ub, st = (self._get(env, op.extra[k]) for k in ("lb", "ub", "step"))
         for v in (lb, ub, st):
             if not isinstance(v, E) or not v.scalar_only() or np.unique(v.s).size != 1:
                 raise Unmodelled("a loop whose bounds differ between programs or depend on data")
+        if "unsignedCmp" in op.text:
+            raise Unmodelled("a loop that compares its bounds unsigned")
+        w = lb.w
+        if w is None or w == 1 or ub.w != w or st.w != w:
+            raise Unmodelled("a loop whose bounds are not integers of one width")
         lo, hi, step = int(lb.s.flat[0]), int(ub.s.flat[0]), int(st.s.flat[0])
         if step <= 0:
             raise Unmodelled("a loop with a non-positive step")
+        if lo < hi and (hi - 1) + step >= (1 << (w - 1)):
+            raise Unmodelled(f"a loop whose {w}-bit induction variable can overflow")
         carried = [self._get(env, v) for _k, v in op.extra["iter"]]
         names = [k for k, _v in op.extra["iter"]]
         for it in range(lo, hi, step):
             inner = dict(env)
-            inner[op.extra["iv"]] = E((), s=np.full((1,), it, dtype=np.int64))
+            inner[op.extra["iv"]] = E((), s=np.full((1,), it, dtype=np.int64), w=w)
             for k, v in zip(names, carried):
                 inner[k] = v
             self._ops(op.body, inner)
@@ -897,15 +1153,31 @@ def _bp(x, P, n):
 _BIG = np.iinfo(np.int64).max
 
 
-def _int_range(x):
-    """(least, greatest) value of an integer value over all programs and elements."""
+def _bounds(x):
+    """(least, greatest) element of an integer value over all programs, exactly (the axes of one program are
+    independent, so per program the extremes are the sums of the parts' extremes)."""
     if x.d is not None:
+        if x.d.size == 0:
+            return 0, 0
         return int(x.d.min()), int(x.d.max())
-    lo, hi = x.s.astype(np.int64), x.s.astype(np.int64)
+    lo = np.asarray(x.s, dtype=np.int64).reshape(-1)
+    hi = lo
     for arr in x.v.values():
+        if arr.size == 0:
+            continue
         lo = lo + arr.min(axis=1)
         hi = hi + arr.max(axis=1)
     return int(lo.min()), int(hi.max())
+
+
+def _exact(x, what):
+    """x, when every part of it is within the exact range; otherwise the computation is not modelled."""
+    parts = [x.d] if x.d is not None else [x.s] + list(x.v.values())
+    for p in parts:
+        p = np.asarray(p)
+        if p.size and (int(p.max()) > _LIMIT or int(p.min()) < -_LIMIT):
+            raise Unmodelled(f"{what}: a value beyond the checker's exact integer range (2^60)")
+    return x
 
 
 def _ranges(vals, valid, twice_why, gaps_why, twice="violation"):
@@ -1127,14 +1399,17 @@ class _Fast:
         else:
             wantO, valid_o, what = (self.n // int(vinfo.block[0])) * s0, self.vC, "columns"
         wantT = (self.k // gk) * s1                                 # by k
+        read = np.ones(S.shape, dtype=bool)                         # the lanes this load reads
         if leaf.mask is not None:
             sm = _separate_mask(leaf.mask, off.shape, P)
             if sm is None:
                 return False
             mS, m0, m1 = sm
             need = (m0 if axis == 0 else m1) & mS.reshape(-1, 1)
+            read = need
             if np.any(valid_o & ~need):
                 raise _Fail("violation", f"a scale of {leaf.arg} needed by a consumed element is masked out")
+        _scale_in_bounds(leaf, info, S, read)
         c = _constant_over(wantT, self.vT)
         if c is None:
             big = np.iinfo(np.int64).max
@@ -1157,6 +1432,36 @@ class _Fast:
             raise _Fail("violation", f"{int(wrong.sum())} output {what} are multiplied by a scale of {leaf.arg} that "
                                      f"is not theirs (block {1 if axis == 0 else int(vinfo.block[0])}x{gk})", ex)
         return True
+
+
+def _extent(info) -> Optional[int]:
+    """How many elements a tensor's layout spans with no gap (a permuted contiguous layout); None otherwise."""
+    shape, stride = [int(x) for x in info.shape], [int(x) for x in info.stride]
+    if not shape or len(shape) != len(stride) or any(n <= 0 for n in shape):
+        return None
+    need = 1
+    for s, n in sorted((s, n) for s, n in zip(stride, shape) if n > 1):
+        if s != need:
+            return None
+        need *= n
+    return need
+
+
+def _scale_in_bounds(leaf, info, addr, read):
+    """Every lane a scale load reads (its own mask aside) must address an element of the scale tensor - also in a K
+    tile whose operands are all masked out: what is read there multiplies a zero product, and an out-of-bounds value
+    can be infinite or NaN (0 x inf is NaN). Before 2026-10-03 (L5.4d) such lanes were not checked."""
+    ext = _extent(info)
+    if ext is None:
+        raise Unmodelled(f"{leaf.arg}: a scale layout with gaps (strides {tuple(info.stride)}); reads outside it are "
+                         f"not decided")
+    addr = np.asarray(addr)
+    out = np.broadcast_to(read, addr.shape) & ((addr < 0) | (addr >= ext))
+    if out.any():
+        idx = tuple(int(x[0]) for x in np.nonzero(out))
+        raise _Fail("violation", f"{int(out.sum())} lanes read a scale of {leaf.arg} outside its "
+                                 f"{tuple(int(x) for x in info.shape)} elements (an offset of "
+                                 f"{int(addr[idx])} of {ext})", {"program_chunk_index": idx[0]})
 
 
 def _dense_coords(run, leaf, role):
@@ -1229,11 +1534,14 @@ def _dense_scale(run, leaf, role, a, b):
             raise Unmodelled("a weight scale that varies along the output rows")
         got = off[:, 0, :][:, None, :]
     want = (vrow // gr) * s0 + (vk // gk) * s1
+    read = np.ones(off.shape, dtype=bool)
     if leaf.mask is not None:
+        read = np.broadcast_to(_as_bool_full(leaf.mask), off.shape)
         sm = _as_bool_full(leaf.mask)
         sm = sm[:, :, 0][:, :, None] if axis == "row" else sm[:, 0, :][:, None, :]
         if (valid & ~np.broadcast_to(sm, valid.shape)).any():
             raise _Fail("violation", f"a scale of {leaf.arg} needed by a consumed element is masked out")
+    _scale_in_bounds(leaf, info, off, read)
     wrong = valid & (np.broadcast_to(got, want.shape) != want)
     if wrong.any():
         idx = tuple(int(x[0]) for x in np.nonzero(wrong))

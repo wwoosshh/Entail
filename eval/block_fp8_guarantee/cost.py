@@ -89,6 +89,10 @@ def main(out_root, pairs=5):
     import common
 
     os.makedirs(out_root, exist_ok=True)
+    if os.environ.get("BFG_FREEZE"):           # bound to a freeze (v4): this checkout and environment must match it
+        import freeze_check
+
+        freeze_check.require(os.environ["BFG_FREEZE"], out_root, "the cost measurement")
     auto = os.path.join(common.ENTAIL_ROOT, "entail", "adapters", "autoinstall")
     modes = ["off"] + os.environ.get("BFG_COST_MODES", "guarantee,structure").split(",")
     order = []

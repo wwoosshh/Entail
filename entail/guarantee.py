@@ -15,6 +15,10 @@ Three kinds of evidence are kept apart in the record: the meaning contract (issu
 integrity), the numeric check of the whole output of this call, and nothing sampled - this profile never compares a
 slice or a warm-up and passes the rest.
 
+A plan cannot weaken the guarantee (GUARANTEE_FLOOR, L5.4d): every call under a plan with integrity "epoch" (no
+proof that the operands are immutable or that every write to them is owned) or with a tolerance looser than the
+calibrated one is refused (kind "plan"). A stricter tolerance is allowed.
+
 The pieces:
   producers   issue_activation / issue_weight: the real quantizer and the real weight processing hand over their
               outputs with an Issue each - role, pair, block or group, layout, storage, epoch, a checksum of the
@@ -82,6 +86,24 @@ ROLES = ("activation", "activation_scale", "weight", "weight_scale")
 OUTCOMES = ("normal_delivered", "repaired_delivered", "blocked", "error")
 STRUCTURE_OUTCOMES = ("kernel_delivered", "reference_delivered", "blocked", "error")
 GRAPH_GATES = 4096         # gates one captured graph may hold (their flags' pinned host copies are made beforehand)
+# The weakest plan ENTAIL=guarantee runs under (L5.4d): a plan cannot buy a weaker guarantee. The operands' bytes are
+# compared with their issue (integrity "checksum"): "epoch" would trust that nothing wrote them behind the version
+# counter, which needs a proof that they are immutable or that every write to them is owned, and this profile has
+# none. The tolerance is at most the calibrated one (v1 calibration: ulps 1, c_acc 2^-11); a stricter one is allowed.
+GUARANTEE_FLOOR = {"integrity": "checksum", "ulps": 1.0, "c_acc": 2.0 ** -11}
+
+
+def weaker_than_floor(p) -> list:
+    """Why plan p would give a weaker guarantee than GUARANTEE_FLOOR (empty: it does not)."""
+    why = []
+    if p.integrity != GUARANTEE_FLOOR["integrity"]:
+        why.append(f"integrity {p.integrity!r} trusts that the operands were not written behind the version counter; "
+                   f"that needs a proof of immutable inputs or owned writes, and none is available here")
+    if not p.ulps <= GUARANTEE_FLOOR["ulps"]:
+        why.append(f"ulps {p.ulps} is looser than the calibrated {GUARANTEE_FLOOR['ulps']}")
+    if not p.c_acc <= GUARANTEE_FLOOR["c_acc"]:
+        why.append(f"c_acc {p.c_acc} is looser than the calibrated {GUARANTEE_FLOOR['c_acc']}")
+    return why
 _P = 2147483647            # the checksum's modulus (2^31 - 1)
 _CW = 1024                 # words per checksum row
 
@@ -748,6 +770,10 @@ def gate(kernel, A, B, As, Bs, block_size, output_dtype=None, consumer: str = CO
         _refuse(rec, "plan", f"the plan's check {plan().check!r} is not what ENTAIL={mode()} runs "
                              f"({MODES[mode()]!r}): the structural check (static) is an experiment, not the guarantee",
                 t0)
+    if mode() == "guarantee":
+        weak = weaker_than_floor(plan())
+        if weak:
+            _refuse(rec, "plan", "the plan would weaken the guarantee: " + "; ".join(weak), t0)
     try:
         A, B, As, Bs, block, issues = _admit(A, B, As, Bs, block_size, output_dtype, rec, t0)
     except Refused:

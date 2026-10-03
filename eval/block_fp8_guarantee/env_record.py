@@ -25,7 +25,8 @@ with common.vllm_context():
 """
 
 
-def main(out):
+def record():
+    """The environment record (what freeze.py fixes and freeze_check.py compares), made now."""
     import common
 
     env = common.environment()
@@ -41,8 +42,15 @@ def main(out):
         got = [ln.split(" ", 1)[1] for ln in p.stdout.splitlines() if ln.startswith("CHOSEN ")]
         choice[label] = got[0] if got else f"error: {p.stderr[-800:]}"
     env["block_fp8_kernel_choice"] = choice
+    return env
+
+
+def main(out):
+    import common
+
+    env = record()
     common.write_json(out, env)
-    print(choice)
+    print(env["block_fp8_kernel_choice"])
 
 
 if __name__ == "__main__":

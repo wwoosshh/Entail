@@ -9,6 +9,8 @@ Run: python tests/test_kernel_ir.py
 import os
 import sys
 
+import numpy as np
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 from entail import kernel_ir  # noqa: E402
@@ -97,11 +99,113 @@ def counterexamples(src):
          edit(src, ("%a_61 = tt.splat %a_60 : i32 -> tensor<1x128xi32>",
                     "%a_60m = arith.subi %a_60, %c1_i32 : i32\n      %a_61 = tt.splat %a_60m : i32 -> "
                     "tensor<1x128xi32>")), "unproven"),
-        ("one more iteration than K needs (fully masked): harmless",
+        # v3 called this harmless and proven: the extra K tile is masked out, but its scales are read unmasked at
+        # As[m, 20] / Bs[n, 20], past the 20 scale groups - a value that may be inf or NaN, and 0 x inf is NaN
+        ("one more iteration than K needs: its scales are read outside As and Bs",
          edit(src, ("%1 = arith.divsi %0, %c128_i32 : i32", "%1a = arith.divsi %0, %c128_i32 : i32\n"
                                                              "    %1 = arith.addi %1a, %c1_i32 : i32")),
-         "proven"),
+         "violation"),
     ]
+
+
+def address_counterexamples(src):
+    """(name, IR, verdict of v3 2a51daf, verdict now): the integer meaning of addresses and masks (L5.4d). v3 read
+    every integer as a plain int64, so both were proven; read as the IR defines them, neither computes the contract."""
+    return [
+        # the k masks written as (k - 64) <u (bound - 64): signed, the same test as k < bound; unsigned, k < 64 is a
+        # negative number read as 2^32 - (64 - k), so the first half of every K tile is masked out
+        ("k masks compared unsigned after a shift by 64: half of every K tile is masked out",
+         edit(src, ("%a_61 = tt.splat %a_60 : i32 -> tensor<1x128xi32>",
+                    "%a_60s = arith.subi %a_60, %c64_i32 : i32\n"
+                    "      %a_61 = tt.splat %a_60s : i32 -> tensor<1x128xi32>"),
+                   ("%a_62 = arith.cmpi slt, %a_ptrs_22, %a_61 : tensor<1x128xi32>",
+                    "%c64a = arith.constant dense<64> : tensor<1x128xi32>\n"
+                    "      %ks_a = arith.subi %a_ptrs_22, %c64a : tensor<1x128xi32>\n"
+                    "      %a_62 = arith.cmpi ult, %ks_a, %a_61 : tensor<1x128xi32>"),
+                   ("%b = tt.splat %a_60 : i32 -> tensor<128x1xi32>", "%b = tt.splat %a_60s : i32 -> tensor<128x1xi32>"),
+                   ("%b_65 = arith.cmpi slt, %b_ptrs, %b : tensor<128x1xi32>",
+                    "%c64b = arith.constant dense<64> : tensor<128x1xi32>\n"
+                    "      %ks_b = arith.subi %b_ptrs, %c64b : tensor<128x1xi32>\n"
+                    "      %b_65 = arith.cmpi ult, %ks_b, %b : tensor<128x1xi32>")),
+         "proven", "violation"),
+        # A's tile moved by extui(-1 : i32) + 1: as a plain int64 that is 0; extui reads -1 unsigned, 2^32 - 1, so the
+        # tile moves by 2^32 elements, far outside A
+        ("A's pointers moved by extui(-1) + 1: 2^32 elements, not 0",
+         edit(src, ("%b_ptrs = tt.expand_dims %offs_bn_15 {axis = 1 : i32}",
+                    "%neg1 = arith.constant -1 : i32\n"
+                    "    %neg1w = arith.extui %neg1 : i32 to i64\n"
+                    "    %one64 = arith.constant 1 : i64\n"
+                    "    %movew = arith.addi %neg1w, %one64 : i64\n"
+                    "    %movet = tt.splat %movew : i64 -> tensor<64x128xi64>\n"
+                    "    %a_ptrs_27m = tt.addptr %a_ptrs_27, %movet : tensor<64x128x!tt.ptr<f8E4M3FN>>, "
+                    "tensor<64x128xi64>\n"
+                    "    %b_ptrs = tt.expand_dims %offs_bn_15 {axis = 1 : i32}"),
+                   ("iter_args(%a_ptrs_57 = %a_ptrs_27,", "iter_args(%a_ptrs_57 = %a_ptrs_27m,")),
+         "proven", "violation"),
+    ]
+
+
+def integer_ops():
+    """Each integer operation against what MLIR's arith defines for it: (IR line, operands {name: (value, type)},
+    expected value or None when the result is poison or undefined - not modelled, the launch unproven)."""
+    i32min = -2 ** 31
+    return [
+        ("%r = arith.addi %x, %y : i32", {"x": (2 ** 31 - 1, "i32"), "y": (1, "i32")}, i32min),        # wraps
+        ("%r = arith.addi %x, %y overflow<nsw> : i32", {"x": (2 ** 31 - 1, "i32"), "y": (1, "i32")}, None),
+        ("%r = arith.muli %x, %y : i16", {"x": (300, "i16"), "y": (300, "i16")}, 90000 - 65536),
+        ("%r = arith.subi %x, %y overflow<nuw> : i32", {"x": (1, "i32"), "y": (2, "i32")}, None),
+        ("%r = arith.extsi %x : i1 to i32", {"x": (1, "i1")}, -1),
+        ("%r = arith.extui %x : i1 to i32", {"x": (1, "i1")}, 1),
+        ("%r = arith.extui %x : i32 to i64", {"x": (-1, "i32")}, 2 ** 32 - 1),
+        ("%r = arith.extsi %x : i32 to i64", {"x": (-1, "i32")}, -1),
+        ("%r = arith.trunci %x : i32 to i8", {"x": (300, "i32")}, 44),
+        ("%r = arith.trunci %x : i32 to i8", {"x": (200, "i32")}, -56),
+        ("%r = arith.index_cast %x : index to i32", {"x": (2 ** 33 + 7, "index")}, 7),
+        ("%r = arith.index_cast %x : i32 to index", {"x": (-5, "i32")}, -5),
+        ("%r = arith.index_castui %x : i32 to index", {"x": (-5, "i32")}, 2 ** 32 - 5),
+        ("%r = arith.divsi %x, %y : i32", {"x": (-7, "i32"), "y": (2, "i32")}, -3),
+        ("%r = arith.remsi %x, %y : i32", {"x": (-7, "i32"), "y": (2, "i32")}, -1),
+        ("%r = arith.floordivsi %x, %y : i32", {"x": (-7, "i32"), "y": (2, "i32")}, -4),
+        ("%r = arith.ceildivsi %x, %y : i32", {"x": (7, "i32"), "y": (2, "i32")}, 4),
+        ("%r = arith.divsi %x, %y : i32", {"x": (5, "i32"), "y": (0, "i32")}, None),
+        ("%r = arith.divsi %x, %y : i32", {"x": (i32min, "i32"), "y": (-1, "i32")}, None),
+        ("%r = arith.divui %x, %y : i32", {"x": (-1, "i32"), "y": (2, "i32")}, 2 ** 31 - 1),
+        ("%r = arith.remui %x, %y : i32", {"x": (-1, "i32"), "y": (10, "i32")}, (2 ** 32 - 1) % 10),
+        ("%r = arith.minui %x, %y : i32", {"x": (-1, "i32"), "y": (5, "i32")}, 5),
+        ("%r = arith.minsi %x, %y : i32", {"x": (-1, "i32"), "y": (5, "i32")}, -1),
+        ("%r = arith.maxui %x, %y : i32", {"x": (-1, "i32"), "y": (5, "i32")}, -1),
+        ("%r = arith.shli %x, %y : i32", {"x": (1, "i32"), "y": (31, "i32")}, i32min),
+        ("%r = arith.shli %x, %y : i32", {"x": (1, "i32"), "y": (32, "i32")}, None),
+        ("%r = arith.shrsi %x, %y : i32", {"x": (-8, "i32"), "y": (1, "i32")}, -4),
+        ("%r = arith.shrui %x, %y : i32", {"x": (-8, "i32"), "y": (1, "i32")}, (2 ** 32 - 8) >> 1),
+        ("%r = arith.andi %x, %y : i32", {"x": (-1, "i32"), "y": (0xFFFF, "i32")}, 0xFFFF),
+        ("%r = arith.xori %x, %y : i32", {"x": (-1, "i32"), "y": (1, "i32")}, -2),
+        ("%r = arith.cmpi ult, %x, %y : i32", {"x": (-1, "i32"), "y": (0, "i32")}, 0),
+        ("%r = arith.cmpi slt, %x, %y : i32", {"x": (-1, "i32"), "y": (0, "i32")}, 1),
+        ("%r = arith.cmpi slt, %x, %y : i1", {"x": (1, "i1"), "y": (0, "i1")}, 1),       # true is -1 signed
+        ("%r = arith.constant 4294967295 : i32", {}, -1),
+        ("%r = arith.constant -1 : i64", {}, -1),
+        ("%r = arith.mulsi_extended %x, %y : i32", {"x": (2, "i32"), "y": (3, "i32")}, None),   # not modelled
+    ]
+
+
+def check_integer_ops():
+    """Run each line through the evaluator alone (one program), as the launch would see it."""
+    fn = kernel_ir.Func("t", [], [])
+    out = []
+    for line, vals, want in integer_ops():
+        run = kernel_ir._Run(fn, {}, {}, [np.zeros(1, dtype=np.int64)] * 3, dense=True)
+        env = {f"%{k}": kernel_ir.E((), s=np.full((1,), v, dtype=np.int64), b=(t == "i1"),
+                                    w=kernel_ir._width(t)) for k, (v, t) in vals.items()}
+        op = kernel_ir._op(line)
+        try:
+            run._op(op, env)
+            r = env["%r"]
+            got = int(r.full().reshape(-1)[0])
+        except kernel_ir.Unmodelled:
+            got = None
+        out.append((line, want, got))
+    return out
 
 
 def main():
@@ -152,12 +256,25 @@ def main():
         print(f"ok {name}: {v.verdict} ({v.why[:110]})")
     v = launch("orig", 100, 64)
     assert v.verdict == "proven", v                       # a partial last row tile, masked at the store
-    v = launch("orig", 64, 64, stride_am=1 << 26)          # 63 * 2^26 > 2^31: the IR's i32 offsets wrap
-    assert v.verdict == "unproven" and "i32" in v.why, v
+    # 63 * 2^26 > 2^31: the IR's i32 offsets wrap (two's complement, computed as such since L5.4d; v3 refused to
+    # model it) and the wrapped addresses fall outside A
+    v = launch("orig", 64, 64, stride_am=1 << 26)
+    assert v.verdict == "violation" and "outside" in v.why, v
     b = binding(64)
     b["Mut"] = Tensor("output", 0, 0, (64, N), (N, 1))     # two tensors could be the output: nothing is claimed
     assert launch("orig", 64, 64, b=b).verdict == "unproven"
-    print("ok a partial row tile: proven; i32 overflow and two outputs: unproven")
+    print("ok a partial row tile: proven; wrapped i32 offsets: violation; two outputs: unproven")
+
+    # integer meaning (L5.4d): every operation as MLIR's arith defines it
+    for line, want, got in check_integer_ops():
+        assert got == want, (line, want, got)
+    print(f"ok {len(integer_ops())} integer operations: widths, two's complement wrap, signed and unsigned readings, "
+          f"poison and undefined behaviour not modelled")
+    bad += [(name, ttir, now) for name, ttir, _v3, now in address_counterexamples(src)]
+    for name, ttir, _v3, now in address_counterexamples(src):
+        v = launch("orig", 64, 64, ttir=ttir)
+        assert v.verdict == now, (name, v.verdict, v.why)
+        print(f"ok {name}: {v.verdict} ({v.why[:110]})")
 
     # the values kept apart (fast) and evaluated element by element (dense) give the same verdicts
     cases = [("orig", 64, 64, None, None), ("tile_0", 16, 16, None, None), ("tile_1", 256, 64, None, None),
@@ -173,7 +290,8 @@ def main():
         kernel_ir.FAST = True
     for (n, M, _bm, _b, _t), f, d in zip(cases, fast, dense):
         assert f.verdict == d.verdict, (n, M, f, d)
-        assert not f.dense, (n, f)
+        # a proven launch is decided without going element by element; a read outside an operand is found there
+        assert f.verdict != "proven" or not f.dense, (n, f)
     print("ok fast and dense evaluation agree on", len(cases), "launches;",
           f"orig: fast {fast[0].seconds:.4f} s, dense {dense[0].seconds:.4f} s")
 

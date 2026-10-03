@@ -1,6 +1,8 @@
 """Run the scenarios, each mode in a fresh process: python run_suite.py <split> <out_root> [--freeze F] [--only ID,...]
 
-split: dev (fixed seeds) or holdout (seeds from the freeze manifest's hash; --freeze is then required).
+split: dev (fixed seeds) or holdout (seeds from the freeze manifest's hash; --freeze is then required, and the holdout
+starts only when this checkout and environment match the manifest: freeze_check.py). cases.json lists every scheduled
+case, also those --only or --modes leave out; such a run is marked partial.
 Modes per case: off A, off B (two fresh off runs: is off stable), load (entail as it ships, ENTAIL=load), guarantee
 (ENTAIL=guarantee, the numeric guarantee) and, from v3 (L5.4c), structure (ENTAIL=structure, the structural check
 experiment - reported apart, never as the guarantee). entail installs itself through its start-up hook
@@ -74,14 +76,26 @@ def main():
             assert fz.get("frozen"), "the holdout runs only on a frozen manifest"
     elif a.split == "holdout":
         sys.exit("--freeze is required for the holdout")
-    cs = C.cases(a.split, key)
-    if a.only:
-        want = set(a.only.split(","))
-        cs = [c for c in cs if c["id"] in want]
     os.makedirs(a.out_root, exist_ok=True)
-    common.write_json(os.path.join(a.out_root, "cases.json"), {"split": a.split, "key": key, "cases": cs})
+    if a.freeze:
+        # the code and the environment against the freeze manifest (L5.4d): the holdout does not start on a
+        # mismatch; a dev run against a draft manifest records the comparison and goes on
+        import freeze_check
+
+        fc = freeze_check.check(a.freeze, os.path.join(a.out_root, "freeze_check.json"))
+        if a.split == "holdout" and not fc["matches"]:
+            sys.exit(f"the holdout does not start: this checkout or environment differs from the freeze "
+                     f"({len(fc['mismatches'])} mismatches, see {a.out_root}/freeze_check.json)")
+    scheduled = C.cases(a.split, key)
     labels = a.modes.split(",")
-    for case in cs:
+    selected = [c for c in scheduled if not a.only or c["id"] in set(a.only.split(","))]
+    # every scheduled case is listed, run or not: the aggregator counts the ones without results as missing
+    common.write_json(os.path.join(a.out_root, "cases.json"), {
+        "split": a.split, "key": key, "freeze_sha256": key or None, "cases": scheduled,
+        "scheduled": [c["id"] for c in scheduled], "selected": [c["id"] for c in selected],
+        "labels": [lab for lab, _m in MODES if lab in labels],
+        "partial": len(selected) < len(scheduled) or any(lab not in labels for lab, _m in MODES)})
+    for case in selected:
         for label, mode in MODES:
             if label in labels:
                 run_one(case, label, mode, a.out_root, a.freeze, plan_path)
