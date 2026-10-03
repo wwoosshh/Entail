@@ -164,6 +164,16 @@ TYPES_TARGETS = {
                                        "entail.adapters.vllm_index_meanings:install_functions"],
     "vllm.v1.worker.gpu.block_table": ["entail.adapters.vllm_index_meanings:install"],
     "vllm.v1.worker.gpu.states": ["entail.adapters.vllm_index_meanings:install_request_state"],
+    "vllm.v1.worker.gpu.buffer_utils": ["entail.adapters.vllm_index_meanings:install_write_buffers"],
+    "vllm.v1.worker.gpu.sample.bad_words": ["entail.adapters.vllm_index_meanings:install_functions",
+                                            "entail.adapters.vllm_index_meanings:install_classes"],
+    "vllm.v1.worker.gpu.sample.logit_bias": ["entail.adapters.vllm_index_meanings:install_functions",
+                                             "entail.adapters.vllm_index_meanings:install_classes"],
+    "vllm.v1.worker.gpu.sample.min_p": ["entail.adapters.vllm_index_meanings:install_functions"],
+    "vllm.v1.worker.gpu.sample.logprob": ["entail.adapters.vllm_index_meanings:install_functions",
+                                          "entail.adapters.vllm_index_meanings:install_classes"],
+    "vllm.v1.worker.gpu.sample.gumbel": ["entail.adapters.vllm_index_meanings:install_functions"],
+    "vllm.v1.worker.gpu.structured_outputs": ["entail.adapters.vllm_index_meanings:install_classes"],
 }
 if os.environ.get("ENTAIL", "off") == "guarantee":
     TARGETS = dict(GUARANTEE_TARGETS)

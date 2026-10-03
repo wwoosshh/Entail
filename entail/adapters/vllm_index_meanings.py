@@ -130,7 +130,37 @@ def _functions():
                         "vllm_index_meanings.json")
     with open(path, encoding="utf-8") as f:
         table = json.load(f)
-    return {k: {arg: (list(v[0]), v[1]) for arg, v in spec.items()} for k, spec in table.items() if k != "_"}
+    return {k: {arg: (list(v[0]), v[1]) for arg, v in spec.items()} for k, spec in table.items()
+            if k != "_" and k != "classes"}
+
+
+def _classes():
+    """The worker's objects that hold tensors (the "classes" section of the same data file): for each class, its
+    attributes and what each means. A staged-write buffer (StagedWriteTensor) is its .gpu tensor; its write
+    buffers then mean places along that tensor's axes."""
+    import json
+    import os
+
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data",
+                        "vllm_index_meanings.json")
+    with open(path, encoding="utf-8") as f:
+        table = json.load(f)
+    return {k: {attr: (list(v[0]), v[1]) for attr, v in spec.items()} for k, spec in table.get("classes", {}).items()}
+
+
+def _attach_holder(obj, names, basis):
+    """A tensor, or an object holding one (.gpu): the meaning goes on the GPU tensor; a staged-write buffer's write
+    buffers are tagged with it, so what they hand to the write kernel means places along its axes."""
+    t = getattr(obj, "gpu", obj)
+    if t is None or not hasattr(t, "dim"):
+        return
+    if t.dim() == len(names):
+        _attach(t, names, basis)
+    for attr, role in (("write_indices", 0), ("write_starts", 1), ("write_cu_lens", None), ("write_contents", "v")):
+        pool = getattr(obj, attr, None)
+        if pool is not None and hasattr(pool, "copy_to_uva"):
+            pool.__entail_meaning__ = (["write"], names[role] if isinstance(role, int) and role < len(names)
+                                       else (basis if role == "v" else None))
 
 
 def _wrap_function(mod, name, table):
@@ -164,10 +194,63 @@ def _wrap_function(mod, name, table):
 
 
 def install_functions():
-    mod = sys.modules.get("vllm.v1.worker.gpu.input_batch")
-    if mod is None:
+    n = 0
+    for key, table in _functions().items():
+        module, _, name = key.rpartition(":")
+        holder = sys.modules.get(module or "vllm.v1.worker.gpu.input_batch")
+        if holder is not None and "." in name:          # module:Class.method
+            cname, _, name = name.partition(".")
+            holder = getattr(holder, cname, None)
+        if holder is not None:
+            n += _wrap_function(holder, name, table)
+    return n
+
+
+def install_classes():
+    """The sampler's and the worker's state objects: their tensors get their meanings when the object is made."""
+    n = 0
+    for key, table in _classes().items():
+        module, _, cname = key.rpartition(":")
+        mod = sys.modules.get(module)
+        cls = getattr(mod, cname, None) if mod is not None else None
+        if cls is None:
+            continue
+
+        def make(orig, table=table):
+            @functools.wraps(orig)
+            def run(self, *a, **k):
+                orig(self, *a, **k)
+                for attr, (names, basis) in table.items():
+                    try:
+                        _attach_holder(getattr(self, attr, None), names, basis)
+                    except Exception:  # noqa: BLE001
+                        _count("attach_failed")
+            return run
+        n += _wrap(cls, "__init__", make)
+    return n
+
+
+def install_write_buffers():
+    """A staged write's index buffers are made at the write (copied into a pooled UVA tensor): the tensor the
+    write kernel gets carries the meaning its owner was tagged with."""
+    mod = sys.modules.get("vllm.v1.worker.gpu.buffer_utils")
+    cls = getattr(mod, "UvaBufferPool", None) if mod is not None else None
+    if cls is None:
         return 0
-    return sum(_wrap_function(mod, name, table) for name, table in _functions().items())
+
+    def make(orig):
+        @functools.wraps(orig)
+        def run(self, *a, **k):
+            t = orig(self, *a, **k)
+            m = getattr(self, "__entail_meaning__", None)
+            if m is not None:
+                try:
+                    _attach(t, list(m[0]), m[1])
+                except Exception:  # noqa: BLE001
+                    _count("attach_failed")
+            return t
+        return run
+    return _wrap(cls, "copy_to_uva", make)
 
 
 def install_request_state():
@@ -184,10 +267,10 @@ def install_request_state():
                                        ("prefill_len", ["request_state"], "position"),
                                        ("total_len", ["request_state"], "position"),
                                        ("num_computed_tokens", ["request_state"], "position")):
-                t = getattr(self, attr, None)
-                t = getattr(t, "gpu", t)
-                if t is not None and hasattr(t, "dim") and t.dim() == len(names):
-                    _attach(t, names, basis)
+                try:
+                    _attach_holder(getattr(self, attr, None), names, basis)
+                except Exception:  # noqa: BLE001
+                    _count("attach_failed")
             t = getattr(self, "last_sampled_tokens", None)
             if t is not None and hasattr(t, "dim"):
                 _attach(t, ["request_state"] + [None] * (t.dim() - 1), "token_id")
