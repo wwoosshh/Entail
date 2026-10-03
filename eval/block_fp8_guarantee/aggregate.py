@@ -13,7 +13,9 @@ Per step (calls, direct calls, replays):
   wrong_escaped        a value beyond the tolerance was handed on, or read inside the graph, even once - NaN included
   refused_after_use    a replay refused after the graph's next operation had read a value (within the tolerance):
                        not a block, the refusal came too late
-  stopped              not run: the device was stopped by a block at an earlier step of the same process
+  stopped              not run: the device was stopped by a block at an earlier step of the same process, or a
+                       capture the profile refused (structure_writes: a write captured into the graph) left nothing
+                       to replay; after a block or such a refusal it counts as blocked (nothing was handed on)
   unknown              nothing observed (no producer output, a step not reached)
   error                an exception that is not a refusal (crash, OOM)
 Until 2026-10-03 (L5.4c) a replay whose next operation read only NaN counted as blocked; that is an escape of a value
@@ -21,6 +23,8 @@ without a permit, not a block. No step of the v1 and v2 runs read only NaN, so t
 Per defect or integrity case: the off baseline (off A) must be beyond the tolerance on a defective step
 (mutation_effective); otherwise the case is incomplete, and it is never dropped.
 
+Eager integrity steps (v5, L5.4e) are observed like replays: the call's next operation marks on the host whether it
+ran, so a device stop after the call (the in-kernel check) is a block only when the next operation did not run.
 Completeness (L5.4d): every case the split schedules is judged in every mode of the run, also when it has no results
 (missing). A run of one case in one mode is complete when it exited 0, recorded every planned step (a step not run is
 recorded with the reason), ran the scheduled case spec and was bound to the run's freeze manifest. A mode with an
@@ -35,7 +39,8 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-LABELS = ("offA", "offB", "load", "guarantee", "structure")
+LABELS = ("offA", "offB", "load", "guarantee", "structure", "structure_writes", "structure_inkernel")
+STRUCTURAL = ("structure", "structure_writes", "structure_inkernel")
 COUNTS = ("scheduled", "reached", "mutation_effective", "normal_delivered", "repaired_delivered", "blocked",
           "wrong_escaped", "refused_after_use", "unknown", "error")
 DEFECT_LIKE = ("defect", "integrity")
@@ -68,7 +73,7 @@ def repaired_by_entail(step, label):
     e = step.get("entail") or {}
     if label == "guarantee":
         return e.get("repaired_delivered", 0) > 0
-    if label == "structure":        # the structural experiment: the reference handed on, or a repair at admission
+    if label in STRUCTURAL:         # the structural experiment: the reference handed on, or a repair at admission
         return e.get("reference_delivered", 0) > 0 or e.get("admission_repairs", 0) > 0 or \
             e.get("repaired_delivered", 0) > 0
     if label == "load":
@@ -83,7 +88,10 @@ def step_outcome(step, label):
         return None
     exc = step.get("exception")
     orc = step.get("oracle")
-    if exc and exc.get("type") != "Refused":
+    if step["op"] in ("call", "direct") and step.get("device_stopped") and step.get("next_op_ran") is not None:
+        # v5: the device stopped after the call; a block when its next operation did not run, else not judged
+        return "blocked" if step.get("next_op_ran") is False else "unknown"
+    if exc and exc.get("type") not in ("Refused", "DeviceStop"):
         return "error"
     if step["op"] == "replay":
         ran = step.get("next_op_ran", True)     # v1/v2 harness: no device stop existed, the next operation ran
@@ -159,7 +167,11 @@ def judge_case(out_root, case, freeze_sha=None):
         # steps not run because an earlier step's block stopped the device count as blocked (nothing was handed on)
         if "stopped" in outs:
             first = outs.index("stopped")
-            outs = [("blocked" if "blocked" in outs[:first] else "unknown") if o == "stopped" else o for o in outs]
+            refused_capture = any(s.get("op") == "capture" and (s.get("exception") or {}).get("type") == "Refused"
+                                  for s in r["steps"][:first])
+            outs = [("blocked" if "blocked" in outs[:first] or refused_capture else "unknown") if o == "stopped"
+                    else o for o in outs]
+            m["refused_capture"] = refused_capture
             m["stopped_after_block"] = sum(1 for s in r["steps"] if s.get("not_run"))
         m["steps"] = outs
         m["rng_same"] = all(s.get("rng_same", True) is not False for s in r["steps"])
@@ -266,7 +278,7 @@ def summarize(out_root):
             unfinished_all[lab] = unfinished
     out["complete"] = not unfinished_all and not meta.get("partial", False)
     out["unfinished_runs"] = unfinished_all
-    for lab in [x for x in ("load", "guarantee", "structure", "offA") if x in labels]:
+    for lab in [x for x in ("load", "guarantee") + STRUCTURAL + ("offA",) if x in labels]:
         cnt = {k: 0 for k in COUNTS}
         cnt["scheduled"] = len(judged)
         normal_fail, adm_fail, incomplete = [], [], []
@@ -322,7 +334,7 @@ def summarize(out_root):
         # failed: something went wrong in what ran. partial: not every scheduled case ran to its end in this mode
         # (or the run was started on a part of the split). incomplete: all ran, but a defect had no effect in off or
         # a verdict is unresolved. passed: none of these.
-        if escaped or normal_fail or (lab in ("guarantee", "structure") and adm_fail):
+        if escaped or normal_fail or ((lab == "guarantee" or lab in STRUCTURAL) and adm_fail):
             state = "failed"
         elif lab_unfinished or meta.get("partial", False):
             state = "partial"

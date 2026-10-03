@@ -15,8 +15,9 @@
   handles      the consumer's call goes through guarantee.gate, which may hand the kernel the scale the producer
                paired with its value or the declared block (before dispatch), hand on the reference's output, or
                refuse. Nothing here compares or decides.
-Installed only by ENTAIL=guarantee or ENTAIL=structure (adapters/autoinstall/sitecustomize.py; the Triton launch hook
-only for structure, the structural check experiment), or by a harness calling install().
+Installed only by ENTAIL=guarantee, ENTAIL=structure or its integrity experiments structure_writes and
+structure_inkernel (adapters/autoinstall/sitecustomize.py; the Triton launch hook only for the structural ones), or by
+a harness calling install().
 A producer called while torch.compile traces issues nothing: compiled code does not run these hooks at run time,
 and the gate refuses a value without an issue.
 """
@@ -249,10 +250,32 @@ def read_launch(fn, args, kwargs, grid):
     return values, consts, g
 
 
+_WRITTEN = {}          # kernel key (with its constexprs) -> the pointer arguments it writes, or None (any of them)
+
+
+def _written(fn, args, kwargs, grid, consts):
+    """The names of the arguments a Triton kernel writes through, read once per kernel and configuration from its
+    TTIR (kernel_ir.written_args); None when that cannot be told (then every tensor argument counts)."""
+    key = _kernel_key(fn, consts)
+    if key not in _WRITTEN:
+        try:
+            from .. import kernel_ir
+
+            _WRITTEN[key] = kernel_ir.written_args(fn.warmup(*args, grid=grid, **kwargs).asm["ttir"])
+        except Exception:  # noqa: BLE001 - not read: every tensor argument is taken as written
+            _WRITTEN[key] = None
+            _count("written_args_unknown")
+    return _WRITTEN[key]
+
+
 def install_triton():
-    """The launch hook check "static" (ENTAIL=structure) needs: every eager Triton launch while a gate is open is
-    offered to the core, which decides whether it goes ahead (guarantee.consumer_launch). Compile-only warm-ups pass
-    through."""
+    """The launch hook check "static" (ENTAIL=structure and its integrity experiments) needs: every eager Triton
+    launch while a gate is open is offered to the core, which decides whether it goes ahead (guarantee.consumer_launch;
+    with integrity "inkernel", guarantee.consumer_launch_inkernel, which may hand back the rewritten kernel's launch).
+    With integrity "writes" every launch, inside a gate or not, is also offered to writeguard.check_launch, which
+    refuses one that writes - by its own TTIR (kernel_ir.written_args) - through a tensor overlapping bytes a producer
+    issued (other than the gate's own operands); reading them passes. Compile-only warm-ups, and the kernels entail
+    rewrote itself, pass through."""
     mod = sys.modules.get("triton.runtime.jit")
     J = getattr(mod, "JITFunction", None) if mod is not None else None
     if J is None or getattr(J.run, "__entail_guarantee__", False):
@@ -261,15 +284,35 @@ def install_triton():
 
     @functools.wraps(orig)
     def run(self, *args, grid, warmup, **kwargs):
-        if warmup or guarantee._ctx() is None:
+        if warmup or getattr(self, "entail_source_sha256", None) is not None:
+            return orig(self, *args, grid=grid, warmup=warmup, **kwargs)
+        ctx = guarantee._ctx()
+        if guarantee.plan().integrity == "writes":
+            from .. import writeguard
+
+            if writeguard.live():
+                allowed = (ctx["A"], ctx["B"], ctx["As"], ctx["Bs"]) if ctx is not None else ()
+                values, consts, _g = read_launch(self, args, kwargs, grid)
+                names = _written(self, args, kwargs, grid, consts)
+                targets = list(values.values()) if names is None else [values.get(n) for n in names]
+                writeguard.check_launch(getattr(getattr(self, "fn", None), "__name__", "?"), targets,
+                                        allowed)   # raises Refused
+        if ctx is None:
             return orig(self, *args, grid=grid, warmup=warmup, **kwargs)
         go = True
         try:
             values, consts, g = read_launch(self, args, kwargs, grid)
-            go = guarantee.consumer_launch(_kernel_key(self, consts), values, g,
-                                           lambda: self.warmup(*args, grid=grid, **kwargs).asm["ttir"])
+            if ctx.get("inkernel"):
+                go = guarantee.consumer_launch_inkernel(self, _kernel_key, values, consts, g, args, kwargs, grid)
+            else:
+                go = guarantee.consumer_launch(_kernel_key(self, consts), values, g,
+                                               lambda: self.warmup(*args, grid=grid, **kwargs).asm["ttir"])
         except Exception:  # noqa: BLE001 - principle 12: never the engine's problem; the gate sees no verdict and
             _count("launch_read_failed")   # hands on the reference's output
+            go = False if ctx.get("inkernel") else go
+        if callable(go):
+            _count("launch_rewritten")
+            return go()
         if not go:
             _count("launch_withheld")
             return None

@@ -1,6 +1,7 @@
 """One scenario in one mode, in this (fresh) process: python run_case.py <case.json> <mode> <out_dir>
 
-mode: off | load | guarantee | structure. The suite (run_suite.py) sets ENTAIL to match and puts entail's start-up hook
+mode: off | load | guarantee | structure | structure_writes | structure_inkernel. The suite (run_suite.py) sets ENTAIL
+to match and puts entail's start-up hook
 on the path, so entail installs itself the way it does for a user (autoinstall), before this script touches vLLM. The
 harness then puts the case's consumer defect in (below entail's wrapper: the kernel object the launcher calls, or
 above it: the call site's scale cache) and runs the steps through vLLM's own kernel object.
@@ -13,6 +14,9 @@ Graphs (v3, M19 L5.4c): the graph's next operation copies what it read to pinned
 inside the graph, so what it consumed is known even when the device stopped at a gate (then it did not run, and the
 marker says so). A stop ends this process's device context: the step is recorded, the steps after it are recorded as
 not run, the files are written and the process exits without touching the device again.
+Integrity cases, eagerly (v5, M19 L5.4e): the call's next operation does the same (pinned host copy, then its matmul),
+since the in-kernel check stops the device after the call returned; a step with "corrupt": 0 writes nothing (before
+v5 it wrote zero bits); the bytes are written as the case's "corrupt_how" says (cases.py).
 """
 import json
 import os
@@ -44,7 +48,7 @@ def main(case_path, mode, out_dir):
     res = {"case": case, "mode": mode, "pid": os.getpid(), "env_ENTAIL": os.environ.get("ENTAIL"), "steps": [],
            "freeze_sha256": os.environ.get("BFG_FREEZE_SHA256")}
     g = ad = None
-    profiled = mode in ("guarantee", "structure")
+    profiled = mode in ("guarantee", "structure", "structure_writes", "structure_inkernel")
     if profiled:
         from entail import guarantee as g
         from entail.adapters import vllm_block_fp8_guarantee as ad
@@ -80,21 +84,41 @@ def main(case_path, mode, out_dir):
         produced = []
         q_inner = fp8_utils.per_token_group_quant_fp8
         corrupt_n = int(case.get("corrupt_bytes", 0))
+        how = case.get("corrupt_how", "alias")
         flip = torch.zeros((), dtype=torch.uint8, device="cuda") if corrupt_n else None
+        flip32 = torch.zeros((), dtype=torch.int32, device="cuda") if corrupt_n else None
+        neighbour = torch.zeros(256, dtype=torch.uint8, device="cuda") if how == "past_end" else None
+        writing = {"now": False}         # this step writes (eager: only a corrupt step; captured: always)
+        pinned = []                      # every pinned host buffer, kept to the end: freeing one after a device stop
+        #                                  aborts the process (the host allocator records an event on free)
 
         def observe_quant(*a, **k):
             out = q_inner(*a, **k)
-            if not corrupt_n:
+            if not corrupt_n or how == "weight_alias":
                 produced.append(out)
                 return out
             # integrity cases: keep what the producer made (for the oracle), then change the activation's first
-            # bytes through a second tensor on its storage - no version counter moves, no producer runs. `flip` is
-            # 0x80 (the sign bit) when the step says so, 0 otherwise; inside a capture the write is captured too.
+            # bytes - no version counter moves, no producer runs. `flip` is 0x80 (the sign bit) when the step says
+            # so, 0 otherwise; inside a capture the write is captured too.
             A_, As_ = out
             produced.append((A_.clone(), As_.clone()))
-            alias = torch.empty(0, dtype=torch.uint8, device=A_.device).set_(
-                A_.untyped_storage(), A_.storage_offset(), (A_.numel(),), (1,))
-            alias[:corrupt_n].bitwise_xor_(flip)
+            if not writing["now"]:
+                return out
+            if how == "alias":           # a second tensor on its storage (I1, I2)
+                alias = torch.empty(0, dtype=torch.uint8, device=A_.device).set_(
+                    A_.untyped_storage(), A_.storage_offset(), (A_.numel(),), (1,))
+                alias[:corrupt_n].bitwise_xor_(flip)
+            elif how == "triton":        # a Triton kernel handed a pointer to the bytes (I3, I7)
+                common.writers()["through"][(1,)](A_.view(torch.uint8).reshape(-1), corrupt_n, flip, BLOCK=16)
+            elif how == "past_end":      # a Triton kernel handed another buffer, writing past its end (I4)
+                common.writers()["past_end"][(1,)](neighbour, A_.data_ptr() - neighbour.data_ptr(), corrupt_n,
+                                                    flip, BLOCK=16)
+            elif how == "scale_alias":   # the first activation scale's exponent bit, through a second tensor (I6)
+                alias = torch.empty(0, dtype=torch.int32, device=As_.device).set_(
+                    As_.untyped_storage(), As_.storage_offset(), (As_.numel(),), (1,))
+                alias[:1].bitwise_xor_(flip32)
+            elif how == "quiet_op":      # an operator whose schema says it only reads (I8)
+                common.quiet_flip()(A_, corrupt_n)
             return out
 
         fp8_utils.per_token_group_quant_fp8 = observe_quant
@@ -169,6 +193,8 @@ def main(case_path, mode, out_dir):
             lau.flag.fill_(int(step.get("mut", 0)))
             if flip is not None:
                 flip.fill_(0x80 if step.get("corrupt") else 0)
+                flip32.fill_(0x00800000 if step.get("corrupt") else 0)
+                writing["now"] = op == "capture" or (op == "call" and bool(step.get("corrupt")))
             if cache is not None:
                 cache.armed = bool(step.get("cache", 0))
                 if cache.armed:
@@ -192,7 +218,35 @@ def main(case_path, mode, out_dir):
             x = common.make_input(rows, K, step["seed"], step.get("dist", "normal"), dtype=torch.bfloat16
                                   if case["out"] != "float32" else torch.float32)
             try:
-                if op == "call":
+                if op == "call" and how == "weight_alias" and step.get("corrupt"):
+                    # the weight's row 0 overwritten with -0.0 (0x80), through a second tensor on its storage, before
+                    # this call (I5). A weight lives on between calls: the write sets bytes (no XOR, which a second
+                    # changed step would undo) and they stay changed
+                    w_ = layers[li].weight
+                    walias = torch.empty(0, dtype=torch.uint8, device=w_.device).set_(
+                        w_.untyped_storage(), w_.storage_offset(), (w_.numel(),), (1,))
+                    walias[:corrupt_n].fill_(0x80)
+                if op == "call" and case["group"] == "integrity":
+                    # the next operation, observed from the host (as in a graph): the in-kernel check stops the
+                    # device after the call has returned, and what the next operation read is known only this way
+                    y = kernel.apply_weights(layers[li], x)
+                    A, As = produced[-1]
+                    obs_host = torch.empty(tuple(y.shape), dtype=y.dtype, pin_memory=True)
+                    ran_host = torch.zeros(1, dtype=torch.int32, pin_memory=True)
+                    pinned += [obs_host, ran_host]
+                    one = torch.ones(1, dtype=torch.int32, device="cuda")
+                    obs_host.copy_(y, non_blocking=True)
+                    ran_host.copy_(one, non_blocking=True)
+                    _z = y.float() @ W2
+                    if not device_ok():
+                        ran = bool(int(ran_host[0]))
+                        stopped = {"step": si, "exception": "device stop after the call", "kind": None}
+                        y = obs_host if ran else None
+                        A = As = None
+                        raise RuntimeError("the device stopped after the call (an in-kernel check)")
+                    ran = True
+                    y = obs_host                   # what the next operation read (it ran above)
+                elif op == "call":
                     y = kernel.apply_weights(layers[li], x)
                     A, As = produced[-1]
                 elif op == "direct":
@@ -244,12 +298,15 @@ def main(case_path, mode, out_dir):
                     y = graph["obs_host"] if ran else None         # what the graph's next operation read
                     A, As = graph["A"], graph["As"]
                 delivered = op != "capture"
-                if y is not None and op != "replay":
+                if y is not None and op != "replay" and not (op == "call" and case["group"] == "integrity"):
                     _z = y.float() @ W2                            # the next operation consumes the value
             except Exception as e:  # noqa: BLE001 - refusal, or an execution error: both are observations
                 exc = {"type": type(e).__name__, "kind": getattr(e, "kind", None), "message": str(e)[:2000],
                        "trace": traceback.format_exc()[-3000:]}
-                if op == "replay":
+                if op == "call" and stopped is not None and stopped["step"] == si:
+                    exc["type"] = "DeviceStop"   # the next operation's marker tells whether it ran (next_op_ran)
+                    delivered = False
+                elif op == "replay":
                     ran = bool(int(graph["ran_host"][0]))          # host memory: readable after a stop
                     y = graph["obs_host"] if ran else None
                     delivered = False
@@ -268,7 +325,7 @@ def main(case_path, mode, out_dir):
             extra = {"ms": round(ms, 3), "rng_same": (rng0 == common.rng_state()) if stopped is None else None,
                      "kernel_launches": lau.launches - l0, "cache_hits": (cache.hits if cache else 0) - h0,
                      "entail": delta(st0, st1)}
-            if op == "replay":
+            if op == "replay" or (op == "call" and case["group"] == "integrity"):
                 extra["next_op_ran"] = ran
                 extra["device_stopped"] = stopped is not None
             y_obs = (common.to_np(y) if y is not None else None)
@@ -283,6 +340,8 @@ def main(case_path, mode, out_dir):
                 break
         res["entail_final"] = stats()
         res["launcher_total"] = lau.launches
+        if profiled and mode == "structure_inkernel":
+            res["entail_eager_flags"] = g.eager_flags()       # pinned host memory: readable after a stop
         if stopped is not None:          # write now, inside, and leave without any teardown that touches the device
             finish(res, tensors, out_dir, case, mode, t_start, stopped, None)
             sys.stdout.flush()

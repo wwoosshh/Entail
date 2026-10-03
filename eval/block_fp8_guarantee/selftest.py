@@ -126,6 +126,65 @@ def main():
         assert "N-b" not in dict(map(tuple, s["unfinished_runs"].get("guarantee", []))), s["unfinished_runs"]
         print("ok a step recorded as not run (after a stop) leaves the run complete")
 
+        # v5 (L5.4e): the integrity outcomes of the two new modes, read from what the next operation did
+        ic = {"id": "I-x", "group": "integrity", "N": 256, "K": 256, "out": "bfloat16", "layers": 1, "wseed": [1],
+              "expect": "integrity", "split": "holdout",
+              "steps": [{"op": "call", "layer": 0, "M": 4, "seed": 2, "dist": "normal", "corrupt": 0},
+                        {"op": "call", "layer": 0, "M": 4, "seed": 3, "dist": "normal", "corrupt": 1},
+                        {"op": "call", "layer": 0, "M": 4, "seed": 4, "dist": "normal", "corrupt": 1}]}
+        root = os.path.join(base, "integrity")
+        os.makedirs(root)
+        suite(root, [ic], labels=("offA", "structure_inkernel", "structure_writes"))
+        ok_step = dict(delivered=True, exception=None, rng_same=True, oracle={"ok": True, "worst_ratio": 0.1})
+        write_run(root, ic, "offA", steps=[dict(ic["steps"][0], **ok_step)] +
+                  [dict(st, delivered=True, exception=None, rng_same=True, oracle={"ok": False, "worst_ratio": 9.0})
+                   for st in ic["steps"][1:]])
+        stop = [dict(ic["steps"][0], next_op_ran=True, device_stopped=False, **ok_step),
+                dict(ic["steps"][1], delivered=False, exception={"type": "DeviceStop", "kind": None},
+                     next_op_ran=False, device_stopped=True, rng_same=None),
+                dict(ic["steps"][2], not_run="the device was stopped at an earlier step")]
+        write_run(root, ic, "structure_inkernel", steps=stop)
+        refused = [dict(ic["steps"][0], next_op_ran=True, device_stopped=False, **ok_step)] + \
+            [dict(st, delivered=False, exception={"type": "Refused", "kind": "write"}, next_op_ran=None,
+                  device_stopped=False, rng_same=True) for st in ic["steps"][1:]]
+        write_run(root, ic, "structure_writes", steps=refused)
+        s = aggregate.summarize(root)
+        j = s["per_case"][0]["modes"]
+        assert j["structure_inkernel"]["verdict"] == "blocked", j["structure_inkernel"]
+        assert j["structure_writes"]["verdict"] == "blocked", j["structure_writes"]
+        # the device stopped after the call, but its next operation had run: not a block (not judged)
+        late = copy.deepcopy(stop)
+        late[1]["next_op_ran"] = True
+        write_run(root, ic, "structure_inkernel", steps=late)
+        j = aggregate.summarize(root)["per_case"][0]["modes"]
+        assert j["structure_inkernel"]["verdict"] == "unknown", j["structure_inkernel"]
+        print("ok eager integrity steps: a device stop before the next operation ran and a refused write are blocks; "
+              "a stop after it ran is not")
+        gc = dict(ic, id="I-g", steps=[{"op": "capture", "layer": 0, "M": 4, "seed": 2},
+                                       {"op": "replay", "seed": 3, "corrupt": 0},
+                                       {"op": "replay", "seed": 4, "corrupt": 1}])
+        nc = dict(case("N-g"), steps=gc["steps"][:2])
+        root = os.path.join(base, "capture")
+        os.makedirs(root)
+        suite(root, [gc, nc], labels=("offA", "structure_writes"))
+        write_run(root, gc, "offA", steps=[dict(gc["steps"][0], exception=None),
+                                           dict(gc["steps"][1], delivered=True, next_op_ran=True, **{k: v for k, v in
+                                                ok_step.items() if k != "delivered"}),
+                                           dict(gc["steps"][2], delivered=True, next_op_ran=True, exception=None,
+                                                rng_same=True, oracle={"ok": False, "worst_ratio": 9.0})])
+        write_run(root, nc, "offA")
+        cap = [dict(gc["steps"][0], exception={"type": "Refused", "kind": "write"})] + \
+            [dict(st, not_run="the capture failed") for st in gc["steps"][1:]]
+        write_run(root, gc, "structure_writes", steps=cap)
+        write_run(root, nc, "structure_writes", steps=[dict(nc["steps"][0], exception={"type": "Refused",
+                                                                                      "kind": "write"}),
+                                                       dict(nc["steps"][1], not_run="the capture failed")])
+        per = {x["id"]: x["modes"]["structure_writes"] for x in aggregate.summarize(root)["per_case"]}
+        assert per["I-g"]["verdict"] == "blocked" and per["I-g"]["refused_capture"], per["I-g"]
+        assert per["N-g"]["verdict"] == "wrong_refusal", per["N-g"]
+        print("ok a capture the profile refused: the steps it left unrun are blocks (integrity case) and a wrong "
+              "refusal (normal case)")
+
         # freeze_check: code, commit and environment each compared
         f1, f2 = os.path.join(base, "a.txt"), os.path.join(base, "b.txt")
         for p in (f1, f2):

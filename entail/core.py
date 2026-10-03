@@ -26,7 +26,8 @@ import weakref
 from .facts import VOCABULARY, Certainty, Fact, Invalidated, KernelCaps, ModelProps, Source
 
 _MODE = os.environ.get("ENTAIL", "off")
-if _MODE in ("guarantee", "structure"):   # guarantee.py's profiles run alone: the other checks stay off
+if _MODE in ("guarantee", "structure", "structure_writes", "structure_inkernel"):   # guarantee.py's profiles
+    # run alone: the other checks stay off
     _MODE = "off"
 _POLICY = os.environ.get("ENTAIL_POLICY", "resolve")
 _FACTS = {}  # id(value) -> {fact name: Fact envelope, or the raw marker}; removed when the value is collected

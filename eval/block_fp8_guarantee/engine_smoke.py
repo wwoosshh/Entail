@@ -90,7 +90,7 @@ def one(mode, config, out_path, model):
     gen("unseeded", SamplingParams(temperature=0.8, top_p=0.95, max_tokens=24, logprobs=5))
     r["runs"] = runs
     r["peak_bytes"] = int(torch.cuda.max_memory_allocated())
-    if mode in ("guarantee", "structure"):
+    if mode != "off":
         from entail.adapters import vllm_block_fp8_guarantee as ad
         r["entail"] = ad.stats()
     common.write_json(out_path, r)
@@ -175,7 +175,7 @@ def main(out_root, model):
                            if "Selected " in ln and " for " in ln})
         row = {"dir": d, "config": config, "mode": mode, "round": rnd, "exit": p.returncode,
                "wall_s": time.time() - t0, "selected_kernels": selected}
-        if mode in ("guarantee", "structure"):
+        if mode != "off":
             row["reach"] = reach(os.path.join(d, f"{mode}.jsonl"))
         results.append(row)
         print(json.dumps(row, default=str), flush=True)
@@ -208,7 +208,7 @@ def compare(out_root):
         offs_all = [r for n, r in runs if r["mode"] == "off" and "runs" in r]
         if len(offs_all) >= 2:
             c["offA_vs_offB"] = _cmp(offs_all[0], offs_all[1])
-        for mode in ("guarantee", "structure"):
+        for mode in sorted({r["mode"] for _n, r in runs if r["mode"] != "off"}):
             gs_all = [r for n, r in runs if r["mode"] == mode]
             for r in gs_all:
                 if "start_error" in r:

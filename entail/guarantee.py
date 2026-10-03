@@ -52,6 +52,19 @@ ENTAIL=structure is not this guarantee: it is the structural check experiment (R
 kernel's own IR is proven to compute the contract (kernel_ir.py), otherwise the reference's output is handed on.
 Nothing of the call's numbers is checked and the arithmetic is trusted, so its outcomes (kernel_delivered,
 reference_delivered) carry no permit, and its records (structure-<date>.jsonl) say profile block_fp8_structure.
+Its integrity is "epoch" (host-side storage, layout, epoch and version), which a write past the version counter
+escapes (L5.4c-L5.4d, cases I1 and I2).
+
+Two experiments measure ways to close that without the guarantee's recomputation (ROADMAP M19 L5.4e). Both are the
+structural check with another integrity; neither is the guarantee, and the modes above are unchanged:
+  ENTAIL=structure_writes    between the operations (writeguard.py): the bytes the producers issued are kept as live
+                             ranges, and a PyTorch operation or a Triton launch that would write into one before its
+                             consumer read it is refused before it runs (graphs: at capture).
+  ENTAIL=structure_inkernel  inside the operation (inkernel.py): the consumer kernel is rewritten to add up, in each
+                             step of its loop, the bytes of its operands it is reading, and the sums are compared on the
+                             device with the ones made when the producers issued them; on a difference the device
+                             stops before the next operation (graphs too: the flags are copied to pinned host memory
+                             first, as for the guarantee).
 
 Not covered (refused, never passed): torch.compile tracing (the producers' hooks do not run in compiled code, so the
 consumer sees no issue), UE8M0 scales, block sizes, dtypes and layouts outside the plan, expert parallel and
@@ -72,7 +85,10 @@ from . import core
 
 PROFILE = "block_fp8"
 STRUCTURE_PROFILE = "block_fp8_structure"      # ENTAIL=structure: the structural check experiment, not a guarantee
-MODES = {"guarantee": "output", "structure": "static"}   # the ENTAIL value -> the only check it runs
+MODES = {"guarantee": "output", "structure": "static",   # the ENTAIL value -> the only check it runs
+         "structure_writes": "static", "structure_inkernel": "static"}
+STRUCTURE_MODES = ("structure", "structure_writes", "structure_inkernel")
+STRUCTURE_INTEGRITY = {"structure": "epoch", "structure_writes": "writes", "structure_inkernel": "inkernel"}
 CONTRACT = "block_fp8_mm/1"
 BOUNDARY = "guarantee:block_fp8_mm"
 CONSUMER = "vllm.model_executor.layers.quantization.utils.fp8_utils:w8a8_triton_block_scaled_mm"
@@ -138,7 +154,10 @@ class Plan:
     #                                    "static": the kernel's own IR read once per launch configuration
     #                                    (kernel_ir.py, L5.4b); a launch not proven gets the reference's output
     integrity: str = "checksum"        # "checksum": the operands' bytes against their issue at every call;
-    #                                    "epoch": storage, layout, epoch and version only (host, no device work)
+    #                                    "epoch": storage, layout, epoch and version only (host, no device work);
+    #                                    "writes": epoch, and writes into the issued bytes refused before they run
+    #                                    (writeguard.py, L5.4e); "inkernel": epoch, and the consumer kernel adds up
+    #                                    the bytes it reads and compares them on the device (inkernel.py, L5.4e)
     records: str = "all"               # "all": a line per call; "changes": a line per launch key and per
     #                                    outcome that is not a plain normal delivery
     trusted: Tuple[str, ...] = ("PyTorch eager operations on the device (float32 matmul with TF32 off, "
@@ -162,8 +181,9 @@ _FINGERPRINTS = {}         # id(plan) -> (plan, sha256 of its JSON): read at eve
 
 
 def mode() -> str:
-    """"guarantee" (ENTAIL=guarantee: the numeric guarantee, check "output") or "structure" (ENTAIL=structure: the
-    structural check experiment, check "static"). A harness or a test that calls in without either is the guarantee."""
+    """"guarantee" (ENTAIL=guarantee: the numeric guarantee, check "output"), or "structure" (ENTAIL=structure: the
+    structural check experiment, check "static") and its two integrity experiments "structure_writes" and
+    "structure_inkernel" (L5.4e). A harness or a test that calls in without any of them is the guarantee."""
     m = os.environ.get("ENTAIL", "")
     return m if m in MODES else "guarantee"
 
@@ -173,9 +193,11 @@ def profile() -> str:
 
 
 def _default_plan() -> Plan:
-    if mode() == "structure":
-        return Plan(name="vllm-0.30-triton-dense-block-fp8-structure", check="static", integrity="epoch",
-                    records="changes")
+    m = mode()
+    if m in STRUCTURE_MODES:
+        suffix = "" if m == "structure" else "-" + m.split("_", 1)[1]
+        return Plan(name="vllm-0.30-triton-dense-block-fp8-structure" + suffix, check="static",
+                    integrity=STRUCTURE_INTEGRITY[m], records="changes")
     return Plan()
 
 
@@ -234,6 +256,8 @@ class Issue:
     epoch: int
     version: Optional[int]
     checksum: object = None    # a device scalar: the bytes as the producer made them
+    sums: object = None        # integrity "inkernel": int32 [2] on the device, the value's and its scale's sums
+    chk: object = None         # integrity "inkernel", an activation: the zeroed sums buffer its consumer adds into
     partner: object = None     # a weak reference to the paired tensor
     source: dict = field(default_factory=dict)
     declared_ok: bool = True
@@ -363,12 +387,37 @@ def tag(t) -> Optional[Issue]:
 
 def _issue(t, role, producer, block, layout, source, ok=True, why=""):
     s = next(_SERIAL)
+    integrity = plan().integrity
     iss = Issue(serial=s, role=role, producer=producer, pair=0, block=tuple(int(x) for x in block), layout=layout,
                 snap=_snap(t), epoch=_bump(t), version=_version(t),
-                checksum=checksum(t) if plan().integrity == "checksum" else None, source=dict(source),
+                checksum=checksum(t) if integrity == "checksum" else None, source=dict(source),
                 declared_ok=ok, why=why)
     _ISSUES.set(t, iss)
+    if integrity == "writes":
+        from . import writeguard
+
+        writeguard.register(t, s, role)
     return iss
+
+
+def _sums(values, scales, iss):
+    """Integrity "inkernel": the sums of a value and its scale as the producer made them (inkernel.py), kept on the
+    value's issue. A value whose sums could not be made is refused at the gate."""
+    if plan().integrity != "inkernel":
+        return
+    try:
+        from . import inkernel
+
+        if iss.role == "activation":           # one zeroed buffer for the issue's sums and its consumer's
+            buf = inkernel.buffer(values.device)
+            iss.chk = buf[: inkernel.SLOTS]
+            iss.sums = inkernel.issue_sums(values, scales, out=buf[inkernel.SLOTS:])
+        else:
+            iss.sums = inkernel.issue_sums(values, scales)
+    except Exception as e:  # noqa: BLE001 - principle 12: the gate refuses a value without sums
+        iss.sums = None
+        iss.why = (iss.why + "; " if iss.why else "") + f"its issue sums failed ({type(e).__name__}: {e})"
+        _count("issue_sums_failed")
 
 
 def _pair(v, iv, s, is_):
@@ -390,6 +439,8 @@ def issue_activation(x_q, x_s, group_size: int, producer: str = ACTIVATION_PRODU
         a = _issue(x_q, "activation", producer, (1, group_size), "row_major", src, ok, why)
         s = _issue(x_s, "activation_scale", producer, (1, group_size), layout, src, ok, why)
         _pair(x_q, a, x_s, s)
+        if ok:
+            _sums(x_q, x_s, a)
         _REACHED[producer] = _REACHED.get(producer, 0) + 1
         _count("activation_issues")
         return a, s
@@ -417,6 +468,8 @@ def issue_weight(w, w_s, block: Tuple[int, int], producer: str = WEIGHT_PRODUCER
         b = _issue(w, "weight", producer, (bn, bk), "blocked", source or {}, ok, why)
         s = _issue(w_s, "weight_scale", producer, (bn, bk), "blocked", source or {}, ok, why)
         _pair(w, b, w_s, s)
+        if ok:
+            _sums(w, w_s, b)
         _REACHED[producer] = _REACHED.get(producer, 0) + 1
         _count("weight_issues")
         return b, s
@@ -524,6 +577,17 @@ def _base(call: int) -> dict:
     p = plan()
     return {"kind": f"{mode()}_call", "call": call, "plan": p.name, "plan_fp": p.fingerprint(),
             "contract": p.contract, "env_fp": environment()["fingerprint"], "consumer": CONSUMER, "boundary": BOUNDARY}
+
+
+def refuse_write(why: str, detail: dict):
+    """Integrity "writes" (writeguard.py): a write into issued bytes, refused before it ran - recorded and raised."""
+    rec = {"kind": f"{mode()}_write", "call": next(_CALLS), "plan": plan().name, "plan_fp": plan().fingerprint(),
+           "boundary": BOUNDARY, "outcome": "blocked", "blocked_kind": "write", "reason": why, "permit": None,
+           "delivered": False, "writer": detail, "captured": _capturing()}
+    _count("blocked")
+    _count("blocked_write")
+    _write(rec)
+    raise Refused("write", why, rec)
 
 
 def _refuse(rec: dict, kind: str, why: str, t0: float):
@@ -858,27 +922,30 @@ class _Site:
     (written on the device at each replay) and their pinned host copy (written on the device before its stop check,
     readable after a stop)."""
 
-    def __init__(self, call, rec, issues, B, Bs, flags, host=None):
-        self.call, self.rec, self.flags, self.host = call, rec, flags, host
+    def __init__(self, call, rec, issues, B, Bs, flags, host=None, kind="output"):
+        self.call, self.rec, self.flags, self.host, self.kind = call, rec, flags, host, kind
         self.B, self.Bs = weakref.ref(B), weakref.ref(Bs)
         self.issues = issues
 
 
 _GRAPHS = {}               # id(graph) -> (weakref to graph, [sites])
-_HOSTS = {}                # id(graph) -> (weakref to graph, pinned int64 [GRAPH_GATES, 6], gates used)
+_HOSTS = {}                # id(graph) -> (weakref to graph, pinned [GRAPH_GATES, width], gates used)
 _CAPTURE = threading.local()
 
 
 def capture_begin(graph) -> None:
     _CAPTURE.graph = graph
-    if mode() == "guarantee" and plan().check == "output":
-        # pinned host memory is made before the capture starts (an allocation while capturing is not safe)
+    p = plan()
+    if (mode() == "guarantee" and p.check == "output") or p.integrity == "inkernel":
+        # pinned host memory is made before the capture starts (an allocation while capturing is not safe): the
+        # guarantee's six status numbers per gate, or the in-kernel check's two flags
         try:
             import torch
 
             if torch.cuda.is_available():
-                _HOSTS[id(graph)] = [weakref.ref(graph),
-                                     torch.full((GRAPH_GATES, 6), -1, dtype=torch.int64, pin_memory=True), 0]
+                host = (torch.full((GRAPH_GATES, 6), -1, dtype=torch.int64, pin_memory=True) if p.check == "output"
+                        else torch.full((GRAPH_GATES, 2), -1, dtype=torch.int32, pin_memory=True))
+                _HOSTS[id(graph)] = [weakref.ref(graph), host, 0]
         except Exception:  # noqa: BLE001 - no host copies: a gate inside this capture refuses (below)
             _HOSTS.pop(id(graph), None)
 
@@ -978,9 +1045,53 @@ def after_replay(graph) -> None:
         torch.cuda.current_stream().synchronize()
     except Exception as e:  # noqa: BLE001 - a device assertion (a gate's stop) or another device fault
         stop = e
+    h = _HOSTS.get(id(graph))
+    if stop is None and h is not None and h[0]() is graph and all(s.kind == "inkernel" for s in sites):
+        # integrity "inkernel": all rows read at once; when every gate wrote "no difference", only counted
+        rows = h[1][: h[2]].tolist()
+        if len(rows) == len(sites) and all(r[0] == 0 and r[1] == 1 for r in rows):
+            for site in sites:
+                _count(site.rec.get("outcome", "kernel_delivered"))
+            return
     flags = [s.host.tolist() for s in sites]          # host memory: readable after a stop too
     blocked, reached = None, 0
     for site, st in zip(sites, flags):
+        if site.kind == "inkernel":    # integrity "inkernel": (bits of the operands whose sums differ, ok)
+            bits, ok = (int(x) for x in st)
+            rec = dict(site.rec)
+            rec.update({"kind": f"{mode()}_replay", "replay_of": site.call, "call": next(_CALLS)})
+            if ok < 0:
+                if stop is None:
+                    rec.update({"outcome": "error", "permit": None, "delivered": False,
+                                "reason": "the gate's flags were not written although the replay finished"})
+                    _count("errors")
+                    _write(rec)
+                    blocked = blocked or ("checker", rec)
+                continue
+            reached += 1
+            rec["checks"] = {"integrity_bits": bits, "in_kernel": True}
+            if bits:
+                names = [n for i, n in enumerate(("A", "As", "B", "Bs")) if bits >> i & 1]
+                if stop is not None:
+                    rec.update({"outcome": "blocked", "blocked_kind": "integrity", "permit": None, "delivered": False,
+                                "stopped": True,
+                                "reason": f"the consumer kernel read bytes of {', '.join(names)} other than the ones "
+                                          f"issued; the device stopped before the graph's next operation"})
+                    _count("blocked")
+                    _count("blocked_integrity")
+                else:
+                    rec.update({"outcome": "error", "error_kind": "stop_failed", "blocked_kind": "integrity",
+                                "permit": None, "delivered": True,
+                                "reason": "the in-kernel sums differed and the device did not stop"})
+                    _count("errors")
+                    _count("stop_failed")
+                blocked = blocked or ("integrity", rec)
+                _write(rec)
+            else:
+                _count(rec.get("outcome", "kernel_delivered"))
+                if plan().records == "all":
+                    _write(rec)
+            continue
         viol, rbad, bits, sbad, kbad, ratio = (int(x) for x in st)
         rec = dict(site.rec)
         M, N = rec["shape"]["M"], rec["shape"]["N"]
@@ -1063,7 +1174,10 @@ def _canon_binding(bound, ctx):
     for name, v in bound.items():
         if isinstance(v, torch.Tensor):
             iss = tag(v)
-            if iss is not None:
+            if ctx.get("chk") is not None and v is ctx["chk"]:     # the in-kernel check's sums (L5.4e)
+                t = kernel_ir.Tensor("integrity_sums", 0, 0, tuple(int(x) for x in v.shape),
+                                     tuple(int(x) for x in v.stride()))
+            elif iss is not None:
                 t = kernel_ir.Tensor(iss.role, iss.serial, iss.pair, tuple(int(x) for x in v.shape),
                                      tuple(int(x) for x in v.stride()), tuple(iss.block))
             elif v.dtype == ctx["out_dtype"] and v.dim() >= 2 and int(v.shape[-1]) == ctx["N"] \
@@ -1123,6 +1237,90 @@ def consumer_launch(kernel_key, bound, grid, ttir) -> bool:
     if not _capturing():
         _FAST[fast] = (key, v)
     return v.verdict == "proven"
+
+
+def consumer_launch_inkernel(fn, key_of, bound, consts, grid, args, kwargs, launch_grid):
+    """Integrity "inkernel" (L5.4e): the consumer's launch is replaced by its rewritten kernel (inkernel.py), which
+    adds up the bytes it reads into the gate's sums buffer. The rewritten kernel is what runs, so it is what is proven
+    (kernel_ir on its own TTIR; the buffer is bound as "integrity_sums", the only tensor it may write besides the
+    output, and only by atomic adds). Returns a function that launches it when proven; False when it is not proven or
+    cannot be rewritten (nothing is launched, the gate hands on the reference's output); True for a launch that is not
+    the consumer's. `grid` is the launch's grid as numbers, `launch_grid` as the launcher was given it."""
+    import torch
+
+    from . import inkernel, kernel_ir
+
+    ctx = _ctx()
+    if ctx is None:
+        return True
+    if not any(isinstance(v, torch.Tensor) and (v is ctx["A"] or v is ctx["B"]) for v in bound.values()):
+        return True
+    rk, why = inkernel.rewritten(fn)
+    if rk is None:
+        v = kernel_ir.Verdict("unproven", f"the consumer kernel was not rewritten with the in-kernel check: {why}")
+        ctx["verdicts"].append(((None,), v))
+        _count("ir_unproven")
+        return False
+    extra = {"EntailChk": ctx["chk"], "EntailAw": ctx["Aw"], "EntailBw": ctx["Bw"]}
+    b2 = dict(bound)
+    b2.update(extra)
+    kkey = key_of(rk, consts)
+    fast = _fast_key(kkey, b2, grid, ctx)
+    hit = _FAST.get(fast)
+    if hit is not None:
+        ctx["verdicts"].append(hit)
+        v = hit[1]
+    else:
+        binding, ints, parts = _canon_binding(b2, ctx)
+        key = (kkey, parts, tuple(int(g) for g in grid))
+        v = _VERDICTS.get(key)
+        if v is None:
+            if _capturing():
+                v = kernel_ir.Verdict("unproven", "the launch configuration was first seen inside a CUDA graph "
+                                                  "capture (its IR is not compiled there)")
+            else:
+                try:
+                    ttir = rk.warmup(*args, grid=launch_grid, **kwargs, **extra).asm["ttir"]
+                    v = kernel_ir.check_launch(ttir, binding, ints, grid)
+                except Exception as e:  # noqa: BLE001 - the checker failed: nothing is claimed
+                    v = kernel_ir.Verdict("unproven", f"the IR check raised {type(e).__name__}: {e}")
+            _VERDICTS[key] = v
+            _count(f"ir_{v.verdict}")
+            _write({"kind": f"{mode()}_kernel_ir", "plan_fp": plan().fingerprint(), "kernel": str(kkey[0]),
+                    "rewritten": getattr(rk, "entail_source_sha256", None), "grid": list(grid), "ints": ints,
+                    "binding": {k: [b.role, list(b.shape), list(b.stride), list(b.block)] for k, b in binding.items()},
+                    "verdict": v.to_json()})
+        ctx["verdicts"].append((key, v))
+        if not _capturing():
+            _FAST[fast] = (key, v)
+    if v.verdict != "proven":
+        return False
+    ctx["inkernel_ran"] = True
+    return lambda: rk.run(*args, grid=launch_grid, warmup=False, **kwargs, **extra)
+
+
+_RING = []                 # integrity "inkernel", eager: [pinned int32 [GRAPH_GATES, 2], next slot, {slot: call}]
+
+
+def _ring_slot(call):
+    """A pinned host row for an eager gate's in-kernel flags (readable after a device stop: eager_flags)."""
+    import torch
+
+    if not _RING:
+        _RING.extend([torch.full((GRAPH_GATES, 2), -1, dtype=torch.int32, pin_memory=True), 0, {}])
+    i = _RING[1] % GRAPH_GATES
+    _RING[1] += 1
+    _RING[2][i] = call
+    _RING[0][i].fill_(-1)
+    return _RING[0][i]
+
+
+def eager_flags() -> dict:
+    """{call: [bits, ok]} of the eager in-kernel checks still in the ring (host memory; after a device stop too):
+    ok -1 not reached, bits: 1 A, 2 As, 4 B, 8 Bs differ from their issue."""
+    if not _RING:
+        return {}
+    return {call: [int(x) for x in _RING[0][i].tolist()] for i, call in _RING[2].items()}
 
 
 _FAST = {}                 # the cheap key of a launch -> (launch key, verdict)
@@ -1194,9 +1392,35 @@ def _static(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0):
         if bits:
             names = [n for i, n in enumerate(("A", "As", "B", "Bs")) if bits >> i & 1]
             _refuse(rec, "integrity", f"the bytes of {', '.join(names)} differ from what the producer issued", t0)
+    inkernel_on = p.integrity == "inkernel"
+    host = None
+    if inkernel_on:
+        if issues["A"].sums is None or issues["B"].sums is None:
+            _refuse(rec, "integrity", "integrity 'inkernel' needs the sums made when the activation and the weight "
+                                      "were issued; one has none", t0)
+        if capturing:
+            host = _host_slot(graph)
+            if host is None:
+                _refuse(rec, "unsupported", f"no pinned host copy for this gate's flags (none made at capture_begin, "
+                                            f"or more than {GRAPH_GATES} gates in one graph)", t0)
     M, N = rec["shape"]["M"], rec["shape"]["N"]
     ctx = {"A": A, "B": B, "As": As, "Bs": Bs, "serial_A": issues["A"].serial, "serial_B": issues["B"].serial,
            "out_dtype": out_dtype, "M": M, "N": N, "verdicts": []}
+    if inkernel_on:
+        import torch
+
+        from . import inkernel
+
+        try:
+            words = (inkernel.words(A), inkernel.words(B))
+        except Exception as e:  # noqa: BLE001 - the kernel's re-read needs contiguous rows of 4-byte words
+            _refuse(rec, "unsupported", f"integrity 'inkernel' reads A and B as 32-bit words; they cannot be viewed "
+                                        f"so ({type(e).__name__}: {e})", t0)
+        chk = issues["A"].chk
+        if chk is None:                        # consumed before (or made without one): a fresh zeroed buffer
+            chk = torch.zeros(inkernel.SLOTS, dtype=torch.int32, device=A.device)
+        issues["A"].chk = None
+        ctx.update({"inkernel": True, "chk": chk, "Aw": words[0], "Bw": words[1]})
     prev = _ctx()
     _LAUNCH.ctx = ctx
     t1 = time.perf_counter()
@@ -1232,12 +1456,41 @@ def _static(kernel, A, B, As, Bs, block, out_dtype, issues, rec, t0):
         rec.update({"outcome": outcome, "path_after": "reference (the kernel was not launched)",
                     "reason": f"the kernel's launch is not proven to compute the contract ({why}); the reference's "
                               f"output is handed on"})
+    flags = None
+    if inkernel_on:
+        # the sums of what was read, against the issue's, on the device; a difference stops the device here, before
+        # the next operation (stream order). Its flags go to pinned host memory first (readable after the stop)
+        import torch
+
+        from . import inkernel
+
+        try:
+            if outcome == "kernel_delivered" and ctx.get("inkernel_ran"):
+                seen = ctx["chk"]
+                rec["integrity_check"] = "inside the consumer kernel, on the bytes it read"
+            else:                      # the reference read the operands: their sums are made here, outside a kernel
+                sa, sw = inkernel.issue_sums(A, As), inkernel.issue_sums(B, Bs)
+                seen = torch.stack([sa[0], sw[0], sa[1], sw[1]])
+                rec["integrity_check"] = "outside a kernel (the reference read the operands)"
+            flags = inkernel.compare(seen, issues["A"].sums, issues["B"].sums,
+                                     torch.empty(2, dtype=torch.int32, device=A.device),
+                                     host if host is not None else _ring_slot(rec["call"]))
+            torch._assert_async(flags[1])
+        except Exception as e:  # noqa: BLE001 - the check could not be put on the device: nothing is handed on
+            _count("checker_errors")
+            _refuse(rec, "checker", f"the in-kernel integrity check raised {type(e).__name__}: {e}", t0)
+    if p.integrity == "writes":        # consumed: the activation's bytes may be written again from here on
+        from . import writeguard
+
+        writeguard.release(issues["A"].serial)
+        writeguard.release(issues["As"].serial)
     _count(outcome)
     if capturing:
         entry = _GRAPHS.get(id(graph))
         if entry is None or entry[0]() is not graph:
             entry = _GRAPHS[id(graph)] = (weakref.ref(graph), [])
-        entry[1].append(_Site(rec["call"], dict(rec), issues, B, Bs, None))
+        entry[1].append(_Site(rec["call"], dict(rec), issues, B, Bs, flags, host, "inkernel") if inkernel_on else
+                        _Site(rec["call"], dict(rec), issues, B, Bs, None))
         rec["captured"] = True
     rec.update({"permit": None, "delivered": True,
                 "ms_kernel_path": round((time.perf_counter() - t1) * 1e3, 3),
@@ -1255,6 +1508,10 @@ def stats() -> dict:
     out = dict(_STATS)
     out["installed"] = sorted(_INSTALLED)
     out["reached"] = dict(_REACHED)
+    if plan().integrity == "writes":
+        from . import writeguard
+
+        out.update(writeguard.stats())
     return out
 
 
@@ -1272,3 +1529,7 @@ def reset() -> None:
     _STATS.clear()
     _REACHED.clear()
     _CHECK_WEIGHTS.clear()
+    _RING.clear()
+    from . import writeguard
+
+    writeguard.reset()

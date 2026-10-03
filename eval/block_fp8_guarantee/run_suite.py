@@ -5,7 +5,8 @@ starts only when this checkout and environment match the manifest: freeze_check.
 case, also those --only or --modes leave out; such a run is marked partial.
 Modes per case: off A, off B (two fresh off runs: is off stable), load (entail as it ships, ENTAIL=load), guarantee
 (ENTAIL=guarantee, the numeric guarantee) and, from v3 (L5.4c), structure (ENTAIL=structure, the structural check
-experiment - reported apart, never as the guarantee). entail installs itself through its start-up hook
+experiment - reported apart, never as the guarantee); from v5 (L5.4e) its two integrity experiments structure_writes
+and structure_inkernel. --modes picks the ones a run makes (the others are listed as not run: a partial run). entail installs itself through its start-up hook
 (adapters/autoinstall on PYTHONPATH), the way it does for a user. Every run's stdout, stderr and exit code are kept.
 """
 import argparse
@@ -20,7 +21,8 @@ sys.path.insert(0, HERE)
 import cases as C  # noqa: E402
 import common  # noqa: E402
 
-MODES = (("offA", "off"), ("offB", "off"), ("load", "load"), ("guarantee", "guarantee"), ("structure", "structure"))
+MODES = (("offA", "off"), ("offB", "off"), ("load", "load"), ("guarantee", "guarantee"), ("structure", "structure"),
+         ("structure_writes", "structure_writes"), ("structure_inkernel", "structure_inkernel"))
 
 
 def run_one(case, label, mode, out_root, freeze=None, plan_path=None):
