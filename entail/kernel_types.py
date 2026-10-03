@@ -228,6 +228,21 @@ def _coordinate_basis(basis):
     return None if basis is None or str(basis).startswith(("stride:", "ptr:")) else basis
 
 
+def _net_basis(pairs):
+    """The basis of a sum of terms (basis, sign): the one basis that nets to one while every other nets to zero
+    (an end minus a start of the same basis is a count; a token offset plus such a count is still a token offset)."""
+    net = {}
+    for b, sgn in pairs:
+        b = _coordinate_basis(b)
+        if b is not None:
+            net[b] = net.get(b, 0) + sgn
+    nonzero = {b: n for b, n in net.items() if n}
+    if len(nonzero) == 1:
+        (b, n), = nonzero.items()
+        return b if n == 1 else None
+    return None
+
+
 def _full(a, shape, P):
     """An array broadcast to (P, *shape) (a view, no copy)."""
     return np.broadcast_to(np.asarray(a), (P,) + tuple(shape))
@@ -341,7 +356,8 @@ class _Typed(KI._Run):
                     else:
                         terms[k] = (bs, c if sign == 1 else -c, None)
                 terms = {k: v for k, v in terms.items() if v[1] != 0}
-                return S(a.why, _basis_of(sym, ba, bb), terms, self._const_add(a.const, b.const, sign, shape), shape)
+                pairs = [(bs, (1 if isinstance(c, str) or c > 0 else -1)) for bs, c, _kn in terms.values()]
+                return S(a.why, _net_basis(pairs), terms, self._const_add(a.const, b.const, sign, shape), shape)
             x, e = (a, b) if sa else (b, a)
             e = self._int(e)
             if not isinstance(e, E):
@@ -744,10 +760,9 @@ class _Typed(KI._Run):
                 if kn is not None:                   # a launch-known coordinate on this axis
                     known.setdefault(dim, []).append(kn)
                     continue
-                keys, b0 = syms.get(dim, ((), None))
-                basis = _coordinate_basis(basis)
+                keys, pairs = syms.get(dim, ((), ()))
                 sign = -1 if (not isinstance(c, str) and c < 0) else 1
-                syms[dim] = (keys + ((k, sign),), _basis_of("+" if sign == 1 else "-", b0, basis) if keys else basis)
+                syms[dim] = (keys + ((k, sign),), pairs + ((basis, sign),))
             off = off.const if off.const is not None else E(off.shape, s=np.zeros((1,), dtype=np.int64), w=None)
             if off.shape != tuple(lead) and len(off.shape) != ndim:
                 raise Unmodelled(f"{what}: a symbolic address whose known part has another shape")
@@ -820,7 +835,8 @@ class _Typed(KI._Run):
                 raise _Fail("violation", f"{what} addresses {arg} outside its {tuple(m.shape)} elements (coordinate "
                                          f"{int(cc[idx])} on axis {i} of size {n})",
                             {"program_chunk_index": self.chunk_index, "lane": list(idx[1:])})
-        for i, (k, basis) in syms.items():
+        for i, (k, pairs) in syms.items():
+            basis = _net_basis(pairs)
             ax = m.axes[i] if i < len(m.axes) else None
             if ax is not None and ax.name is not None and basis is not None and ax.name != basis:
                 raise _Fail("violation", f"{what} addresses {arg} along its axis '{ax.name}' with a number that "
