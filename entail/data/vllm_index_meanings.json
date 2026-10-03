@@ -1,0 +1,56 @@
+{
+  "_": "vLLM 0.30 GPU worker (v1/worker/gpu/input_batch.py): the functions that launch the bookkeeping kernels, and what each tensor argument means - the names of its axes, and the basis of its numbers (null: counts or values the rule does not pair). Read by entail/adapters/vllm_index_meanings.py.",
+  "prepare_prefill_inputs": {
+    "input_ids": [["token"], "token_id"],
+    "next_prefill_tokens": [["lookahead", "request_state"], "token_id"],
+    "idx_mapping": [["batch_request"], "request_state"],
+    "query_start_loc": [["batch_request_bound"], "token"],
+    "all_token_ids": [["request_state", "position"], "token_id"],
+    "prefill_len": [["request_state"], "position"],
+    "num_computed_tokens": [["request_state"], "position"]
+  },
+  "prepare_pos_seq_lens": {
+    "idx_mapping": [["batch_request"], "request_state"],
+    "query_start_loc": [["batch_request_bound"], "token"],
+    "num_computed_tokens": [["request_state"], "position"],
+    "pos": [["token"], "position"],
+    "seq_lens": [["batch_request"], "position"]
+  },
+  "combine_sampled_and_draft_tokens": {
+    "input_ids": [["token"], "token_id"],
+    "idx_mapping": [["batch_request"], "request_state"],
+    "last_sampled_tokens": [["request_state", null], "token_id"],
+    "query_start_loc": [["batch_request_bound"], "token"],
+    "seq_lens": [["batch_request"], "position"],
+    "prefill_len": [["request_state"], "position"],
+    "cu_num_logits": [["batch_request_bound"], "logit"]
+  },
+  "get_num_sampled_and_rejected": {
+    "num_sampled": [["batch_request"], null],
+    "seq_lens": [["batch_request"], "position"],
+    "cu_num_logits": [["batch_request_bound"], "logit"],
+    "idx_mapping": [["batch_request"], "request_state"],
+    "prefill_len": [["request_state"], "position"]
+  },
+  "post_update": {
+    "idx_mapping": [["batch_request"], "request_state"],
+    "num_computed_tokens": [["request_state"], "position"],
+    "last_sampled_tokens": [["request_state", null], "token_id"],
+    "output_bin_counts": [["request_state", "token_id"], null],
+    "sampled_tokens": [["batch_request", null], "token_id"],
+    "num_sampled": [["batch_request"], null],
+    "num_rejected": [["batch_request"], null],
+    "query_start_loc": [["batch_request_bound"], "token"],
+    "all_token_ids": [["request_state", "position"], "token_id"],
+    "total_len": [["request_state"], "position"]
+  },
+  "post_update_num_computed_tokens": {
+    "idx_mapping": [["batch_request"], "request_state"],
+    "num_computed_tokens": [["request_state"], "position"],
+    "query_start_loc": [["batch_request_bound"], "token"]
+  },
+  "expand_idx_mapping": {
+    "idx_mapping": [["batch_request"], "request_state"],
+    "cu_num_logits": [["batch_request_bound"], "logit"]
+  }
+}

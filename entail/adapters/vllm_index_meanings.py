@@ -34,7 +34,9 @@ def hooks():
     return [Hook("vllm.v1.worker.gpu.input_batch.InputBuffers.__init__", "load"),
             Hook("vllm.v1.worker.gpu.input_batch.InputBatch.__init__", "request"),
             Hook("vllm.v1.worker.gpu.block_table.BlockTables.__init__", "load"),
-            Hook("vllm.v1.worker.gpu.block_table.BlockTables.init_block_table_layout_tensors", "load")]
+            Hook("vllm.v1.worker.gpu.block_table.BlockTables.init_block_table_layout_tensors", "load"),
+            Hook("vllm.v1.worker.gpu.states.RequestState.__init__", "load")] + \
+        [Hook(f"vllm.v1.worker.gpu.input_batch.{name}", "request") for name in _functions()]
 
 
 def read_choice(kind, obj):
@@ -117,6 +119,82 @@ def install_input_batch():
     return n
 
 
+def _functions():
+    """The worker's functions that launch the bookkeeping kernels, and what each tensor argument means (the data
+    file data/vllm_index_meanings.json): these buffers are made fresh each step, or before the InputBatch exists, so
+    their meanings are attached at the call."""
+    import json
+    import os
+
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data",
+                        "vllm_index_meanings.json")
+    with open(path, encoding="utf-8") as f:
+        table = json.load(f)
+    return {k: {arg: (list(v[0]), v[1]) for arg, v in spec.items()} for k, spec in table.items() if k != "_"}
+
+
+def _wrap_function(mod, name, table):
+    import inspect
+
+    orig = getattr(mod, name, None)
+    if orig is None or getattr(orig, "__entail_types__", False):
+        return 0
+    try:
+        params = list(inspect.signature(orig).parameters)
+    except (TypeError, ValueError):
+        return 0
+
+    @functools.wraps(orig)
+    def run(*a, **k):
+        try:
+            bound = dict(zip(params, a))
+            bound.update(k)
+            for arg, (names, basis) in table.items():
+                t = bound.get(arg)
+                if t is not None and hasattr(t, "dim") and t.dim() == len(names):
+                    _attach(t, names, basis)
+        except Exception:  # noqa: BLE001
+            _count("attach_failed")
+        return orig(*a, **k)
+
+    run.__entail_types__ = True
+    setattr(mod, name, run)
+    _WRAPPED[(mod, name)] = orig
+    return 1
+
+
+def install_functions():
+    mod = sys.modules.get("vllm.v1.worker.gpu.input_batch")
+    if mod is None:
+        return 0
+    return sum(_wrap_function(mod, name, table) for name, table in _functions().items())
+
+
+def install_request_state():
+    mod = sys.modules.get("vllm.v1.worker.gpu.states")
+    cls = getattr(mod, "RequestState", None) if mod is not None else None
+    if cls is None:
+        return 0
+
+    def make(orig):
+        @functools.wraps(orig)
+        def run(self, *a, **k):
+            orig(self, *a, **k)
+            for attr, names, basis in (("all_token_ids", ["request_state", "position"], "token_id"),
+                                       ("prefill_len", ["request_state"], "position"),
+                                       ("total_len", ["request_state"], "position"),
+                                       ("num_computed_tokens", ["request_state"], "position")):
+                t = getattr(self, attr, None)
+                t = getattr(t, "gpu", t)
+                if t is not None and hasattr(t, "dim") and t.dim() == len(names):
+                    _attach(t, names, basis)
+            t = getattr(self, "last_sampled_tokens", None)
+            if t is not None and hasattr(t, "dim"):
+                _attach(t, ["request_state"] + [None] * (t.dim() - 1), "token_id")
+        return run
+    return _wrap(cls, "__init__", make)
+
+
 def install_block_tables():
     mod = sys.modules.get("vllm.v1.worker.gpu.block_table")
     cls = getattr(mod, "BlockTables", None) if mod is not None else None
@@ -178,7 +256,7 @@ def _relayout(orig, make):
 
 def install():
     declare_relations()
-    return install_input_batch() + install_block_tables()
+    return install_input_batch() + install_functions() + install_block_tables() + install_request_state()
 
 
 def stats():
