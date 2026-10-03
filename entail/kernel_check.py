@@ -107,6 +107,13 @@ def fact_of(t):
     for e in lst:
         if e[0] == ptr and e[1] == shape and e[2] == stride and e[3] == dtype:
             return e[4]
+    # a view of the tensor (a slice along its axes, the same strides): the axes mean the same, over a part
+    for e in lst:
+        if e[2] == stride and e[3] == dtype and len(e[1]) == len(shape) and ptr >= e[0] and \
+                all(n <= m for n, m in zip(shape, e[1])) and e[4].get("pointers") is None:
+            f = dict(e[4])
+            f["view_of"] = (e[0], e[1])
+            return f
     return None
 
 
