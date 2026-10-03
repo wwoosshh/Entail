@@ -157,6 +157,8 @@ TYPES_TARGETS = {
     "vllm.model_executor.layers.quantization.utils.fp8_utils": ["entail.kernel_check:install_fp8_utils"],
     "vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel": ["entail.kernel_check:install_weights"],
     "triton.runtime.jit": ["entail.kernel_check:install_triton"],
+    "vllm.v1.worker.gpu.input_batch": ["entail.adapters.vllm_index_meanings:install_input_batch"],
+    "vllm.v1.worker.gpu.block_table": ["entail.adapters.vllm_index_meanings:install"],
 }
 if os.environ.get("ENTAIL", "off") == "guarantee":
     TARGETS = dict(GUARANTEE_TARGETS)
