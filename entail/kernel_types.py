@@ -44,6 +44,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 
 from . import kernel_ir as KI
+from .kernel_ir import _VAL, _split_top
 from .kernel_ir import E, Mk, Ptr, T, Unmodelled, _as_bool_full, _Dense, _Fail, _ranges, _tiling
 
 CHUNK_ELEMENTS = 1 << 22
@@ -221,6 +222,38 @@ class Sym:
             return False
 
 
+def _branch_targets(text):
+    """[(block name, [operand names])] of a cf.br / cf.cond_br: ^bb2(%a, %b : i32, i32)."""
+    out = []
+    for m in re.finditer(r'(\^bb\d+)(?:\(([^)]*)\))?', text):
+        ops = m.group(2).split(":")[0] if m.group(2) else ""
+        out.append((m.group(1), _VAL.findall(ops)))
+    return out
+
+
+def _loop_headers(entry, labels):
+    """The blocks some path branches back to (where loops made of blocks begin), by a depth-first walk."""
+    headers, path = set(), []
+
+    def targets(block):
+        for o in block:
+            if o.name in ("cf.cond_br", "cf.br"):
+                return [t[0] for t in _branch_targets(o.text)]
+        return []
+
+    def walk(name, block):
+        path.append(name)
+        for t in targets(block):
+            if t in path:
+                headers.add(t)
+            elif t in labels:
+                walk(t, labels[t])
+        path.pop()
+
+    walk("^entry", entry)
+    return headers
+
+
 RELATIONS = {}            # (basis a, op, basis b) -> the basis of a op b; declared by whoever attaches the bases
 
 
@@ -239,6 +272,27 @@ def _basis_of(op, a, b):
     if op == "+" and a is None:
         return b
     return None
+
+
+def _float_literal(text, et):
+    """The value of a float literal as TTIR prints it: a decimal, or the bit pattern (0xFF800000 is -inf)."""
+    import struct
+
+    try:
+        if text.lower().startswith("0x"):
+            bits = int(text, 16)
+            if et in ("f32",) or len(text) - 2 == 8:
+                return struct.unpack(">f", bits.to_bytes(4, "big"))[0]
+            if et in ("f64",) or len(text) - 2 == 16:
+                return struct.unpack(">d", bits.to_bytes(8, "big"))[0]
+            if et == "bf16":
+                return struct.unpack(">f", (bits << 16).to_bytes(4, "big"))[0]
+            if et == "f16":
+                return float(np.array([bits], dtype=np.uint16).view(np.float16)[0])
+            return None
+        return float(text)
+    except (ValueError, OverflowError, struct.error):
+        return None
 
 
 def _opaque(why, key, basis, shape):
@@ -341,6 +395,7 @@ class _Typed(KI._Run):
         self.notes = []            # what would be a violation if data sent some programs down this branch
         self.data_depth = 0        # inside a branch or loop decided by data: stores cover what data decides
         self.pointers = {}         # argument -> [target meaning names] (a table of pointers it holds)
+        self.leaf_at = {}          # a loaded index's key -> {axis name: coordinate} of the tensor it was read from
 
     def _key(self, op):
         return (op.results[0] if op.results else op.name, self.iters)
@@ -489,12 +544,21 @@ class _Typed(KI._Run):
 
     def _ops(self, ops, env):
         """kernel_ir's, with blocks: a body of labelled blocks joined by cf.cond_br / cf.br is followed from its
-        entry block; a branch back to an earlier block (a loop made of blocks) is not modelled."""
+        entry block, each path to its return. A block some path branches back to (a loop made of blocks: a loop
+        with a return inside the kernel, which Triton lowers to blocks) is run as one symbolic iteration, as _for
+        runs a loop whose bounds are data: its block arguments are values the loop carries, and its exit is taken
+        with them."""
         labels, entry, cur = {}, [], None
+        self.block_args = {}
         for o in ops:
             if o.name.startswith("^bb"):
-                cur = o.name.rstrip(":")
+                m = re.match(r'(\^bb\d+)(?:\((.*)\))?:', (o.name + " " + o.text).strip())
+                if m is None:
+                    raise Unmodelled(f"a block label this module does not read: {o.name[:40]}")
+                cur = m.group(1)
                 labels[cur] = []
+                self.block_args[cur] = [a.split(":")[0].strip() for a in _split_top(m.group(2))] if m.group(2) \
+                    else []
             elif cur is None:
                 entry.append(o)
             else:
@@ -503,26 +567,51 @@ class _Typed(KI._Run):
             for o in ops:
                 self._op(o, env)
             return
+        self.headers = _loop_headers(entry, labels)
         self._block_ops(entry, env, labels, frozenset({"^entry"}))
+
+    def _enter(self, target, env, labels, visited):
+        """A branch taken to `target` = (block name, operand names): the block's arguments bound to the operands,
+        or, for a block the kernel loops back to, to values the loop carries."""
+        name, operands = target
+        inner = dict(env)
+        for i, a in enumerate(self.block_args.get(name, [])):
+            v = self._get(env, operands[i]) if i < len(operands) else None
+            if name in self.headers:
+                inner[a] = _opaque(f"a value the loop at {name} carries", ("carried", name, i, self.iters),
+                                   v.basis if isinstance(v, S) else None, tuple(getattr(v, "shape", ()) or ()))
+            elif v is not None:
+                inner[a] = v
+        self._block_ops(labels[name], inner, labels, visited | {name})
 
     def _block_ops(self, block, env, labels, visited):
         for o in block:
-            if o.name == "cf.cond_br":
-                targets = ["^" + x for x in re.findall(r'\^(bb\d+)', o.text)]
-                if len(targets) != 2 or any(t not in labels for t in targets):
-                    raise Unmodelled("a conditional branch whose blocks are not found")
-                if any(t in visited for t in targets):
-                    raise Unmodelled("a branch back to an earlier block (a loop made of blocks)")
+            if o.name in ("cf.cond_br", "cf.br"):
+                targets = _branch_targets(o.text)
+                if len(targets) != (2 if o.name == "cf.cond_br" else 1) or any(t[0] not in labels for t in targets):
+                    raise Unmodelled("a branch whose blocks are not found")
+                back = [t for t in targets if t[0] in visited]
+                if any(t[0] not in self.headers for t in back):
+                    raise Unmodelled("a branch back to an earlier block that no loop begins at")
+                if o.name == "cf.br":
+                    if not back:                     # a back edge is the loop's next iteration: run once already
+                        self._enter(targets[0], env, labels, visited)
+                    return
                 cond = self._get(env, o.operands[0])
-                self._branch(cond, targets[0], targets[1], env, labels, visited)
-                return
-            if o.name == "cf.br":
-                targets = ["^" + x for x in re.findall(r'\^(bb\d+)', o.text)]
-                if len(targets) != 1 or targets[0] not in labels:
-                    raise Unmodelled("a jump whose block is not found")
-                if targets[0] in visited:
-                    raise Unmodelled("a branch back to an earlier block (a loop made of blocks)")
-                self._block_ops(labels[targets[0]], env, labels, visited | {targets[0]})
+                live = [None if t[0] in visited else t for t in targets]
+                if live[0] is None and live[1] is None:
+                    return
+                if isinstance(cond, T) or live[0] is None or live[1] is None:
+                    # data decides, or one side is the loop's next iteration: what is followed is the data's
+                    self.data_depth += 1
+                    try:
+                        for t in live:
+                            if t is not None:
+                                self._enter(t, env, labels, visited)
+                    finally:
+                        self.data_depth -= 1
+                    return
+                self._branch(cond, live[0], live[1], env, labels, visited)
                 return
             self._op(o, env)
 
@@ -532,8 +621,8 @@ class _Typed(KI._Run):
         labels = labels or {}
 
         def run(body, inner):
-            if isinstance(body, str):            # a block, named: on the path from here on
-                self._block_ops(labels[body], inner, labels, visited | {body})
+            if isinstance(body, tuple):          # a block to branch to, with the branch's operands
+                self._enter(body, inner, labels, visited)
             else:
                 self._block_ops(body, inner, labels, visited)
 
@@ -661,6 +750,9 @@ class _Typed(KI._Run):
             r = self._select_v(None, a, b)
             r.sym = self._both_sym(a, b)
             return r
+        if isinstance(a, V) != isinstance(b, V):
+            a = a.sym if isinstance(a, V) and a.sym is not None else a
+            b = b.sym if isinstance(b, V) and b.sym is not None else b
         if isinstance(a, V) or isinstance(b, V):
             raise Unmodelled("a float chosen by data against a non-float")
         if isinstance(a, Ptr) or isinstance(b, Ptr):
@@ -709,9 +801,18 @@ class _Typed(KI._Run):
         coords = {}
         for k in a.coords:
             (xa, ga), (xb, gb) = a.coords[k], b.coords[k]
-            if ga != gb or isinstance(xa, Sym) or isinstance(xb, Sym):
+            if ga != gb:
                 raise Unmodelled("a select, lane by lane, between coordinates of different kinds")
-            coords[k] = (np.where(sel, xa, xb), ga)
+            if isinstance(xa, Sym) or isinstance(xb, Sym):
+                if _same_coord(xa, xb):
+                    coords[k] = (xa, ga)
+                    continue
+                raise Unmodelled("a select, lane by lane, between coordinates chosen by data")
+            try:
+                same = xa.shape == xb.shape and np.array_equal(xa, xb)
+            except Exception:  # noqa: BLE001
+                same = False
+            coords[k] = (xa, ga) if same else (np.where(sel, xa, xb), ga)
         va = _ones(shape) if a.valid is None else a.valid
         vb = _ones(shape) if b.valid is None else b.valid
         sums = {}
@@ -727,6 +828,9 @@ class _Typed(KI._Run):
 
     def _merge(self, cv, a, b):
         """a where the program's condition holds, else b."""
+        if isinstance(a, V) != isinstance(b, V):          # a typed integer against a number: the numbers are meant
+            a = a.sym if isinstance(a, V) and a.sym is not None else a
+            b = b.sym if isinstance(b, V) and b.sym is not None else b
         if isinstance(a, T) or isinstance(b, T):
             return T(a.why if isinstance(a, T) else b.why)
         if isinstance(a, V) and isinstance(b, V):
@@ -762,6 +866,8 @@ class _Typed(KI._Run):
             if a.arg != b.arg or a.taint is not None or b.taint is not None:
                 raise Unmodelled("a branch that yields pointers into different tensors")
             return Ptr(a.arg, self._merge(cv, a.off, b.off))
+        if isinstance(a, S) or isinstance(b, S):
+            return self._merge_data(a, b)           # differs by program: as a value chosen by data (its basis kept)
         a, b = self._int(a), self._int(b)
         if not (isinstance(a, E) and isinstance(b, E)):
             raise Unmodelled("a branch whose two values are of different kinds")
@@ -1221,13 +1327,14 @@ class _Typed(KI._Run):
             return self._binary("add", c, out)
         return out
 
-    def _reduce(self, op, x):
+    def _reduce(self, op, x, kind=None):
         if x.alts is not None:
-            return _alt_map(lambda a: self._reduce(op, a), x)
+            return _alt_map(lambda a: self._reduce(op, a, kind), x)
         axis = int(re.search(r'axis = (\d+)', op.text).group(1))
         names = {o.name for o in KI._walk(op.body)}
-        kind = "sum" if "arith.addf" in names else ("max" if {"arith.maxnumf", "arith.maximumf"} & names else
-                                                   "min" if {"arith.minnumf", "arith.minimumf"} & names else None)
+        if kind is None:
+            kind = "sum" if "arith.addf" in names else ("max" if {"arith.maxnumf", "arith.maximumf"} & names else
+                                                       "min" if {"arith.minnumf", "arith.minimumf"} & names else None)
         if kind is None:
             raise Unmodelled(f"a reduction whose combiner is {sorted(names)}")
         P = self.P
@@ -1236,7 +1343,12 @@ class _Typed(KI._Run):
         lane = axis + 1
         coords, sums = {}, {k: list(r) for k, r in x.sums.items()}
         for key, (arr, g) in x.coords.items():
-            if arr.shape[lane] == 1:
+            if isinstance(arr, Sym):
+                if arr.off.shape[lane] == 1 or np.all(arr.off == np.take(arr.off, [0], axis=lane)):
+                    coords[key] = (Sym(arr.key, arr.basis, np.take(arr.off, 0, axis=lane)), g)
+                    continue
+                raise Unmodelled(f"a {kind} over a coordinate chosen by data ('{key}')")
+            if arr.shape[lane] == 1 or np.all(arr == np.take(arr, [0], axis=lane)):
                 coords[key] = (np.take(arr, 0, axis=lane), g)       # constant along the reduced lanes: carried
             elif kind == "sum" and not isinstance(key, str):
                 continue                                           # an axis without a name: nothing to cover
@@ -1349,8 +1461,30 @@ class _Typed(KI._Run):
             return
         self._footprint(ptr.arg, cs, sv, shape)
 
+    def _gathered_at(self, val, name, oc, sv):
+        """Whether a value whose coordinate on some axis was chosen by an index is stored at the place (on the
+        axis `name`) that index was read from: True / False, None when no coordinate of the value is such."""
+        for _key, (arr, _g) in val.coords.items():
+            if not isinstance(arr, Sym):
+                continue
+            at = self.leaf_at.get(arr.key)
+            if not at or name not in at:
+                continue
+            c = at[name]
+            if isinstance(oc, Sym) or isinstance(c, Sym):
+                return bool(_same_coord(oc, c, sv))
+            return not np.any(self._eq(oc, 1, c, 1, sv))
+        return None
+
     def _footprint(self, arg, cs, sv, shape):
         P = self.P
+        m = self.meanings.get(arg)
+        if len(shape) == 1 and m is not None and len(m.shape) == 2 and 0 in cs and 1 in cs:
+            r3 = np.broadcast_to(np.asarray(cs[0]), (P,) + tuple(shape)).reshape(P, 1, -1)
+            c3 = np.broadcast_to(np.asarray(cs[1]), (P,) + tuple(shape)).reshape(P, 1, -1)
+            if np.all(r3 == r3[:, :, :1]):
+                r3 = r3[:, :, :1]
+            return self._footprint(arg, {0: r3, 1: c3}, sv.reshape(P, 1, -1), (1,) + tuple(shape))
         full = (P,) + shape
         live = sv.reshape(P, -1).any(axis=1)
         if len(shape) == 2:
@@ -1422,8 +1556,17 @@ class _Typed(KI._Run):
             if ax.name is not None:
                 c = val.coords.get(ax.name)
                 if c is None:
-                    raise _Fail("unproven", f"the value stored has no coordinate on the output's axis '{ax.name}' "
-                                            f"(it derives from {sorted(str(k) for k in val.coords) or 'nothing'})")
+                    hit = self._gathered_at(val, ax.name, oc, sv)
+                    if hit is None:
+                        raise _Fail("unproven", f"the value stored has no coordinate on the output's axis "
+                                                f"'{ax.name}' (it derives from "
+                                                f"{sorted(str(k) for k in val.coords) or 'nothing'})")
+                    if hit is False:
+                        raise _Fail("violation", f"an output value chosen by an index read at one '{ax.name}' is "
+                                                 f"stored at another", {"program_chunk_index": self.chunk_index,
+                                                                         "axis": ax.name})
+                    self.checks += 1
+                    continue
                 if isinstance(oc, Sym) or isinstance(c[0], Sym):
                     if not _same_coord(oc, c[0], sv):
                         raise _Fail("unproven", f"whether the value is stored at its own '{ax.name}' depends on "
@@ -1510,12 +1653,8 @@ class _Typed(KI._Run):
         if n == "arith.constant":
             et = KI._elem(op.rtype)
             if et.startswith("f") or et.startswith("bf"):
-                mm = re.match(r'(?:dense<)?([-0-9.eE+a-z]+)>?', op.text)
-                try:
-                    val = float(mm.group(1)) if mm else None
-                except ValueError:
-                    val = None
-                r = V(shape or (), const=val)
+                mm = re.match(r'(?:dense<)?([-0-9.eE+a-zA-Z]+)>?', op.text)
+                r = V(shape or (), const=_float_literal(mm.group(1), et) if mm else None)
             else:
                 return super()._op(op, env)
         elif n == "tt.load":
@@ -1570,6 +1709,8 @@ class _Typed(KI._Run):
                                     shape or ())
                     else:
                         r = self._leaf(op, m.basis, shape or ())
+                        self.leaf_at[self._key(op)] = {m.axes[i].name: cs[i] for i in cs
+                                                       if i < len(m.axes) and m.axes[i].name is not None}
                 else:
                     return super()._op(op, env)
         elif n == "arith.andi" and any(isinstance(a, T) for a in args) and \
@@ -1708,6 +1849,17 @@ class _Typed(KI._Run):
             r = args[0].copy(fn=True, extras=args[0].extras + (n,))
         elif n == "tt.reduce":
             x = args[0]
+            if isinstance(x, V) and len(op.results) == 2:
+                names = {o.name for o in KI._walk(op.body)}
+                if not {"arith.cmpf", "arith.select"} <= names:
+                    raise Unmodelled(f"a reduction with two results whose combiner is {sorted(names)}")
+                env[op.results[0]] = self._reduce(op, x, kind="max")
+                idx = args[1] if len(args) > 1 else None
+                axis = int(re.search(r'axis = (\d+)', op.text).group(1))
+                shape_out = tuple(nn for i, nn in enumerate(x.shape) if i != axis)
+                env[op.results[1]] = _opaque("the place of a maximum, chosen by the data", self._key(op) + ("where",),
+                                             idx.basis if isinstance(idx, S) else None, shape_out)
+                return
             if isinstance(x, V):
                 r = self._reduce(op, x)
             else:
@@ -1740,6 +1892,18 @@ class _Typed(KI._Run):
             r = E((), s=np.full((1,), self.grid[axis], dtype=np.int64), w=32)
         elif n == "arith.cmpf":
             r = T("a comparison of float values")
+        elif n in ("gpu.barrier", "ttg.barrier", "tt.debug_barrier", "nvvm.barrier0"):
+            return                                    # a barrier orders the program's threads: no value changes
+        elif n == "tt.mulhiui":
+            # the high half of an unsigned product: exact when both sides are launch-known, else a hash of data
+            x, y = (self._int(a) for a in args[:2])
+            if isinstance(x, E) and isinstance(y, E) and x.w == y.w and x.w in (32, 64):
+                w = x.w
+                xu, yu = self._unsigned(x, w), self._unsigned(y, w)
+                r = self._general(lambda a, b: ((a.astype(object) * b.astype(object)) >> w) & ((1 << w) - 1),
+                                  [xu, yu], np.broadcast_shapes(xu.shape, yu.shape), w=w)
+            else:
+                r = T("the high half of a product of values read at run time")
         else:
             return super()._op(op, env)
         if isinstance(r, V) and r.sym is not None and not (n == "tt.load" or n in KI._INT_BINARY or

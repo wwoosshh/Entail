@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import threading
+import time
 import weakref
 
 from . import graph_types, kernel_ir, kernel_types
@@ -409,6 +410,19 @@ def _cache_put(key, rec):
         _count("cache_write_failed")
 
 
+_PROFILE = os.environ.get("ENTAIL_TYPES_PROFILE") == "1"
+
+
+def _tick(name, t0):
+    if _PROFILE:
+        import time
+
+        t1 = time.perf_counter_ns()
+        _STATS[f"ns_{name}"] = _STATS.get(f"ns_{name}", 0) + (t1 - t0)
+        return t1
+    return t0
+
+
 def _launch(fn, args, kwargs, grid):
     import hashlib
 
@@ -416,13 +430,16 @@ def _launch(fn, args, kwargs, grid):
 
     from .adapters.vllm_block_fp8_guarantee import _kernel_key, read_launch
 
+    t0 = time.perf_counter_ns() if _PROFILE else 0
     values, consts, g = read_launch(fn, args, kwargs, grid)
     tensors = {k: v for k, v in values.items() if isinstance(v, torch.Tensor)}
     if not tensors:
         return
     scalars = {k: (float(v) if isinstance(v, float) else int(v)) for k, v in values.items()
                if isinstance(v, (int, float)) and not isinstance(v, torch.Tensor)}
+    t0 = _tick("read_launch", t0)
     facts = {k: fact_of(t) for k, t in tensors.items()}
+    t0 = _tick("facts", t0)
     sig = tuple((k, str(t.dtype), tuple(t.shape), tuple(t.stride()),
                  None if facts[k] is None else (tuple(facts[k]["names"]), facts[k]["kind"], tuple(facts[k]["groups"]),
                                                 facts[k]["pair"] != 0))
@@ -430,17 +447,19 @@ def _launch(fn, args, kwargs, grid):
     kkey = _kernel_key(fn, consts)
     key = (kkey, sig, tuple(sorted(scalars.items())), g)
     hit = _VERDICTS.get(key)
+    t0 = _tick("key", t0)
     if hit is None:
         name = str(kkey[0])
         out_name, inferred = None, None
         cached = False
+        short = None
         try:
             ttir = fn.warmup(*args, grid=grid, **kwargs).asm["ttir"]
+            short = hashlib.sha256(ttir.encode()).hexdigest()[:8]
             dump = os.environ.get("ENTAIL_TYPES_DUMP_TTIR")
             if dump:                     # a research aid: the IR the verdict was decided on, to replay it offline
                 try:
                     os.makedirs(dump, exist_ok=True)
-                    short = hashlib.sha256(ttir.encode()).hexdigest()[:8]
                     with open(os.path.join(dump, f"{name.rsplit('.', 1)[-1]}-{short}.ttir"), "w",
                               encoding="utf-8") as f:
                         f.write(ttir)
@@ -500,10 +519,11 @@ def _launch(fn, args, kwargs, grid):
         _write({"kind": "types_launch", "kernel": name, "grid": list(g), "scalars": scalars,
                 "tensors": {k: {"dtype": str(t.dtype), "shape": list(t.shape), "stride": list(t.stride()),
                                 "fact": facts[k]} for k, t in tensors.items()},
-                "output": out_name, "verdict": v.to_json(), "cached": cached,
+                "output": out_name, "verdict": v.to_json(), "cached": cached, "ttir": short,
                 "captured": bool(torch.cuda.is_current_stream_capturing())})
     v, out_name, inferred = hit
     _count(f"launch_{v.verdict}")
+    t0 = _tick("decide", t0)
     if v.verdict == "proven" and inferred:
         for name, inf in inferred.items():
             t = tensors.get(name)
@@ -517,6 +537,7 @@ def _launch(fn, args, kwargs, grid):
             attach(t, names, "value", _next_serial() if pending else 0, pending[0] if len(pending) == 1 else 0,
                    sums=inf.get("sums") or {}, pending=pending)
             _count("inferred_attached")
+    _tick("attach_inferred", t0)
 
 
 def install_triton():
@@ -529,10 +550,13 @@ def install_triton():
     @functools.wraps(orig)
     def run(self, *args, grid, warmup, **kwargs):
         if not warmup and not _compiling():
+            t0 = time.perf_counter_ns() if _PROFILE else 0
             try:
                 _launch(self, args, kwargs, grid)
             except Exception:  # noqa: BLE001 - never the engine's problem
                 _count("launch_hook_failed")
+            _tick("hook_total", t0)
+            _count("hook_calls")
         return orig(self, *args, grid=grid, warmup=warmup, **kwargs)
 
     run.__entail_types__ = True

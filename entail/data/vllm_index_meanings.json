@@ -1,56 +1,596 @@
 {
-  "_": "vLLM 0.30 GPU worker (v1/worker/gpu/input_batch.py): the functions that launch the bookkeeping kernels, and what each tensor argument means - the names of its axes, and the basis of its numbers (null: counts or values the rule does not pair). Read by entail/adapters/vllm_index_meanings.py.",
-  "prepare_prefill_inputs": {
-    "input_ids": [["token"], "token_id"],
-    "next_prefill_tokens": [["lookahead", "request_state"], "token_id"],
-    "idx_mapping": [["batch_request"], "request_state"],
-    "query_start_loc": [["batch_request_bound"], "token"],
-    "all_token_ids": [["request_state", "position"], "token_id"],
-    "prefill_len": [["request_state"], "position"],
-    "num_computed_tokens": [["request_state"], "position"]
+ "_": "vLLM 0.30 GPU worker (v1/worker/gpu/input_batch.py): the functions that launch the bookkeeping kernels, and what each tensor argument means - the names of its axes, and the basis of its numbers (null: counts or values the rule does not pair). Read by entail/adapters/vllm_index_meanings.py. Keys of the form module:function name the launcher's module (bare names are input_batch.py); the \"classes\" section names state objects (module:Class) and what their tensor attributes mean.",
+ "prepare_prefill_inputs": {
+  "input_ids": [
+   [
+    "token"
+   ],
+   "token_id"
+  ],
+  "next_prefill_tokens": [
+   [
+    "lookahead",
+    "request_state"
+   ],
+   "token_id"
+  ],
+  "idx_mapping": [
+   [
+    "batch_request"
+   ],
+   "request_state"
+  ],
+  "query_start_loc": [
+   [
+    "batch_request_bound"
+   ],
+   "token"
+  ],
+  "all_token_ids": [
+   [
+    "request_state",
+    "position"
+   ],
+   "token_id"
+  ],
+  "prefill_len": [
+   [
+    "request_state"
+   ],
+   "position"
+  ],
+  "num_computed_tokens": [
+   [
+    "request_state"
+   ],
+   "position"
+  ]
+ },
+ "prepare_pos_seq_lens": {
+  "idx_mapping": [
+   [
+    "batch_request"
+   ],
+   "request_state"
+  ],
+  "query_start_loc": [
+   [
+    "batch_request_bound"
+   ],
+   "token"
+  ],
+  "num_computed_tokens": [
+   [
+    "request_state"
+   ],
+   "position"
+  ],
+  "pos": [
+   [
+    "token"
+   ],
+   "position"
+  ],
+  "seq_lens": [
+   [
+    "batch_request"
+   ],
+   "position"
+  ]
+ },
+ "combine_sampled_and_draft_tokens": {
+  "input_ids": [
+   [
+    "token"
+   ],
+   "token_id"
+  ],
+  "idx_mapping": [
+   [
+    "batch_request"
+   ],
+   "request_state"
+  ],
+  "last_sampled_tokens": [
+   [
+    "request_state",
+    null
+   ],
+   "token_id"
+  ],
+  "query_start_loc": [
+   [
+    "batch_request_bound"
+   ],
+   "token"
+  ],
+  "seq_lens": [
+   [
+    "batch_request"
+   ],
+   "position"
+  ],
+  "prefill_len": [
+   [
+    "request_state"
+   ],
+   "position"
+  ],
+  "cu_num_logits": [
+   [
+    "batch_request_bound"
+   ],
+   "logit"
+  ]
+ },
+ "get_num_sampled_and_rejected": {
+  "num_sampled": [
+   [
+    "batch_request"
+   ],
+   null
+  ],
+  "seq_lens": [
+   [
+    "batch_request"
+   ],
+   "position"
+  ],
+  "cu_num_logits": [
+   [
+    "batch_request_bound"
+   ],
+   "logit"
+  ],
+  "idx_mapping": [
+   [
+    "batch_request"
+   ],
+   "request_state"
+  ],
+  "prefill_len": [
+   [
+    "request_state"
+   ],
+   "position"
+  ]
+ },
+ "post_update": {
+  "idx_mapping": [
+   [
+    "batch_request"
+   ],
+   "request_state"
+  ],
+  "num_computed_tokens": [
+   [
+    "request_state"
+   ],
+   "position"
+  ],
+  "last_sampled_tokens": [
+   [
+    "request_state",
+    null
+   ],
+   "token_id"
+  ],
+  "output_bin_counts": [
+   [
+    "request_state",
+    "token_id"
+   ],
+   null
+  ],
+  "sampled_tokens": [
+   [
+    "batch_request",
+    null
+   ],
+   "token_id"
+  ],
+  "num_sampled": [
+   [
+    "batch_request"
+   ],
+   null
+  ],
+  "num_rejected": [
+   [
+    "batch_request"
+   ],
+   null
+  ],
+  "query_start_loc": [
+   [
+    "batch_request_bound"
+   ],
+   "token"
+  ],
+  "all_token_ids": [
+   [
+    "request_state",
+    "position"
+   ],
+   "token_id"
+  ],
+  "total_len": [
+   [
+    "request_state"
+   ],
+   "position"
+  ]
+ },
+ "post_update_num_computed_tokens": {
+  "idx_mapping": [
+   [
+    "batch_request"
+   ],
+   "request_state"
+  ],
+  "num_computed_tokens": [
+   [
+    "request_state"
+   ],
+   "position"
+  ],
+  "query_start_loc": [
+   [
+    "batch_request_bound"
+   ],
+   "token"
+  ]
+ },
+ "expand_idx_mapping": {
+  "idx_mapping": [
+   [
+    "batch_request"
+   ],
+   "request_state"
+  ],
+  "cu_num_logits": [
+   [
+    "batch_request_bound"
+   ],
+   "logit"
+  ]
+ },
+ "vllm.v1.worker.gpu.sample.bad_words:apply_bad_words": {
+  "logits": [
+   [
+    "logit",
+    "token_id"
+   ],
+   null
+  ],
+  "expanded_idx_mapping": [
+   [
+    "logit"
+   ],
+   "request_state"
+  ],
+  "bad_word_token_ids": [
+   [
+    "request_state",
+    "entry"
+   ],
+   "token_id"
+  ],
+  "bad_word_offsets": [
+   [
+    "request_state",
+    "word_bound"
+   ],
+   "entry"
+  ],
+  "num_bad_words": [
+   [
+    "request_state"
+   ],
+   null
+  ],
+  "all_token_ids": [
+   [
+    "request_state",
+    "position"
+   ],
+   "token_id"
+  ],
+  "prompt_len": [
+   [
+    "request_state"
+   ],
+   "position"
+  ],
+  "total_len": [
+   [
+    "request_state"
+   ],
+   "position"
+  ],
+  "input_ids": [
+   [
+    "token"
+   ],
+   "token_id"
+  ],
+  "expanded_local_pos": [
+   [
+    "logit"
+   ],
+   "position"
+  ]
+ },
+ "vllm.v1.worker.gpu.sample.logit_bias:apply_logit_bias": {
+  "logits": [
+   [
+    "logit",
+    "token_id"
+   ],
+   null
+  ],
+  "expanded_idx_mapping": [
+   [
+    "logit"
+   ],
+   "request_state"
+  ],
+  "pos": [
+   [
+    "logit"
+   ],
+   "position"
+  ],
+  "num_allowed_token_ids": [
+   [
+    "request_state"
+   ],
+   null
+  ],
+  "allowed_token_ids": [
+   [
+    "request_state",
+    "entry"
+   ],
+   "token_id"
+  ],
+  "num_logit_bias": [
+   [
+    "request_state"
+   ],
+   null
+  ],
+  "logit_bias_token_ids": [
+   [
+    "request_state",
+    "entry"
+   ],
+   "token_id"
+  ],
+  "logit_bias": [
+   [
+    "request_state",
+    "entry"
+   ],
+   null
+  ],
+  "min_lens": [
+   [
+    "request_state"
+   ],
+   "position"
+  ],
+  "num_stop_token_ids": [
+   [
+    "request_state"
+   ],
+   null
+  ],
+  "restore_when_all_masked": [
+   [
+    "request_state"
+   ],
+   null
+  ],
+  "stop_token_ids": [
+   [
+    "request_state",
+    "entry"
+   ],
+   "token_id"
+  ]
+ },
+ "vllm.v1.worker.gpu.sample.min_p:apply_min_p": {
+  "logits": [
+   [
+    "logit",
+    "token_id"
+   ],
+   null
+  ],
+  "expanded_idx_mapping": [
+   [
+    "logit"
+   ],
+   "request_state"
+  ],
+  "min_p": [
+   [
+    "request_state"
+   ],
+   null
+  ]
+ },
+ "vllm.v1.worker.gpu.sample.logprob:compute_token_logprobs": {
+  "logits": [
+   [
+    "logit",
+    "token_id"
+   ],
+   null
+  ],
+  "token_ids": [
+   [
+    "logit",
+    "rank"
+   ],
+   "token_id"
+  ]
+ },
+ "vllm.v1.worker.gpu.structured_outputs:StructuredOutputsWorker.apply_grammar_bitmask": {
+  "logits": [
+   [
+    "logit",
+    "token_id"
+   ],
+   null
+  ]
+ },
+ "vllm.v1.worker.gpu.sample.gumbel:gumbel_sample": {
+  "logits": [
+   [
+    "logit",
+    "token_id"
+   ],
+   null
+  ],
+  "expanded_idx_mapping": [
+   [
+    "logit"
+   ],
+   "request_state"
+  ],
+  "temperature": [
+   [
+    "request_state"
+   ],
+   null
+  ],
+  "seed": [
+   [
+    "request_state"
+   ],
+   null
+  ],
+  "pos": [
+   [
+    "logit"
+   ],
+   "position"
+  ]
+ },
+ "classes": {
+  "vllm.v1.worker.gpu.sample.bad_words:BadWordsState": {
+   "bad_word_token_ids": [
+    [
+     "request_state",
+     "entry"
+    ],
+    "token_id"
+   ],
+   "bad_word_offsets": [
+    [
+     "request_state",
+     "word_bound"
+    ],
+    "entry"
+   ],
+   "num_bad_words": [
+    [
+     "request_state"
+    ],
+    null
+   ]
   },
-  "prepare_pos_seq_lens": {
-    "idx_mapping": [["batch_request"], "request_state"],
-    "query_start_loc": [["batch_request_bound"], "token"],
-    "num_computed_tokens": [["request_state"], "position"],
-    "pos": [["token"], "position"],
-    "seq_lens": [["batch_request"], "position"]
+  "vllm.v1.worker.gpu.sample.logit_bias:LogitBiasState": {
+   "num_allowed_token_ids": [
+    [
+     "request_state"
+    ],
+    null
+   ],
+   "allowed_token_ids": [
+    [
+     "request_state",
+     "entry"
+    ],
+    "token_id"
+   ],
+   "num_logit_bias": [
+    [
+     "request_state"
+    ],
+    null
+   ],
+   "logit_bias_token_ids": [
+    [
+     "request_state",
+     "entry"
+    ],
+    "token_id"
+   ],
+   "logit_bias": [
+    [
+     "request_state",
+     "entry"
+    ],
+    null
+   ],
+   "min_lens": [
+    [
+     "request_state"
+    ],
+    "position"
+   ],
+   "num_stop_token_ids": [
+    [
+     "request_state"
+    ],
+    null
+   ],
+   "restore_when_all_masked": [
+    [
+     "request_state"
+    ],
+    null
+   ],
+   "stop_token_ids": [
+    [
+     "request_state",
+     "entry"
+    ],
+    "token_id"
+   ]
   },
-  "combine_sampled_and_draft_tokens": {
-    "input_ids": [["token"], "token_id"],
-    "idx_mapping": [["batch_request"], "request_state"],
-    "last_sampled_tokens": [["request_state", null], "token_id"],
-    "query_start_loc": [["batch_request_bound"], "token"],
-    "seq_lens": [["batch_request"], "position"],
-    "prefill_len": [["request_state"], "position"],
-    "cu_num_logits": [["batch_request_bound"], "logit"]
+  "vllm.v1.worker.gpu.sample.logprob:LogprobTokenIdsState": {
+   "num_token_ids": [
+    [
+     "request_state"
+    ],
+    null
+   ],
+   "token_ids": [
+    [
+     "request_state",
+     "entry"
+    ],
+    "token_id"
+   ]
   },
-  "get_num_sampled_and_rejected": {
-    "num_sampled": [["batch_request"], null],
-    "seq_lens": [["batch_request"], "position"],
-    "cu_num_logits": [["batch_request_bound"], "logit"],
-    "idx_mapping": [["batch_request"], "request_state"],
-    "prefill_len": [["request_state"], "position"]
-  },
-  "post_update": {
-    "idx_mapping": [["batch_request"], "request_state"],
-    "num_computed_tokens": [["request_state"], "position"],
-    "last_sampled_tokens": [["request_state", null], "token_id"],
-    "output_bin_counts": [["request_state", "token_id"], null],
-    "sampled_tokens": [["batch_request", null], "token_id"],
-    "num_sampled": [["batch_request"], null],
-    "num_rejected": [["batch_request"], null],
-    "query_start_loc": [["batch_request_bound"], "token"],
-    "all_token_ids": [["request_state", "position"], "token_id"],
-    "total_len": [["request_state"], "position"]
-  },
-  "post_update_num_computed_tokens": {
-    "idx_mapping": [["batch_request"], "request_state"],
-    "num_computed_tokens": [["request_state"], "position"],
-    "query_start_loc": [["batch_request_bound"], "token"]
-  },
-  "expand_idx_mapping": {
-    "idx_mapping": [["batch_request"], "request_state"],
-    "cu_num_logits": [["batch_request_bound"], "logit"]
+  "vllm.v1.worker.gpu.structured_outputs:StructuredOutputsWorker": {
+   "logits_indices": [
+    [
+     "bitmask"
+    ],
+    null
+   ],
+   "grammar_bitmask": [
+    [
+     "bitmask",
+     "word"
+    ],
+    null
+   ]
   }
+ }
 }
