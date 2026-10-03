@@ -19,7 +19,7 @@ import sys
 import threading
 import weakref
 
-from . import kernel_ir, kernel_types
+from . import graph_types, kernel_ir, kernel_types
 from .kernel_types import Axis, Meaning
 
 _FACTS = {}            # (device, storage start) -> list of [data_ptr, shape, stride, dtype, fact dict, weakref]
@@ -52,14 +52,15 @@ def _storage_key(t):
 # --- the facts: a meaning on a tensor's memory, gone when the tensor is -----------------------------------------------
 
 def attach(t, names, kind="value", serial=0, pair=0, groups=None, sums=None, pending=(), basis=None, label=None,
-           pointers=None):
+           pointers=None, packed=None):
     """Give the tensor `t` a meaning: a name per axis (None for an axis that means nothing the rule can pair); for an
     integer tensor the basis of its numbers; a label a loaded stride can refer to; for a table of pointers the
-    tensors it points to (each with its own meaning attached)."""
+    tensors it points to (each with its own meaning attached); for a tensor packed for one kernel the packed form
+    and the sizes it was packed from (its axes then mean nothing elementwise)."""
     key = _storage_key(t)
     fact = {"names": list(names), "kind": kind, "serial": serial, "pair": pair,
             "groups": list(groups or [1] * len(names)), "sums": dict(sums or {}), "pending": list(pending),
-            "basis": basis, "label": label,
+            "basis": basis, "label": label, "packed": packed,
             "pointers": None if pointers is None else [_snapshot(x) for x in pointers]}
     entry = [t.data_ptr(), tuple(t.shape), tuple(t.stride()), t.dtype, fact, None]
     with _LOCK:
@@ -201,6 +202,118 @@ def install_weights():
             return out
         return run
     return _wrap(cls, "process_weights_after_loading", make)
+
+
+def install_marlin_weights():
+    """FP8 weights repacked for Marlin (vLLM's default on a GPU without FP8 units): the packed weight and its
+    permuted scales are one issue, with the sizes they were packed from."""
+    mod = sys.modules.get("vllm.model_executor.kernels.linear.scaled_mm.marlin")
+    cls = getattr(mod, "MarlinFP8ScaledMMLinearKernel", None) if mod is not None else None
+    if cls is None:
+        return 0
+
+    def make(orig):
+        @functools.wraps(orig)
+        def run(self, layer):
+            out = orig(self, layer)
+            try:
+                w = layer.weight
+                sname = "weight_scale_inv" if getattr(layer, "weight_scale_inv", None) is not None else "weight_scale"
+                sc = getattr(layer, sname)
+                size_n, size_k = int(layer.output_size_per_partition), int(layer.input_size_per_partition)
+                bs = getattr(layer, "weight_block_size", None)
+                group = int(bs[1]) if bs is not None else size_k
+                serial, pair = _next_serial(), _next_serial()
+                packed = {"form": "marlin_fp8", "size_k": size_k, "size_n": size_n, "group": group}
+                attach(w, [None] * w.dim(), "value", serial, pair, packed=packed)
+                attach(sc, ["hidden", "feature"] if sc.dim() == 2 else [None] * sc.dim(), "scale", pair, serial,
+                       [group, 1] if sc.dim() == 2 else None, packed=dict(packed, form="marlin_permuted"))
+                _count("weight_issued")
+            except Exception:  # noqa: BLE001
+                _count("weight_issue_failed")
+            return out
+        return run
+    return _wrap(cls, "process_weights_after_loading", make)
+
+
+# --- the compiled graph ---------------------------------------------------------------------------------------------
+
+_GRAPHS = []
+
+
+def _graph_key(cache_dir):
+    return f"graph:{_checker_version()}:{cache_dir}"
+
+
+def _graph(graph, example_inputs):
+    v = graph_types.check_graph(graph, example_inputs, fact_of)
+    _GRAPHS.append(v)
+    _count(f"graph_{v['verdict']}")
+    _write(dict(v, kind="types_graph", cached=False))
+    return v
+
+
+def install_compile():
+    """vLLM's compile backend receives the model's graph with its real inputs: the rule over it, once, before it is
+    compiled. The verdict is kept with vLLM's compile cache so a later process that loads the compiled model from
+    disk still reports it."""
+    mod = sys.modules.get("vllm.compilation.backends")
+    cls = getattr(mod, "VllmBackend", None) if mod is not None else None
+    if cls is None:
+        return 0
+
+    def make(orig):
+        @functools.wraps(orig)
+        def call(self, graph, example_inputs):
+            v = None
+            try:
+                v = _graph(graph, example_inputs)
+            except Exception as e:  # noqa: BLE001 - never the engine's problem
+                _count("graph_hook_failed")
+                _write({"kind": "types_graph", "verdict": "unproven", "why": f"the check raised {type(e).__name__}: {e}"})
+            out = orig(self, graph, example_inputs)
+            try:
+                cache_dir = getattr(self.compilation_config, "local_cache_dir", None)
+                if v is not None and cache_dir:
+                    _cache_put(_graph_key(cache_dir), {"graph": v})
+            except Exception:  # noqa: BLE001
+                _count("graph_cache_write_failed")
+            return out
+        return call
+    return _wrap(cls, "__call__", make)
+
+
+def install_compile_cache():
+    """A compiled model loaded from vLLM's cache skips the backend, so the graph is not seen: when its verdict is in
+    the cache it is reported again; when it is not (the cache predates the rule), the load is declined once so the
+    model compiles and the rule sees it."""
+    mod = sys.modules.get("vllm.compilation.decorators")
+    if mod is None or not hasattr(mod, "_try_load_aot_compiled_fn"):
+        return 0
+
+    def make(orig):
+        @functools.wraps(orig)
+        def load(self, path, *args, **kwargs):
+            try:
+                cache_dir = os.path.dirname(os.path.dirname(str(path)))
+                old = _cache().get(_graph_key(cache_dir))
+                if old is None:
+                    _count("graph_cache_declined")
+                    _write({"kind": "types_graph", "verdict": "deferred", "why": "the compiled model in vLLM's cache "
+                            "has no verdict from this checker; it is compiled once more so the rule sees its graph",
+                            "cache_dir": cache_dir})
+                    return None
+                v = old.get("graph")
+                if v:
+                    _GRAPHS.append(v)
+                    _count(f"graph_{v.get('verdict', 'unproven')}")
+                    _count("graph_from_cache")
+                    _write(dict(v, kind="types_graph", cached=True))
+            except Exception:  # noqa: BLE001
+                _count("graph_cache_failed")
+            return orig(self, path, *args, **kwargs)
+        return load
+    return _wrap(mod, "_try_load_aot_compiled_fn", make)
 
 
 # --- the launches ---------------------------------------------------------------------------------------------------
@@ -413,7 +526,8 @@ def install_triton():
 
 
 def install():
-    return install_fp8_utils() + install_weights() + install_triton()
+    return install_fp8_utils() + install_weights() + install_marlin_weights() + install_triton() + \
+        install_compile() + install_compile_cache()
 
 
 def uninstall():
@@ -434,4 +548,4 @@ def summary():
                     "verdict": v.verdict, "why": v.why[:300], "checks": v.checks, "seconds": round(v.seconds, 3),
                     "named_inputs": [k for k, _d, _s, _st, f in sig if f is not None],
                     "tensors": len(sig), "inferred": inferred})
-    return {"stats": dict(_STATS), "launches": out}
+    return {"stats": dict(_STATS), "launches": out, "graphs": list(_GRAPHS)}
