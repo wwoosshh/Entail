@@ -204,12 +204,93 @@ def _first(bad):
 class _Typed(KI._Run):
     """kernel_ir's evaluator with typed float values."""
 
-    def __init__(self, fn, meanings, ints, pids, dense, chunk_index=0):
+    def __init__(self, fn, meanings, ints, pids, dense, chunk_index=0, grid=(1, 1, 1)):
         super().__init__(fn, {}, ints, pids, dense)
         self.meanings = meanings
         self.checks = 0
         self.chunk_index = chunk_index
+        self.grid = tuple(int(g) for g in (list(grid) + [1, 1, 1])[:3])
         self.inferred = {}         # output argument -> {dim: axis name, ...}
+        self.stores = {}           # output argument -> [(row lo, rows, column lo, columns) per storing program]
+        self.active = np.ones(self.P, dtype=bool)   # the programs the current branch is taken by
+
+    def _active_lanes(self, ndim):
+        return self.active.reshape((-1,) + (1,) * ndim)
+
+    # -- a branch taken by some programs and not others --
+
+    def _if(self, op, env, cond):
+        """scf.if whose condition is decided by the launch but differs between programs (one program pads, the
+        others compute): both branches are followed, each with the programs that take it active; what they yield is
+        merged program by program. A condition read from data, or one shared by every program: kernel_ir's."""
+        if isinstance(cond, T):
+            return super()._if(op, env, cond)
+        c = self._int(cond)
+        if not isinstance(c, E) or not c.scalar_only():
+            raise Unmodelled("a branch whose condition differs between lanes")
+        cv = np.broadcast_to(c.s.astype(bool), (self.P,))
+        if cv.all() or not cv.any():
+            return super()._if(op, env, cond)
+        branches = [op.body, op.extra.get("else", [])]
+        saved = self.active
+        yields = []
+        try:
+            for take, body in ((cv, branches[0]), (~cv, branches[1])):
+                self.active = saved & take
+                inner = dict(env)
+                self._ops(body, inner)
+                yields.append(inner.get("__yield__", []))
+        finally:
+            self.active = saved
+        for name, a, b in zip(op.results, yields[0], yields[1]):
+            env[name] = self._merge(cv, a, b)
+
+    def _merge(self, cv, a, b):
+        """a where the program's condition holds, else b."""
+        if isinstance(a, T) or isinstance(b, T):
+            return T(a.why if isinstance(a, T) else b.why)
+        if isinstance(a, V) and isinstance(b, V):
+            if a.alts is not None or b.alts is not None:
+                raise Unmodelled("a branch that yields values chosen by data")
+            if a.const is not None and b.const is not None:
+                return V(a.shape, const=a.const if a.const == b.const else None, fn=a.const != b.const)
+            if a.const is not None or b.const is not None or a.shape != b.shape or set(a.coords) != set(b.coords) \
+                    or set(a.sums) != set(b.sums) or a.serials != b.serials or a.applied != b.applied:
+                raise Unmodelled("a branch whose two values differ in meaning")
+            ndim = len(a.shape)
+            sel = cv.reshape((-1,) + (1,) * ndim)
+            coords = {}
+            for k in a.coords:
+                (xa, ga), (xb, gb) = a.coords[k], b.coords[k]
+                if ga != gb:
+                    raise Unmodelled("a branch whose two values group an axis differently")
+                coords[k] = (np.where(sel, xa, xb), ga)
+            va = _ones(a.shape) if a.valid is None else a.valid
+            vb = _ones(b.shape) if b.valid is None else b.valid
+            sums = {}
+            for k in a.sums:
+                if len(a.sums[k]) != len(b.sums[k]):
+                    raise Unmodelled("a branch whose two values sum over different numbers of ranges")
+                sums[k] = [(np.where(cv, np.broadcast_to(la, cv.shape), np.broadcast_to(lb, cv.shape)),
+                            np.where(cv, np.broadcast_to(ca, cv.shape), np.broadcast_to(cb, cv.shape)))
+                           for (la, ca), (lb, cb) in zip(a.sums[k], b.sums[k])]
+            return V(a.shape, coords, np.where(sel, va, vb), sums, a.serials, a.applied,
+                     tuple(dict.fromkeys(a.extras + b.extras)), a.fn or b.fn,
+                     masked_zero=a.masked_zero and b.masked_zero, data_addr=a.data_addr or b.data_addr)
+        if isinstance(a, Ptr) and isinstance(b, Ptr):
+            if a.arg != b.arg or a.taint is not None or b.taint is not None:
+                raise Unmodelled("a branch that yields pointers into different tensors")
+            return Ptr(a.arg, self._merge(cv, a.off, b.off))
+        a, b = self._int(a), self._int(b)
+        if not (isinstance(a, E) and isinstance(b, E)):
+            raise Unmodelled("a branch whose two values are of different kinds")
+        if a.shape != b.shape:
+            raise Unmodelled("a branch whose two values differ in shape")
+        c = E((), s=cv.astype(np.int64), b=True, w=1)
+        if a.shape:
+            c = E(a.shape, s=cv.astype(np.int64), b=True, w=1)
+        return self._general(lambda x, y, z: np.where(x.astype(bool), y, z), [c, a, b], a.shape, b=a.b and b.b,
+                             w=a.w)
 
     def run(self):
         """kernel_ir's binding of the arguments, with a float scalar argument a constant value."""
@@ -329,6 +410,8 @@ class _Typed(KI._Run):
         valid = None if mask is None else _as_bool_full(mask)
         if valid is not None and valid.ndim != 1 + len(shape):
             valid = valid.reshape((-1,) + tuple(shape))
+        if not self.active.all():          # lanes of programs not in this branch hold nothing
+            valid = self._active_lanes(len(shape)) & (_ones(shape) if valid is None else valid)
         cs = self._coords_of(p.arg, p.off, valid, "a load")
         coords = {}
         for i, ax in enumerate(m.axes):
@@ -659,6 +742,8 @@ class _Typed(KI._Run):
         shape = tuple(ptr.off.shape)
         full = (P,) + shape
         sv = np.ones(full, dtype=bool) if stored is None else _full(stored, shape, P)
+        if not self.active.all():
+            sv = sv & self._active_lanes(len(shape))
         if val.data_addr:
             raise _Fail("unproven", f"the value stored was read at an address chosen by data ({val.data_addr})")
         cs = self._coords_of(ptr.arg, ptr.off, sv, "a store")
@@ -741,17 +826,19 @@ class _Typed(KI._Run):
                                 "the rows a program stores are not one range", twice="unproven")
             clo, ccnt = _ranges(cols, sc, "one output column is stored twice by one program",
                                 "the columns a program stores are not one range", twice="unproven")
-            self.stores.append((rlo[live], rcnt[live], clo[live], ccnt[live]))
+            self.stores.setdefault(ptr.arg, []).append((rlo[live], rcnt[live], clo[live], ccnt[live]))
         elif len(shape) == 1:
             x = np.broadcast_to(cs[0], full)
             lo, cnt = _ranges(np.where(sv, x, -1), sv, "one output element is stored twice by one program",
                               "the elements a program stores are not one range", twice="unproven")
-            self.stores.append((lo[live], cnt[live], np.zeros(int(live.sum()), dtype=np.int64),
-                                np.ones(int(live.sum()), dtype=np.int64)))
+            self.stores.setdefault(ptr.arg, []).append((lo[live], cnt[live], np.zeros(int(live.sum()),
+                                                                                       dtype=np.int64),
+                                                        np.ones(int(live.sum()), dtype=np.int64)))
         elif len(shape) == 0:
             x = np.broadcast_to(cs[0], (P,))
-            self.stores.append((x, np.ones(P, dtype=np.int64), np.zeros(P, dtype=np.int64),
-                                np.ones(P, dtype=np.int64)))
+            self.stores.setdefault(ptr.arg, []).append((x[live], np.ones(int(live.sum()), dtype=np.int64),
+                                                        np.zeros(int(live.sum()), dtype=np.int64),
+                                                        np.ones(int(live.sum()), dtype=np.int64)))
         else:
             raise Unmodelled(f"a store of {len(shape)} lane dimensions")
 
@@ -866,6 +953,12 @@ class _Typed(KI._Run):
         elif n == "tt.store":
             self._store(args)
             return
+        elif n == "tt.get_num_programs":
+            axis = {"x": 0, "y": 1, "z": 2}[op.text.split()[0]] if op.text.split() and op.text.split()[0] in "xyz" \
+                else int(re.search(r'axis = (\d+)', op.text).group(1))
+            r = E((), s=np.full((1,), self.grid[axis], dtype=np.int64), w=32)
+        elif n == "arith.cmpf":
+            r = T("a comparison of float values")
         else:
             return super()._op(op, env)
         for name in op.results[:1]:
@@ -904,7 +997,9 @@ def _covers(ranges, lo, hi, live):
 def check_launch(ttir: str, meanings: Dict[str, Meaning], ints: Dict[str, int], grid,
                  chunk_elements: int = CHUNK_ELEMENTS) -> Verdict:
     """The verdict on one launch: the kernel's IR, the meaning of each pointer argument (by parameter name), the
-    integer (and float) arguments by name, the grid."""
+    integer (and float) arguments by name, the grid. Every argument of kind "output" is an output: a declared one
+    (strict, or with reduced axes) must be covered completely, one whose axes were not named gets its meaning
+    inferred, with the part of it the launch covers."""
     t0 = time.perf_counter()
     try:
         fn = KI.parse(ttir)
@@ -917,26 +1012,26 @@ def check_launch(ttir: str, meanings: Dict[str, Meaning], ints: Dict[str, int], 
         sh = KI._shape(op.rtype) or (1,)
         longest = max(longest, int(np.prod(sh)) if len(sh) <= 1 else max(sh))
     outs = [k for k, m in meanings.items() if m.kind == "output"]
-    if len(outs) != 1:
-        return Verdict("unproven", f"the launch has {len(outs)} tensors bound as its output (one is needed)",
-                       seconds=time.perf_counter() - t0)
-    out = meanings[outs[0]]
+    if not outs:
+        return Verdict("unproven", "the launch has no tensor bound as its output", seconds=time.perf_counter() - t0)
     per = max(1, chunk_elements // max(longest, 1))
     checks = 0
-    stores = []
+    stores = {}
     inferred = {}
     try:
         for ci, start in enumerate(range(0, total, per)):
-            run = _Typed(fn, meanings, ints, KI._grid_pids((gx, gy, gz), start, min(total, start + per)), True, ci)
+            run = _Typed(fn, meanings, ints, KI._grid_pids((gx, gy, gz), start, min(total, start + per)), True, ci,
+                         (gx, gy, gz))
             run.run()
             checks += run.checks
-            stores += run.stores
+            for k, v in run.stores.items():
+                stores.setdefault(k, []).extend(v)
             for k, v in run.inferred.items():
                 for kk, vv in v.items():
                     was = inferred.setdefault(k, {}).get(kk)
                     if was is not None and was != vv:
-                        return Verdict("unproven", f"the output's {kk} is inferred as {was} in one chunk and {vv} in "
-                                                   f"another", checks, total, time.perf_counter() - t0)
+                        return Verdict("unproven", f"the output {k}'s {kk} is inferred as {was} in one chunk and "
+                                                   f"{vv} in another", checks, total, time.perf_counter() - t0)
                     inferred[k][kk] = vv
     except _Fail as e:
         return Verdict(e.verdict, e.why, checks, total, time.perf_counter() - t0, e.example)
@@ -944,21 +1039,33 @@ def check_launch(ttir: str, meanings: Dict[str, Meaning], ints: Dict[str, int], 
         return Verdict("unproven", str(e), checks, total, time.perf_counter() - t0)
     except _Dense:
         return Verdict("unproven", "a value could not be evaluated", checks, total, time.perf_counter() - t0)
-    if len(out.shape) == 2:
-        M, N = (int(x) for x in out.shape)
-    elif len(out.shape) == 1:
-        M, N = int(out.shape[0]), 1
-    else:
-        return Verdict("unproven", f"an output of {len(out.shape)} dimensions (coverage is decided for 1-D and 2-D)",
-                       checks, total, time.perf_counter() - t0)
-    tiled = _tiling(stores, M, N)
-    if tiled is not None:
-        return Verdict(tiled[0], tiled[1], checks, total, time.perf_counter() - t0, tiled[2])
-    inf = inferred.get(outs[0]) or None
-    if inf is not None:
-        inf = {("axis_%d" % k if isinstance(k, int) else k): (v if isinstance(v, (str, list, dict)) else str(v))
-               for k, v in inf.items()}
-    return Verdict("proven", f"every element of the {tuple(out.shape)} output is stored once from values paired on "
-                             f"their meanings ({checks} pairings over {total} programs)" +
-                   (f"; the output's meaning was inferred: {inf}" if inf else ""),
-                   checks, total, time.perf_counter() - t0, None, inf)
+    notes = []
+    for name in outs:
+        out = meanings[name]
+        declared = out.strict or bool(out.reduced) or all(a.name is not None for a in out.axes)
+        if len(out.shape) == 2:
+            M, N = (int(x) for x in out.shape)
+        elif len(out.shape) == 1:
+            M, N = int(out.shape[0]), 1
+        elif len(out.shape) == 0:
+            M, N = 1, 1
+        else:
+            return Verdict("unproven", f"an output of {len(out.shape)} dimensions (coverage is decided for 1-D and "
+                                       f"2-D)", checks, total, time.perf_counter() - t0)
+        tiled = _tiling(stores.get(name, []), M, N)
+        if tiled is not None:
+            partial = tiled[0] == "violation" and ("never stored" in tiled[1] or "never stores" in tiled[1])
+            if declared or not partial:
+                why = tiled[1] if len(outs) == 1 else f"{name}: {tiled[1]}"
+                return Verdict(tiled[0], why, checks, total, time.perf_counter() - t0, tiled[2])
+            inferred.setdefault(name, {})["coverage"] = "partial: " + tiled[1]
+        inf = inferred.get(name)
+        if inf:
+            inferred[name] = {("axis_%d" % k if isinstance(k, int) else k):
+                              (v if isinstance(v, (str, list, dict)) else str(v)) for k, v in inf.items()}
+            notes.append(f"{name}: {inferred[name]}")
+    return Verdict("proven", f"every stored element of the output{'s' if len(outs) > 1 else ''} "
+                             f"{', '.join(f'{n} {tuple(meanings[n].shape)}' for n in outs)} is stored once from values "
+                             f"paired on their meanings ({checks} pairings over {total} programs)" +
+                   (f"; inferred: {'; '.join(notes)}" if notes else ""),
+                   checks, total, time.perf_counter() - t0, None, {k: v for k, v in inferred.items() if v} or None)

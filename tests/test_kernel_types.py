@@ -87,8 +87,9 @@ def main():
     ms = meanings(64)
     ms["C"] = Meaning((Axis(None, 64), Axis(None, N)), (64, N), (N, 1), "output")
     v = launch("orig", 64, 64, ms=ms)
-    assert v.verdict == "proven" and v.inferred["axis_0"] == "token" and v.inferred["axis_1"] == "feature", v
-    assert v.inferred["pending_scales"] == [] and "hidden" in v.inferred["sums"], v
+    inf = v.inferred["C"]
+    assert v.verdict == "proven" and inf["axis_0"] == "token" and inf["axis_1"] == "feature", v
+    assert inf["pending_scales"] == [] and "hidden" in inf["sums"], v
     print("ok an output whose axes were not named: inferred as [token, feature], summed over hidden")
 
 

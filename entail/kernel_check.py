@@ -205,7 +205,48 @@ def _write(line):
         _count("record_failed")
 
 
+_CACHE = None          # verdicts of earlier processes: key -> record (entail_logs/types-cache.jsonl)
+
+
+def _cache_path():
+    named = os.environ.get("ENTAIL_TYPES_CACHE")
+    if named:
+        return named
+    return os.path.join(os.environ.get("ENTAIL_LOG_DIR", "entail_logs"), "types-cache.jsonl")
+
+
+def _cache():
+    """The verdicts earlier processes decided, read once: a launch configuration is decided once per machine, not
+    once per process (the kernel's IR text, the meanings, the integer arguments and the grid make the key)."""
+    global _CACHE
+    if _CACHE is None:
+        _CACHE = {}
+        try:
+            with open(_cache_path(), encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                        _CACHE[rec["key"]] = rec
+                    except (ValueError, KeyError):
+                        continue
+        except OSError:
+            pass
+    return _CACHE
+
+
+def _cache_put(key, rec):
+    _cache()[key] = rec
+    try:
+        os.makedirs(os.path.dirname(_cache_path()) or ".", exist_ok=True)
+        with open(_cache_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(dict(rec, key=key), ensure_ascii=False, default=str) + "\n")
+    except OSError:
+        _count("cache_write_failed")
+
+
 def _launch(fn, args, kwargs, grid):
+    import hashlib
+
     import torch
 
     from .adapters.vllm_block_fp8_guarantee import _kernel_key, read_launch
@@ -227,43 +268,59 @@ def _launch(fn, args, kwargs, grid):
     if hit is None:
         name = str(kkey[0])
         out_name, inferred = None, None
+        cached = False
         try:
             ttir = fn.warmup(*args, grid=grid, **kwargs).asm["ttir"]
-            written = kernel_ir.written_args(ttir)
-            meanings = {}
-            # the serials in a cached configuration are those of the first launch; the rule only compares them
-            for k, t in tensors.items():
-                m, _f = meaning_of(t)
-                if written is not None and k in written:
-                    m.kind = "output"
-                meanings[k] = m
-            if written is None:
-                v = kernel_types.Verdict("unproven", "the IR does not say which arguments the kernel writes")
-            elif len(written) != 1:
-                v = kernel_types.Verdict("unproven", f"the kernel writes {len(written)} arguments "
-                                                     f"({', '.join(sorted(written))}); one output is decided")
+            ckey = hashlib.sha256(json.dumps([ttir, [list(x) for x in sig], sorted(scalars.items()), list(g)],
+                                             default=str).encode()).hexdigest()
+            old = _cache().get(ckey)
+            if old is not None:
+                v = kernel_types.Verdict(**{k: old["verdict"].get(k) for k in ("verdict", "why", "checks", "programs",
+                                                                               "seconds", "example", "inferred")})
+                out_name, inferred, cached = old.get("output"), old.get("inferred"), True
             else:
-                out_name = next(iter(written))
-                v = kernel_types.check_launch(ttir, meanings, scalars, g)
-                inferred = v.inferred
+                written = kernel_ir.written_args(ttir)
+                meanings = {}
+                # the serials in a cached configuration are those of the first launch; the rule only compares them
+                for k, t in tensors.items():
+                    m, _f = meaning_of(t)
+                    if written is not None and k in written:
+                        m.kind = "output"
+                    meanings[k] = m
+                if written is None:
+                    v = kernel_types.Verdict("unproven", "the IR does not say which arguments the kernel writes")
+                elif not written:
+                    v = kernel_types.Verdict("unproven", "the kernel writes no argument")
+                else:
+                    out_name = sorted(written)
+                    v = kernel_types.check_launch(ttir, meanings, scalars, g)
+                    inferred = v.inferred
+                _cache_put(ckey, {"kernel": name, "output": out_name, "inferred": inferred, "verdict": v.to_json()})
         except Exception as e:  # noqa: BLE001 - the checker failed: nothing is claimed
             v = kernel_types.Verdict("unproven", f"the check raised {type(e).__name__}: {e}")
         hit = _VERDICTS[key] = (v, out_name, inferred)
         _count(f"verdict_{v.verdict}")
+        _count("verdict_from_cache" if cached else "verdict_decided")
         _write({"kind": "types_launch", "kernel": name, "grid": list(g), "scalars": scalars,
                 "tensors": {k: {"dtype": str(t.dtype), "shape": list(t.shape), "stride": list(t.stride()),
                                 "fact": facts[k]} for k, t in tensors.items()},
-                "output": out_name, "verdict": v.to_json(), "captured": bool(torch.cuda.is_current_stream_capturing())})
+                "output": out_name, "verdict": v.to_json(), "cached": cached,
+                "captured": bool(torch.cuda.is_current_stream_capturing())})
     v, out_name, inferred = hit
     _count(f"launch_{v.verdict}")
-    if v.verdict == "proven" and out_name is not None and inferred:
-        t = tensors[out_name]
-        names = [inferred.get(f"axis_{i}") for i in range(t.dim())]
-        names = [n if isinstance(n, str) else None for n in names]
-        pending = inferred.get("pending_scales") or []
-        attach(t, names, "value", _next_serial() if pending else 0, pending[0] if len(pending) == 1 else 0,
-               sums=inferred.get("sums") or {}, pending=pending)
-        _count("inferred_attached")
+    if v.verdict == "proven" and inferred:
+        for name, inf in inferred.items():
+            t = tensors.get(name)
+            if t is None or not isinstance(inf, dict) or "coverage" in inf:
+                continue                     # a partly covered output keeps no meaning from this launch
+            names = [inf.get(f"axis_{i}") for i in range(t.dim())]
+            names = [n if isinstance(n, str) else None for n in names]
+            if not any(names):
+                continue
+            pending = inf.get("pending_scales") or []
+            attach(t, names, "value", _next_serial() if pending else 0, pending[0] if len(pending) == 1 else 0,
+                   sums=inf.get("sums") or {}, pending=pending)
+            _count("inferred_attached")
 
 
 def install_triton():
