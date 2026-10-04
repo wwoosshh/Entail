@@ -25,6 +25,8 @@ from .kernel_types import Axis, Meaning
 
 _FACTS = {}            # (device, storage start) -> list of [data_ptr, shape, stride, dtype, fact dict, weakref]
 _WCOUNT = {}           # (device, storage start) -> how many writes the launches seen made into that storage
+_ALIEN = {}            # (device, storage start) -> writes the launches seen made into its memory through another storage
+_UNWRITTEN = [0]       # parameters found holding elements nothing wrote (lifetime.loaded), in this process
 _EXTENT = {}           # (device, storage start) -> storage end (bytes), for the storages that hold a meaning
 _STARTS = {}           # device -> sorted storage starts in _EXTENT (to find two live values in one memory)
 _VERDICTS = {}         # launch configuration key -> (Verdict, output argument name, inferred meaning)
@@ -95,13 +97,15 @@ def attach(t, names, kind="value", serial=0, pair=0, groups=None, sums=None, pen
 # --- lifetime (M19 L7): one memory holds one live value; a constant is not written after it is made ---------------
 
 def _version_of(t, key=None):
-    """The content version of a tensor's memory: the writes the launches seen made into its storage, and torch's own
-    counter of in-place writes (shared by every view of the storage)."""
+    """The content version of a tensor's memory: the writes the launches seen made into its storage, torch's own
+    counter of in-place writes (shared by every view of the storage), and the writes the launches seen made into its
+    memory through another storage (another value written over it)."""
     try:
         v = int(t._version)
     except Exception:  # noqa: BLE001
         v = 0
-    return (_WCOUNT.get(key if key is not None else _storage_key(t), 0), v)
+    k = key if key is not None else _storage_key(t)
+    return (_WCOUNT.get(k, 0), v, _ALIEN.get(k, 0))
 
 
 def _register_extent(t, key):
@@ -165,31 +169,97 @@ def set_life(t, life):
     attach(t, [None] * t.dim(), life=life)
 
 
+def set_unwritten(t, n):
+    """Say that `n` elements of a tensor were never written while it was made (lifetime.loaded): whoever reads it
+    reads no value there."""
+    if fact_of(t) is None:
+        attach(t, [None] * t.dim())
+    _UNWRITTEN[0] += 1
+    with _LOCK:
+        for e in _FACTS.get(_storage_key(t), []):
+            if e[0] == t.data_ptr() and e[1] == tuple(t.shape) and e[2] == tuple(t.stride()) and e[3] == t.dtype:
+                e[4]["unwritten"] = int(n)
+                return
+
+
 def _life_check(kernel, tensors, facts, written):
-    """Before a launch runs: a constant it writes, or a constant it reads that something changed since it was made,
-    is a violation (the value the reader gets is not the one its meaning names). Returns the reasons."""
+    """Before a launch runs: a tensor it reads that holds elements nothing wrote, a constant it writes, or a constant
+    it reads that something changed since it was made, is a violation (the value the reader gets is not the one its
+    meaning names). Returns the reasons."""
     bad = []
     for k, t in tensors.items():
         f = facts.get(k)
-        if f is None or f.get("life") != "const":
+        if f is None:
+            continue
+        if f.get("unwritten") and (written is None or k not in written):
+            bad.append(f"the kernel reads {k}, but {f['unwritten']} of its elements were never written while the "
+                       f"model was loaded")
+        born = f.get("born")
+        if f.get("life") != "const":
+            # any value: a write through another storage into its memory replaced it with another value
+            if born is not None and len(born) > 2 and (written is None or k not in written):
+                now = _version_of(t)
+                if now[2] != born[2]:
+                    bad.append(f"the kernel reads {k}, but since it was made a kernel wrote another value into its "
+                               f"memory (through another tensor's storage over the same bytes)")
             continue
         if written is not None and k in written:
             bad.append(f"the kernel writes {k}, a constant (a weight) since it was loaded")
             continue
-        born = f.get("born")
         now = _version_of(t)
-        if born is not None and tuple(born) != tuple(now):
-            how = "a kernel this process saw" if now[0] != born[0] else "an in-place torch operation or a copy"
+        if born is not None and tuple(born) != tuple(now[:len(born)]):
+            how = ("a kernel this process saw" if now[0] != born[0] else
+                   "a kernel writing another value over its memory" if len(born) > 2 and now[2] != born[2] else
+                   "an in-place torch operation or a copy")
             bad.append(f"{k} is a constant (a weight), but it was written after it was loaded (by {how})")
     return bad
 
 
 def _note_writes(tensors, written):
+    """For a launch about to run: each tensor it writes moves its storage's version, and the version of every other
+    storage holding a meaning whose bytes the write's tensor spans (another value written over it). Returns the
+    reasons: a write that reaches another live value's memory."""
+    bad = []
     for k in (written or ()):
         t = tensors.get(k)
         if t is not None:
             key = _storage_key(t)
             _WCOUNT[key] = _WCOUNT.get(key, 0) + 1
+            if len(_EXTENT) > 1:
+                others = _overlapping(t, key)
+                for other in others:
+                    _ALIEN[other] = _ALIEN.get(other, 0) + 1
+                if others:
+                    bad.append(f"the kernel writes {k}, but its bytes reach the memory of {len(others)} other live "
+                               f"value(s) (another storage over the same bytes)")
+    return bad
+
+
+def _overlapping(t, own):
+    """The other storages holding a meaning that the bytes of `t` reach."""
+    import bisect
+
+    try:
+        if t.numel() == 0:
+            return []
+        lo = t.data_ptr()
+        span = sum((int(n) - 1) * int(s) for n, s in zip(t.shape, t.stride()) if int(n) > 0) + 1
+        hi = lo + span * t.element_size()
+    except Exception:  # noqa: BLE001
+        return []
+    dev = own[0]
+    starts = _STARTS.get(dev) or []
+    out = []
+    j = bisect.bisect_left(starts, hi) - 1
+    while j >= 0:
+        k = (dev, starts[j])
+        end = _EXTENT.get(k, 0)
+        if end <= lo:
+            break                  # storages are disjoint unless aliased: the ones before end earlier still
+        if k != own:
+            out.append(k)
+        j -= 1
+    return out
 
 
 def _snapshot(t):
@@ -469,6 +539,14 @@ def install_compile_cache():
     def make(orig):
         @functools.wraps(orig)
         def load(self, path, *args, **kwargs):
+            if _UNWRITTEN[0]:
+                # parameters hold elements nothing wrote: a cached graph would run without any reader seeing them
+                # (no module runs, no graph is checked), so the model is compiled again and its graph checked
+                _count("graph_cache_declined")
+                _write({"kind": "types_graph", "verdict": "deferred", "path": str(path),
+                        "why": "parameters hold elements nothing wrote; the model is compiled again so the graph "
+                               "check sees which of them it reads"})
+                return None
             try:
                 head = _graph_key(self.vllm_config)
                 olds = [rec for key, rec in _cache().items() if key.startswith(head)]
@@ -703,7 +781,7 @@ def _launch(fn, args, kwargs, grid):
     _count(f"launch_{v.verdict}")
     written = set(out_name) if out_name else None
     life = _life_check(str(kkey[0]), tensors, facts, written)
-    _note_writes(tensors, written)
+    life += _note_writes(tensors, written)
     for why in life:
         _count("life_violation")
         _write({"kind": "types_life", "kernel": str(kkey[0]), "verdict": "violation", "why": why})
@@ -734,18 +812,20 @@ class Broken(RuntimeError):
 _REPORTED = set()
 
 
-def _broken(kernel, v, stop=True):
+def _broken(kernel, v, stop=True, where=None):
     """A violation is broken: reported once per launch configuration, the run goes on - unless the policy stops
-    at what is broken (ENTAIL_ON_BROKEN=stop), when the launch is refused before the kernel runs."""
+    at what is broken (ENTAIL_ON_BROKEN=stop), when the launch is refused before the kernel runs. `where` names a
+    reader that is not a kernel (a module), as it is."""
     key = (kernel, v.why)
+    at = where or kernel.rsplit('.', 1)[-1]
     if key not in _REPORTED:
         _REPORTED.add(key)
         _count("broken_reported")
         if os.environ.get("ENTAIL_QUIET") not in ("all",):
-            sys.stderr.write(f"entail: broken at {kernel.rsplit('.', 1)[-1]}: {v.why}\n")
+            sys.stderr.write(f"entail: broken at {at}: {v.why}\n")
     if stop and os.environ.get("ENTAIL_ON_BROKEN", "report") == "stop":
         _count("broken_stopped")
-        raise Broken(f"entail stopped a kernel launch: {kernel.rsplit('.', 1)[-1]}: {v.why}")
+        raise Broken(f"entail stopped {'a kernel launch' if where is None else 'a read'}: {at}: {v.why}")
 
 
 def install_triton():

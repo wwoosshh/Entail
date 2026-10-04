@@ -4,6 +4,21 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
+## Unreleased
+
+- **How long a value lives (`ENTAIL=types`, experimental).** The memory a reader reads must hold the value its maker
+  wrote there. A loaded weight is a constant: a Triton launch that writes it, or a read after something changed it,
+  is `broken`, and so is an in-place operation on it in the compiled graph. Two live values in one memory are
+  reported when the second gets its meaning; a value that a kernel wrote another value over (through another
+  storage over the same bytes) is `broken` when it is read. Memory nothing wrote: while vLLM's or SGLang's model
+  loader makes and loads a model, the allocations torch makes without a value are filled with a mark no written value
+  carries (a NaN with a payload of its own; a byte pattern for integer tensors), and a parameter that still holds it
+  when loading ends is `broken` when the module holding it runs, a Triton launch reads it, or the compiled graph
+  takes it. On sglang#26745 (a vision-language checkpoint without its vision-encoder weights, served by SGLang
+  0.5.20: every answer `!!!!`, nothing logged) it found 130 of 580 parameters at load and reported each when SGLang's
+  own warm-up ran the vision encoder; on the intact checkpoint, on Qwen3-4B-FP8 (both vLLM paths) and on
+  Qwen2.5-VL-3B with vLLM it reported nothing and the answers were the same.
+
 ## 2.2.0
 
 Released 2026-10-04. A checker for the GPU kernels an engine launches, opt-in and experimental, and the
