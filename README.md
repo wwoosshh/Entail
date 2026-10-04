@@ -48,7 +48,10 @@ checked when the main work ran there. Where to install it for
 each tool - your scripts, vLLM behind Open WebUI, ComfyUI (git, portable, Desktop), text-generation-webui, vLLM in
 Docker - is in [INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md).
 
-> **Status: 2.1.4, measured on one machine.** 2.1.4 fixes what the field test of 2.1.3 found (a seeded run with vLLM
+> **Status: 2.2.0, measured on one machine.** 2.2.0 adds an opt-in, experimental checker for the GPU kernels an
+> engine launches (`ENTAIL=types`: one rule at every launch, meanings read from what vLLM declares; see
+> [Kernel calls](#kernel-calls-one-rule-for-every-launch-entailtypes-experimental)); the other modes are as in 2.1.4.
+> 2.1.4 fixes what the field test of 2.1.3 found (a seeded run with vLLM
 > inside a trainer samples as without entail; SGLang's KV check no longer flags a request others joined; a serving
 > app's own chat template is held to the prompt it renders; an engine's or app's own choices are named as theirs; a
 > launch that reached nothing, and an engine entail does not watch, are said). 2.1.3 fixed what the field test of
