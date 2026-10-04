@@ -24,17 +24,22 @@ format, reduction state, position frame, valid range, model properties - is its 
     out = program(q=..., keys=..., values=..., positions=..., until=...)     # plain tensors, no checks
 
 Operations: embed, rms_norm, linear, split_features, split_heads, merge_heads, rope, write, attend, add, swiglu,
-last, argmax, all_reduce, to_absolute, last_key, advance, copy, dequantize, reorder (ops.py). Attention lowerings: "torch" (SDPA, or float32
+last, argmax, all_reduce, to_absolute, last_key, advance, copy, dequantize, reorder (ops.py); for a pool in blocks
+(M21.1): slots_of, paged_write, paged_attend, move_blocks, wait, check_identity (paged.py), with host-side integers
+that keep their meaning (units.py). Attention lowerings: "torch" (SDPA, or float32
 attention for a softcap), "flex" (FlexAttention with a block mask made by arithmetic), "triton" (the hand decode
 kernel, kernels.py).
 """
 from ..core import RoleError
+from . import units
 from .graph import Program, T, trace
 from .ops import (ATTENTION, ATTENTION_HONOURS, LINEAR_READS, REORDERS, ROPE_TYPES, add, advance, all_reduce, argmax,
                   attend, copy, dequantize, embed, last, last_key, linear, merge_heads, reads, reorder, rms_norm,
                   rope, split_features, split_heads, swiglu, to_absolute, write)
+from .paged import check_identity, move_blocks, paged_attend, paged_write, pool_type, slots_of, wait
 
 __all__ = ["RoleError", "Program", "T", "trace", "ATTENTION", "ATTENTION_HONOURS", "LINEAR_READS", "REORDERS",
            "ROPE_TYPES", "add", "advance", "all_reduce", "argmax", "attend", "copy", "dequantize", "embed", "last",
            "last_key", "linear", "merge_heads", "reads", "reorder", "rms_norm", "rope", "split_features",
-           "split_heads", "swiglu", "to_absolute", "write"]
+           "split_heads", "swiglu", "to_absolute", "write", "units", "check_identity", "move_blocks", "paged_attend",
+           "paged_write", "pool_type", "slots_of", "wait"]

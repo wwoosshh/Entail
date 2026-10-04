@@ -23,8 +23,10 @@ Rotary.pairing; v9 (M18) Tokenization, KernelReference, Parse and Placeholder; v
 one request comes to along two of the engine's own paths that mean the same (decode against a fresh prefill, alone
 against batched, cold against a prefix-cache hit); v11 (product track P3) SafeMode: an optimization declared not to
 change results, and whether a safety mode turned it off; v12 (product track P5) Check: a property a developer declares a
-value must have at a point of their own project, decided by a custom node's validator. Each version only adds optional
-fields or whole classes, so an
+value must have at a point of their own project, decided by a custom node's validator; v13 (M21) Index and Count, the
+execution side's meanings for layer B: what an integer numbers (a slot, a block or a row, and in which pool) and what a
+number of tokens counts (known, computed, scheduled, reserved). Each version only adds optional fields or whole
+classes, so an
 older fact is a newer fact with
 them open, and a fact written with an older version is still read (READABLE_VERSIONS); it may not state a field its
 version did not have (ADDED_IN).
@@ -36,8 +38,8 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Optional, Tuple
 
-VOCAB_VERSION = 12
-READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12})   # a later version only adds optional fields or classes; fields in ADDED_IN
+VOCAB_VERSION = 13
+READABLE_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13})   # a later version only adds optional fields or classes; fields in ADDED_IN
 ADDED_IN = {("Layout", "orientation"): 2, ("Layout", "scale_granularity"): 2, ("Template", "tool_call_format"): 3,
             ("Rotary", "low_freq_factor"): 4, ("Rotary", "high_freq_factor"): 4,
             ("Rotary", "beta_fast"): 6, ("Rotary", "beta_slow"): 6, ("Rotary", "attention_factor"): 6,
@@ -620,6 +622,66 @@ class Check:
             raise ValueError(f"Check.detail: expected a string or None, got {self.detail!r}")
 
 
+# --- the execution side (v13, M21) ------------------------------------------------------------------------------
+
+INDEX_UNITS = frozenset({"slot", "block", "row"})
+
+
+@dataclass(frozen=True)
+class Index:
+    """What an integer value numbers (v13, M21): one `unit` of the pool, table or batch named `pool`.
+
+    The integers that address a cache say nothing about what they number. A slot, a block of slots, a page of host
+    memory and a row of a batch are all small integers, and a consumer given one where another is meant reads the
+    wrong place without a sign: a host page number written into a device buffer, a manager's block number in the place
+    of a physical page. The fact says what one number stands for, so the place that consumes it compares it with what
+    it addresses.
+
+    unit   what one number stands for (closed set): "slot" (one token's place in a pool), "block" (a run of `block`
+           slots), "row" (one sequence of a batch)
+    pool   which pool, table or batch the numbers are in: a name the program gives ("gpu", "cpu", "batch")
+    block  slots per block, for a pool laid out in blocks (required for unit "block")
+    """
+    unit: str
+    pool: str
+    block: Optional[int] = None
+
+    def __post_init__(self):
+        _closed("Index", "unit", self.unit, INDEX_UNITS, optional=False)
+        if not isinstance(self.pool, str) or not self.pool:
+            raise ValueError(f"Index.pool: expected the name of a pool, table or batch, got {self.pool!r}")
+        _number("Index", "block", self.block, 1, integer=True)
+        if self.unit == "block" and self.block is None:
+            raise ValueError("Index.block: a block index must say how many slots one block holds")
+
+    def __str__(self):
+        return f"{self.unit} of {self.pool}" + (f" (blocks of {self.block})" if self.block else "")
+
+
+COUNT_OF = frozenset({"known", "computed", "scheduled", "reserved"})
+
+
+@dataclass(frozen=True)
+class Count:
+    """What a number of tokens counts (v13, M21).
+
+    A sequence has several lengths at once, all in tokens: the tokens it is known to have (its prompt and what was
+    sampled), the tokens whose keys and values have been written (computed), the tokens a step will compute
+    (scheduled), and the slots set aside for it (reserved). At the edges they differ by one or more - the last sampled
+    token is known before it is computed - and an operation that takes one where another is meant stores or reads a
+    slot nothing wrote. The fact says which length a number is.
+
+    of  the length (closed set): "known", "computed", "scheduled", "reserved"
+    """
+    of: str
+
+    def __post_init__(self):
+        _closed("Count", "of", self.of, COUNT_OF, optional=False)
+
+    def __str__(self):
+        return f"{self.of} tokens"
+
+
 # --- not in the vocabulary ------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -664,13 +726,14 @@ VOCABULARY = {
     "Identity": "TIME", "Assumed": "SPECIALIZATION", "Origin": "PRECEDENCE", "KernelConfig": "LAYOUT",
     "Vocab": "MAPPING", "Stops": "MAPPING", "Tokenization": "MAPPING", "KernelReference": "PROPERTY",
     "Parse": "MAPPING", "Placeholder": "FRAME", "PathAgreement": "PROPERTY", "SafeMode": "SPECIALIZATION", "Check": "PROPERTY",
+    "Index": "FRAME", "Count": "RANGE",
 }
 _HERE = {"Layout": Layout, "Quantized": Quantized, "Rotary": Rotary, "Positions": Positions, "Valid": Valid,
          "ModelProps": ModelProps, "Prediction": Prediction, "LatentScale": LatentScale, "Template": Template,
          "TokenType": TokenType, "Reduction": Reduction, "Epoch": Epoch, "Identity": Identity, "Assumed": Assumed,
          "Origin": Origin, "KernelConfig": KernelConfig, "Vocab": Vocab, "Stops": Stops, "Tokenization": Tokenization,
          "KernelReference": KernelReference, "Parse": Parse, "Placeholder": Placeholder,
-         "PathAgreement": PathAgreement, "SafeMode": SafeMode, "Check": Check}
+         "PathAgreement": PathAgreement, "SafeMode": SafeMode, "Check": Check, "Index": Index, "Count": Count}
 
 
 def vocabulary_class(name):

@@ -4,6 +4,22 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
+## Unreleased
+
+Work toward 3.0.0 (the design's structure changes: one vocabulary, two forms - the library attached to existing
+engines, and layer B for new code). Nothing changes for code that does not use `entail.frontend`.
+
+- **Layer B: the execution side's meanings as types (#55).** Vocabulary v13 adds `Index` (what an integer numbers:
+  a slot, a block or a row, and in which pool, table or batch) and `Count` (what a number of tokens counts: known,
+  computed, scheduled, reserved). Layer B gains a key/value pool laid out in blocks (`entail.frontend.paged`):
+  `slots_of` (a token's slot through a block table), `paged_write`, `paged_attend` (lengths must count computed
+  tokens), `move_blocks` and `wait` (a pool being copied into is read only after its wait), and `check_identity` (a
+  store's key must cover every per-request input its content depends on, from `Program.content_inputs`). Integers in
+  host-side code keep their meaning (`entail.frontend.units`: arithmetic that keeps or refuses a meaning, `@takes`,
+  `@returns`, `tensor()`), and a traced program's bind compares an index tensor with the meaning its input declares.
+  One rule per meaning, none per bug; each rule has a program it passes and one it refuses
+  (`tests/test_frontend_paged.py`).
+
 ## 2.3.0
 
 Released 2026-10-04. How long a value lives, in the opt-in, experimental `ENTAIL=types`; the 2.2.0 cost measured
