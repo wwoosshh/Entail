@@ -35,6 +35,12 @@ def main():
     assert bad and "written after it was loaded" in bad[0] and "in-place torch" in bad[0], bad
     print("ok a weight read after an in-place change: violation:", bad[0])
 
+    with torch.inference_mode():                        # an engine's activations: no version counter to ask
+        act = torch.zeros(4)
+        KC.attach(act, ["token"])
+    assert KC.fact_of(act)["born"][1] == 0 and KC._life_check("k", {"a": act}, {"a": KC.fact_of(act)}, set()) == []
+    print("ok an inference tensor gets a meaning without a version counter")
+
     v = torch.zeros(4)
     KC.attach(v, ["token"])
     KC._note_writes({"v": v}, {"v"})
