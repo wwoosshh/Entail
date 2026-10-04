@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 from entail import contracts, policies, record, sources  # noqa: E402
 from entail.contracts import RULES, Contract, Resolution, Verdict, agrees, decide  # noqa: E402
 from entail.coverage import Coverage  # noqa: E402
-from entail.facts import (VOCABULARY, Assumed, Certainty, Epoch, Fact, Identity, KernelConfig, KernelReference,  # noqa: E402
+from entail.facts import (VOCABULARY, Assumed, Certainty, Count, Epoch, Fact, Identity, Index, KernelConfig, KernelReference,  # noqa: E402
                           LatentScale, Layout, ModelProps, Origin, Positions, Prediction, Quantized, Reduction,
                           Parse, PathAgreement, Placeholder, Rotary, SafeMode, Check, Source, Stops, Template, Tokenization,
                           TokenType, Valid, Vocab)
@@ -47,6 +47,8 @@ SAMPLES = {
     "Check": (Check("json_object", True), Check("json_object", False, "not JSON: Expecting value")),
     "Assumed": (Assumed((("batch", 4),)), Assumed((("batch", 0),))),
     "Origin": (Origin("temperature", "user"), Origin("temperature", "default")),
+    "Index": (Index("slot", "gpu", 16), Index("slot", "cpu", 16)),
+    "Count": (Count("computed"), Count("known")),
 }
 
 

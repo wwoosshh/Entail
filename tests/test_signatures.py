@@ -68,7 +68,7 @@ def test_a_file_written_for_v1_may_not_use_what_v2_added():
     assert signatures.from_rows([v1], vocab_version=1).lookup("e.quant_method.M")
     d = tempfile.mkdtemp()
     for name, data, text in (
-            ("v13.json", {"schema": 1, "vocab_version": 13, "rows": []}, "written for vocabulary v13"),
+            ("v14.json", {"schema": 1, "vocab_version": 14, "rows": []}, "written for vocabulary v14"),
             ("s2.json", {"schema": 2, "vocab_version": 2, "rows": []}, "schema 2, this library reads 1")):
         path = os.path.join(d, name)
         with open(path, "w", encoding="utf-8") as f:

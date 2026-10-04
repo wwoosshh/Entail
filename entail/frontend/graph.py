@@ -219,6 +219,15 @@ def _check_tensor(sym: Sym, value, path):
             raise RoleError(f"program input {path}: dim {d} is {have}, the type declares {want}")
     if t.kind != "weight" and dtype and dtype != t.dtype:
         raise RoleError(f"program input {path}: dtype {dtype}, the type declares {t.dtype}")
+    for f in t.facts:   # what integers number or count (v13) is said where the integers are made (units.tensor); a
+        # pool's Index says how its slots are numbered, which is not about the floating values it holds
+        if type(f).__name__ in ("Index", "Count") and t.dtype.startswith(("int", "uint")):
+            from .units import meaning
+            made = meaning(value)
+            if made != f:
+                raise RoleError(f"program input {path}: the type declares {f}; the tensor was made "
+                                f"{'meaning ' + str(made) if made is not None else 'without a declared meaning'} "
+                                f"(make it with frontend.units.tensor)")
 
 
 class Program:
@@ -242,6 +251,34 @@ class Program:
             out.append(f"{n.outputs[0].origin if n.outputs else n.op}: {n.op}({ins}) -> {outs}"
                        + (f"   [{n.note}]" if n.note else ""))
         return out
+
+    def content_inputs(self, op: str):
+        """The program inputs (by name) that reach what the operation `op` stores (its `src`), weights left out: what a
+        key for the stored item has to cover (paged.check_identity)."""
+        g = self.graph
+        owner = {}
+        for name, structure in g.inputs.items():
+            for s in _syms(structure):
+                owner[s.id] = (name, s)
+        producer = {o.id: n for n in g.nodes for o in n.outputs}
+        found, seen = set(), set()
+        stack = [n.inputs["src"] for n in g.nodes if n.op == op and isinstance(n.inputs.get("src"), Sym)]
+        if not stack:
+            raise RoleError(f"content_inputs: the program has no {op} that stores a src")
+        while stack:
+            s = stack.pop()
+            if s.id in seen:
+                continue
+            seen.add(s.id)
+            if s.id in owner:
+                name, sym = owner[s.id]
+                if sym.type.kind != "weight":
+                    found.add(name)
+                continue
+            n = producer.get(s.id)
+            if n is not None:
+                stack.extend(v for v in n.inputs.values() if isinstance(v, Sym))
+        return found
 
     def bind(self, **values) -> Callable:
         pairs = []
@@ -271,6 +308,16 @@ class Program:
 
     def __call__(self, **values):
         return self.bind(**values)()
+
+
+def _syms(structure):
+    if isinstance(structure, Sym):
+        return [structure]
+    if isinstance(structure, dict):
+        return [s for v in structure.values() for s in _syms(v)]
+    if isinstance(structure, (list, tuple)):
+        return [s for v in structure for s in _syms(v)]
+    return []
 
 
 def _has_sym(structure):
