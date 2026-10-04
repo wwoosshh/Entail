@@ -465,6 +465,37 @@ captured in a CUDA graph (int4, batch 8), it takes 1.005-1.007x the time of the 
 hand kernel, and 1.020-1.024x with FlexAttention. Of 16 reproduction cases, 9 are refused or repaired while tracing
 and 2 more when the program is bound to its tensors; no fixed version is refused.
 
+### Kernel calls: one rule for every launch (`ENTAIL=types`, experimental)
+
+`ENTAIL=types` checks the GPU kernels an engine launches against what the values handed to them mean, with one rule
+for all of them: values computed together pair only where their meanings agree, and every output element is made
+once from everything its meaning covers. A Triton kernel is read from its own IR (TTIR) once per launch
+configuration, and the verdict is kept in `entail_logs/types-cache.jsonl` for later processes; vLLM's compiled graph
+is checked once, when it is compiled; a C++ kernel is held to what its arguments mean (vLLM's Marlin matmul so far -
+what happens inside a C++ kernel is not read). The meanings come from where the values are made, from what vLLM
+already declares: its weight and scale parameter classes and their attributes, a MoE scale's granularity, the
+activation quantizers, the router, the worker's index tables. Nothing in it is written for one model or one bug. A
+tensor's layout (its bounds, where its elements are) is checked even when nothing names its axes. A launch that
+breaks the rule is reported as `broken` before the kernel runs, and the run goes on; with `ENTAIL_ON_BROKEN=stop`
+the launch is refused instead.
+
+```bash
+ENTAIL=types python serve.py
+```
+
+Measured with vLLM 0.30.0 and Qwen3-4B-FP8 on an RTX 4070 Ti: on the Triton FP8 path 229 of 230 launch
+configurations are proven and none is broken; on the default path (torch.compile, Marlin) 73 of 74 are, and the
+compiled graph has no violation; the generated text is the same as without entail. Generation takes 1.047x (Triton
+FP8, CUDA graphs) and 1.030x (default) the time it takes without it, the median of three alternated rotations; with
+`enforce_eager`, where every launch passes through Python, 1.53x.
+
+On real bugs: of the 24 single-GPU low-level bugs the research track collected, 8 were reproduced on this machine
+and run with nothing given a meaning by hand. Of the 6 the rule was not developed on, it caught 1 before the kernel
+ran (sglang#21843: `fused_gdn_gating` reads a strided tensor between its elements) and missed 5 - a rotary pairing
+the vocabulary has no word for yet, a linear-attention kernel's axis order, a prefix-cache key, a Python-only path,
+the inside of a C++ kernel. In one of those runs it found a different, real out-of-bounds read (vLLM 0.19's MRoPE
+kernel reads `cos` past its rows, fixed upstream in vllm#49906). It raised no false alarm in these runs.
+
 ## How it was measured
 
 For 1.0 every measurement of the development milestones was run again on the final code, on one RTX 4070 Ti.
@@ -553,6 +584,9 @@ For 1.0 every measurement of the development milestones was run again on the fin
 
 ## Known gaps
 
+- **`ENTAIL=types` (experimental)** reads what vLLM 0.30 declares; on another engine (SGLang) only a tensor's layout
+  is checked. It does not yet read a rotary embedding's pairing, the inside of a C++ kernel, or values that go through
+  Python or the CPU. With `enforce_eager` every launch passes through Python, and generation takes 1.5x the time.
 - **Unseen bugs.** On the pre-registered replay above, 0 of 7 in-class reproduced bugs were detected. Since then
   the facts and sites it exposed have been added (the last six rows of the repairs table: the adapter config file,
   the reasoning parser's setting names, the prefix-cache key, beam reordering, a Triton launch's strides, the
