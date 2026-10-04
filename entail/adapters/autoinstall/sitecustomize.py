@@ -160,6 +160,13 @@ TYPES_TARGETS = {
     "vllm.model_executor.kernels.linear.scaled_mm.marlin": ["entail.kernel_check:install_marlin_weights"],
     "vllm.compilation.backends": ["entail.kernel_check:install_compile"],
     "vllm.compilation.decorators": ["entail.kernel_check:install_compile_cache"],
+    # what vLLM itself declares about its weights, scales and MoE routing values (M19 L6 step 1)
+    "vllm.model_executor.model_loader.utils": ["entail.adapters.vllm_declarations:install_loader"],
+    "vllm.model_executor.layers.fused_moe.fused_moe": ["entail.adapters.vllm_declarations:install_functions"],
+    "vllm.model_executor.layers.fused_moe.moe_align_block_size": ["entail.adapters.vllm_declarations:install_functions"],
+    "vllm.model_executor.layers.fused_moe.utils": ["entail.adapters.vllm_declarations:install_functions"],
+    "vllm.model_executor.layers.fused_moe.router.fused_topk_router": [
+        "entail.adapters.vllm_declarations:install_functions"],
     "vllm.v1.worker.gpu.input_batch": ["entail.adapters.vllm_index_meanings:install_input_batch",
                                        "entail.adapters.vllm_index_meanings:install_functions"],
     "vllm.v1.worker.gpu.block_table": ["entail.adapters.vllm_index_meanings:install"],

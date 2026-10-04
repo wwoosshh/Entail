@@ -109,9 +109,14 @@ def _op_name(node):
     return f"{mod}.{name}"
 
 
+_COMPARED = [0]           # comparisons of two named axes made so far (a site is proven only when it made one)
+
+
 def _pair_names(a, b, how, where):
-    if a is not None and b is not None and a != b:
-        raise Violation(f"{how} pairs elements that disagree on {where}: '{a}' with '{b}'")
+    if a is not None and b is not None:
+        _COMPARED[0] += 1
+        if a != b:
+            raise Violation(f"{how} pairs elements that disagree on {where}: '{a}' with '{b}'")
     return a if a is not None else b
 
 
@@ -367,10 +372,11 @@ class _Walk:
             self.checks += 1
             if ids.basis is not None and table.names[0] is not None and ids.basis != table.names[0]:
                 raise Violation(f"token ids that are {ids.basis}s index a table whose rows are {table.names[0]}s")
-            if ids.basis is not None or table.names[0] is not None:
+            if ids.basis is not None and table.names[0] is not None:
                 self.site(node, name, "proven")
             else:
-                self.site(node, name, "unproven", "neither the ids' basis nor the table's rows were given a meaning")
+                self.site(node, name, "unproven", "the ids' basis and the table's rows were not both given a "
+                                                  "meaning: nothing to compare")
             return GV(tuple(ids.names) + tuple(table.names[1:]), _dims(ev) if isinstance(ev, torch.Tensor) else
                       ids.shape + table.shape[1:], str(ev.dtype) if isinstance(ev, torch.Tensor) else table.dtype)
         if name == "_C.marlin_gemm":
@@ -385,11 +391,13 @@ class _Walk:
             how = "attention"
             if all(isinstance(t, GV) for t in (q, k, v)):
                 self.checks += 1
+                before = _COMPARED[0]
                 _pair_names(q.names[0], k.names[0], how, "the token axis")
                 _pair_names(q.names[0], v.names[0], how, "the token axis")
                 _pair_names(q.names[-1], k.names[-1], how, "the head dimension")
-                self.site(node, "vllm.unified_attention_with_output", "proven" if q.names[0] is not None
-                          else "unproven", "" if q.names[0] is not None else "the token axis has no meaning here")
+                compared = _COMPARED[0] > before
+                self.site(node, "vllm.unified_attention_with_output", "proven" if compared else "unproven",
+                          "" if compared else "no two named axes to compare")
                 self.env[out_node] = q.copy(groups=None)
             return None
         if name.startswith("vllm.unified_kv_cache_update"):
@@ -408,6 +416,7 @@ class _Walk:
         if not isinstance(x, GV):
             return None
         how = "the RMS normalization"
+        before = _COMPARED[0]
         if isinstance(w, GV):
             self.checks += 1
             _pair_names(x.names[-1], w.names[0], how, "the normalized axis")
@@ -416,9 +425,9 @@ class _Walk:
         if isinstance(residual, GV):
             self.checks += 1
             _pair(x, residual, "the residual addition")
-        known = x.named() or (isinstance(w, GV) and w.named())
-        self.site(node, name.split(".")[0] + "." + name.split(".")[1], "proven" if known else "unproven",
-                  "" if known else "no meaning reached it")
+        compared = _COMPARED[0] > before
+        self.site(node, name.split(".")[0] + "." + name.split(".")[1], "proven" if compared else "unproven",
+                  "" if compared else "no two named axes to compare")
         out = x.copy(kind="value", serial=0, pair=0, groups=None)
         if isinstance(ev, (tuple, list)):
             return (out, out.copy())

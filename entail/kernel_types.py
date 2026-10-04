@@ -63,6 +63,7 @@ class Axis:
     name: Optional[str]        # shared across tensors; None: this axis means nothing the rule can pair
     size: int
     group: int = 1             # one coordinate here stands for `group` base coordinates (a grouped scale)
+    origin: int = 0            # a view's first element is at this coordinate of the tensor it views
 
 
 @dataclass
@@ -252,6 +253,15 @@ def _loop_headers(entry, labels):
 
     walk("^entry", entry)
     return headers
+
+
+MERGES = {}               # (outer axis name, inner axis name) -> the meaning of a flat index over both (row-major)
+
+
+def merge(outer, inner, result):
+    """Declare what a flat index over two adjacent axes means: merge("token", "k", "token_slot") - a token slot is
+    token * k + choice, as a router's top-k table read as one row."""
+    MERGES[(outer, inner)] = result
 
 
 RELATIONS = {}            # (basis a, op, basis b) -> the basis of a op b; declared by whoever attaches the bases
@@ -927,6 +937,7 @@ class _Typed(KI._Run):
         lead = (1,) * ndim
         coords = None
         syms = {}
+        merged_parts = {}          # axis -> the key of a part (quotient or remainder) of a merged flat index
         known = {}
         if isinstance(off, S):
             # the symbolic terms, each a multiple of one stride (an int, or the stride the kernel loaded)
@@ -941,6 +952,16 @@ class _Typed(KI._Run):
                         if abs(c) == st:                 # a term subtracted (end - count) addresses the same axis
                             dim = i
                             break
+                    if dim is not None and kn is None and c > 0:
+                        pair = self._merged_pair(m, dim, basis)
+                        if pair is not None:
+                            # a flat index over two merged axes: its quotient by the inner size on the outer axis,
+                            # its remainder on the inner one (the same values a kernel's // and % make)
+                            outer, inner = pair
+                            n_in = int(m.shape[inner])
+                            merged_parts[outer] = ("//", k, n_in)
+                            merged_parts[inner] = ("%", k, n_in)
+                            continue
                     if dim is None and not dims and m.shape:
                         dim = 0
                 if dim is None:
@@ -1018,7 +1039,7 @@ class _Typed(KI._Run):
                 arr = arr.reshape((-1,) + lead) if not kn.shape else arr.reshape((-1,) + tuple(kn.shape))
                 coords[i] = coords[i] + arr
         for s, n, i in dims:
-            if i in syms or not bounds:
+            if i in syms or i in merged_parts or not bounds:
                 continue                     # a coordinate chosen by data: its bounds are the data's
             c = coords[i]
             out = (c < 0) | (c >= n)
@@ -1030,6 +1051,8 @@ class _Typed(KI._Run):
                 self._bad(full_bad, f"{what} addresses {arg} outside its {tuple(m.shape)} elements (coordinate "
                                     f"{int(cc[idx])} on axis {i} of size {n})",
                           {"program_chunk_index": self.chunk_index, "lane": list(idx[1:])})
+        for i, key in merged_parts.items():
+            coords[i] = Sym(key, m.axes[i].name, coords[i])      # a part of a merged flat index: data chose it
         for i, (k, pairs) in syms.items():
             basis = _net_basis(pairs)
             ax = m.axes[i] if i < len(m.axes) else None
@@ -1039,6 +1062,28 @@ class _Typed(KI._Run):
                                                                 "basis": basis})
             coords[i] = Sym(k, basis, coords[i])
         return coords
+
+    def _merged_pair(self, m, dim, basis):
+        """(outer, inner) when `dim` is the inner of two adjacent axes, contiguous row-major, whose names merge
+        into `basis`."""
+        if basis is None or dim == 0 or dim >= len(m.axes):
+            return None
+        outer, inner = dim - 1, dim
+        a, b = m.axes[outer].name, m.axes[inner].name
+        if a is None or b is None or MERGES.get((a, b)) != basis:
+            return None
+        if int(m.stride[outer]) != int(m.stride[inner]) * int(m.shape[inner]):
+            return None
+        return outer, inner
+
+    def _abs(self, m, i, c):
+        """A coordinate on axis i of a view, as a coordinate of the tensor it views (what pairing compares)."""
+        o = m.axes[i].origin if i < len(m.axes) else 0
+        if not o:
+            return c
+        if isinstance(c, Sym):
+            return Sym(c.key, c.basis, c.off + o)
+        return c + o
 
     def _bad(self, bad, why, example):
         """Lanes that break the rule: a violation - unless the branch is decided by data and only some programs
@@ -1066,7 +1111,7 @@ class _Typed(KI._Run):
         coords = {}
         for i, ax in enumerate(m.axes):
             key = ax.name if ax.name is not None else (p.arg, i)
-            coords[key] = (cs[i], ax.group)
+            coords[key] = (self._abs(m, i, cs[i]), ax.group)
         serials = frozenset([m.serial]) if m.kind == "value" and m.pair else frozenset()
         applied = {m.pair: 0} if m.kind == "value" and m.pair else {}
         return V(shape, coords, valid, {}, serials, applied, (), False, None, p.arg, True, None, None,
@@ -1569,7 +1614,7 @@ class _Typed(KI._Run):
         if val.const is not None and not val.coords:        # a constant: nothing to pair, noted
             inferred["values"] = f"the constant {val.const} is stored" if val.const is not None else "a constant"
         for i, ax in enumerate(m.axes):
-            oc = cs[i]
+            oc = self._abs(m, i, cs[i])
             if val.const is not None and not val.coords:
                 continue
             if ax.name is not None:
@@ -1728,7 +1773,7 @@ class _Typed(KI._Run):
                                     shape or ())
                     else:
                         r = self._leaf(op, m.basis, shape or ())
-                        self.leaf_at[self._key(op)] = {m.axes[i].name: cs[i] for i in cs
+                        self.leaf_at[self._key(op)] = {m.axes[i].name: self._abs(m, i, cs[i]) for i in cs
                                                        if i < len(m.axes) and m.axes[i].name is not None}
                 else:
                     return super()._op(op, env)
