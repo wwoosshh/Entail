@@ -48,7 +48,7 @@ ALLOWED = {"load": None, "kv_contract": None, "epochs": None, "identity_contract
            # the definitions of engine functions that carry none (M19 L3): what a function computes, not a rule
            "definitions": None,
            # the one rule at every kernel launch (M19 L6): meanings attached where values are made, relations declared
-           "kernel_check": {"attach", "fact_of", "issue_pair"}, "kernel_types": {"relate", "merge"},
+           "kernel_check": {"attach", "fact_of", "issue_pair", "set_life"}, "kernel_types": {"relate", "merge"},
            # the guarantee profile (M19 L5.4a): its producers' issues, its gate and its graph hooks
            "guarantee": None,
            # its integrity experiment between the operations (M19 L5.4e): the live ranges a Triton launch is checked

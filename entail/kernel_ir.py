@@ -1651,6 +1651,19 @@ def written_args(ttir: str):
     loop-carried values; None when a written pointer comes from something else (an integer cast to a pointer, a
     pointer loaded from memory): then every pointer argument may be written. No launch values are needed (writeguard,
     L5.4e: a Triton launch is refused only for the arguments it writes)."""
+    return _args_through(ttir, _WRITES)
+
+
+_READS = ("tt.load", "tt.atomic_rmw", "tt.atomic_cas", "tt.descriptor_load")
+
+
+def read_args(ttir: str):
+    """The names of a kernel's pointer arguments it may read through (loads and atomics), as written_args finds the
+    written ones; None when a read pointer comes from something else."""
+    return _args_through(ttir, _READS)
+
+
+def _args_through(ttir: str, kinds):
     f = parse(ttir)
     bases = {name: {name[1:]} for name, typ in f.args if "!tt.ptr" in typ}
     written = set()
@@ -1694,7 +1707,7 @@ def written_args(ttir: str):
                     ys = next((o for o in branch if o.name == "scf.yield"), None)
                     for name, v in zip(op.results, ys.operands if ys is not None else []):
                         changed |= add(name, bases.get(v, set()))
-            elif n in _WRITES and op.operands:
+            elif n in kinds and op.operands:
                 b = bases.get(op.operands[0])
                 if b:
                     written.update(b)
