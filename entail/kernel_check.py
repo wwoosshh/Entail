@@ -54,7 +54,7 @@ def _compiling():
 
 def _storage_key(t):
     off = t.storage_offset()
-    return (str(t.device), t.data_ptr() - off * t.element_size())
+    return (t.get_device(), t.data_ptr() - off * t.element_size())     # the device's index (-1 on the CPU)
 
 
 # --- the facts: a meaning on a tensor's memory, gone when the tensor is -----------------------------------------------
@@ -106,7 +106,9 @@ def _version_of(t, key=None):
     counter of in-place writes (shared by every view of the storage), and the writes the launches seen made into its
     memory through another storage (another value written over it)."""
     try:
-        v = int(t._version)
+        # an inference tensor (made under torch.inference_mode, as an engine's activations are) has no version
+        # counter, and asking for it raises: only the launches' counts follow its writes
+        v = 0 if t.is_inference() else int(t._version)
     except Exception:  # noqa: BLE001
         v = 0
     k = key if key is not None else _storage_key(t)
@@ -781,6 +783,7 @@ def _launch(fn, args, kwargs, grid):
                 "captured": bool(torch.cuda.is_current_stream_capturing())})
     v, out_name, inferred = hit
     _count(f"launch_{v.verdict}")
+    t0 = _tick("decide", t0)
     written = set(out_name) if out_name else None
     life = _life_check(str(kkey[0]), tensors, facts, written)
     life += _note_writes(tensors, written)
@@ -790,7 +793,7 @@ def _launch(fn, args, kwargs, grid):
         _broken(str(kkey[0]), kernel_types.Verdict("violation", why))
     if v.verdict == "violation":
         _broken(str(kkey[0]), v)
-    t0 = _tick("decide", t0)
+    t0 = _tick("life", t0)
     if v.verdict == "proven" and inferred:
         for name, inf in inferred.items():
             t = tensors.get(name)
