@@ -10,6 +10,7 @@ meanings), and the verdict is recorded. The output of a proven launch gets the i
 that reads it sees named axes. Nothing is refused and no result is changed: this is the checker as a reporter
 (ROADMAP M19 L6 step 2); what to do with a verdict is the policy's business.
 """
+import bisect
 import datetime
 import functools
 import inspect
@@ -27,6 +28,7 @@ _FACTS = {}            # (device, storage start) -> list of [data_ptr, shape, st
 _WCOUNT = {}           # (device, storage start) -> how many writes the launches seen made into that storage
 _ALIEN = {}            # (device, storage start) -> writes the launches seen made into its memory through another storage
 _UNWRITTEN = [0]       # parameters found holding elements nothing wrote (lifetime.loaded), in this process
+_ALIASED = set()       # storages whose bytes overlap another live storage holding a meaning (found when registered)
 _EXTENT = {}           # (device, storage start) -> storage end (bytes), for the storages that hold a meaning
 _STARTS = {}           # device -> sorted storage starts in _EXTENT (to find two live values in one memory)
 _VERDICTS = {}         # launch configuration key -> (Verdict, output argument name, inferred meaning)
@@ -58,19 +60,22 @@ def _storage_key(t):
 # --- the facts: a meaning on a tensor's memory, gone when the tensor is -----------------------------------------------
 
 def attach(t, names, kind="value", serial=0, pair=0, groups=None, sums=None, pending=(), basis=None, label=None,
-           pointers=None, packed=None, life="value"):
+           pointers=None, packed=None, life="value", register=True):
     """Give the tensor `t` a meaning: a name per axis (None for an axis that means nothing the rule can pair); for an
     integer tensor the basis of its numbers; a label a loaded stride can refer to; for a table of pointers the
     tensors it points to (each with its own meaning attached); for a tensor packed for one kernel the packed form
     and the sizes it was packed from (its axes then mean nothing elementwise). `life` says how long the content
     stays what the meaning says (M19 L7): "const" (nothing writes it after this - a loaded weight), "state" (its
-    owner updates it in place - a cache, a table), "value" (made once and read)."""
+    owner updates it in place - a cache, a table), "value" (made once and read). `register` keeps the storage's
+    bytes for the one-memory-one-value check (left out for the outputs a launch's meaning is inferred for: torch's
+    allocator never gives out the same bytes twice while both live)."""
     key = _storage_key(t)
     fact = {"names": list(names), "kind": kind, "serial": serial, "pair": pair,
             "groups": list(groups or [1] * len(names)), "sums": dict(sums or {}), "pending": list(pending),
-            "basis": basis, "label": label, "packed": packed, "life": life, "born": _version_of(t, key),
+            "basis": basis, "label": label, "packed": packed, "life": life, "born": _version_of(t, key), "key": key,
             "pointers": None if pointers is None else [_snapshot(x) for x in pointers]}
-    _register_extent(t, key)
+    if register:
+        _register_extent(t, key)
     entry = [t.data_ptr(), tuple(t.shape), tuple(t.stride()), t.dtype, fact, None]
     with _LOCK:
         lst = _FACTS.setdefault(key, [])
@@ -119,8 +124,6 @@ def _register_extent(t, key):
         return
     if nbytes <= 0:
         return
-    import bisect
-
     dev, start = key
     end = start + nbytes
     starts = _STARTS.setdefault(dev, [])
@@ -133,6 +136,7 @@ def _register_extent(t, key):
     _EXTENT[key] = end
     starts.insert(i, start)
     if other is not None:
+        _ALIASED.update((key, other))
         _count("life_alias")
         _write({"kind": "types_life", "verdict": "violation",
                 "why": f"two live values share memory: a storage of {nbytes} bytes at {start:#x} overlaps another "
@@ -143,10 +147,9 @@ def _register_extent(t, key):
 
 
 def _drop_extent(key):
+    _ALIASED.discard(key)
     if _EXTENT.pop(key, None) is None:
         return
-    import bisect
-
     dev, start = key
     starts = _STARTS.get(dev, [])
     i = bisect.bisect_left(starts, start)
@@ -196,8 +199,9 @@ def _life_check(kernel, tensors, facts, written):
                        f"model was loaded")
         born = f.get("born")
         if f.get("life") != "const":
-            # any value: a write through another storage into its memory replaced it with another value
-            if born is not None and len(born) > 2 and (written is None or k not in written):
+            # any value: a write through another storage into its memory replaced it with another value (no such
+            # write has happened in this process while _ALIEN is empty: nothing to compare)
+            if _ALIEN and born is not None and len(born) > 2 and (written is None or k not in written):
                 now = _version_of(t)
                 if now[2] != born[2]:
                     bad.append(f"the kernel reads {k}, but since it was made a kernel wrote another value into its "
@@ -206,7 +210,7 @@ def _life_check(kernel, tensors, facts, written):
         if written is not None and k in written:
             bad.append(f"the kernel writes {k}, a constant (a weight) since it was loaded")
             continue
-        now = _version_of(t)
+        now = _version_of(t, f.get("key"))
         if born is not None and tuple(born) != tuple(now[:len(born)]):
             how = ("a kernel this process saw" if now[0] != born[0] else
                    "a kernel writing another value over its memory" if len(born) > 2 and now[2] != born[2] else
@@ -225,7 +229,7 @@ def _note_writes(tensors, written):
         if t is not None:
             key = _storage_key(t)
             _WCOUNT[key] = _WCOUNT.get(key, 0) + 1
-            if len(_EXTENT) > 1:
+            if key in _ALIASED:
                 others = _overlapping(t, key)
                 for other in others:
                     _ALIEN[other] = _ALIEN.get(other, 0) + 1
@@ -237,8 +241,6 @@ def _note_writes(tensors, written):
 
 def _overlapping(t, own):
     """The other storages holding a meaning that the bytes of `t` reach."""
-    import bisect
-
     try:
         if t.numel() == 0:
             return []
@@ -800,7 +802,7 @@ def _launch(fn, args, kwargs, grid):
                 continue
             pending = inf.get("pending_scales") or []
             attach(t, names, "value", _next_serial() if pending else 0, pending[0] if len(pending) == 1 else 0,
-                   sums=inf.get("sums") or {}, pending=pending)
+                   sums=inf.get("sums") or {}, pending=pending, register=False)
             _count("inferred_attached")
     _tick("attach_inferred", t0)
 
