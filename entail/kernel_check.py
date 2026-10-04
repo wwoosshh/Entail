@@ -24,6 +24,9 @@ from . import graph_types, kernel_ir, kernel_types
 from .kernel_types import Axis, Meaning
 
 _FACTS = {}            # (device, storage start) -> list of [data_ptr, shape, stride, dtype, fact dict, weakref]
+_WCOUNT = {}           # (device, storage start) -> how many writes the launches seen made into that storage
+_EXTENT = {}           # (device, storage start) -> storage end (bytes), for the storages that hold a meaning
+_STARTS = {}           # device -> sorted storage starts in _EXTENT (to find two live values in one memory)
 _VERDICTS = {}         # launch configuration key -> (Verdict, output argument name, inferred meaning)
 _STATS = {}
 _WRAPPED = {}
@@ -53,16 +56,19 @@ def _storage_key(t):
 # --- the facts: a meaning on a tensor's memory, gone when the tensor is -----------------------------------------------
 
 def attach(t, names, kind="value", serial=0, pair=0, groups=None, sums=None, pending=(), basis=None, label=None,
-           pointers=None, packed=None):
+           pointers=None, packed=None, life="value"):
     """Give the tensor `t` a meaning: a name per axis (None for an axis that means nothing the rule can pair); for an
     integer tensor the basis of its numbers; a label a loaded stride can refer to; for a table of pointers the
     tensors it points to (each with its own meaning attached); for a tensor packed for one kernel the packed form
-    and the sizes it was packed from (its axes then mean nothing elementwise)."""
+    and the sizes it was packed from (its axes then mean nothing elementwise). `life` says how long the content
+    stays what the meaning says (M19 L7): "const" (nothing writes it after this - a loaded weight), "state" (its
+    owner updates it in place - a cache, a table), "value" (made once and read)."""
     key = _storage_key(t)
     fact = {"names": list(names), "kind": kind, "serial": serial, "pair": pair,
             "groups": list(groups or [1] * len(names)), "sums": dict(sums or {}), "pending": list(pending),
-            "basis": basis, "label": label, "packed": packed,
+            "basis": basis, "label": label, "packed": packed, "life": life, "born": _version_of(t, key),
             "pointers": None if pointers is None else [_snapshot(x) for x in pointers]}
+    _register_extent(t, key)
     entry = [t.data_ptr(), tuple(t.shape), tuple(t.stride()), t.dtype, fact, None]
     with _LOCK:
         lst = _FACTS.setdefault(key, [])
@@ -77,12 +83,113 @@ def attach(t, names, kind="value", serial=0, pair=0, groups=None, sums=None, pen
                 lst[:] = [e for e in lst if e is not entry]
                 if not lst:
                     _FACTS.pop(key, None)
+                    _drop_extent(key)
     try:
         entry[5] = weakref.finalize(t, gone)
     except TypeError:
         pass
     _count("attached")
     return fact
+
+
+# --- lifetime (M19 L7): one memory holds one live value; a constant is not written after it is made ---------------
+
+def _version_of(t, key=None):
+    """The content version of a tensor's memory: the writes the launches seen made into its storage, and torch's own
+    counter of in-place writes (shared by every view of the storage)."""
+    try:
+        v = int(t._version)
+    except Exception:  # noqa: BLE001
+        v = 0
+    return (_WCOUNT.get(key if key is not None else _storage_key(t), 0), v)
+
+
+def _register_extent(t, key):
+    """A storage that holds a meaning, by its bytes; another live storage over the same bytes is two values in one
+    memory (the allocator never gives that out while both live: an alias)."""
+    if key in _EXTENT:
+        return
+    try:
+        nbytes = int(t.untyped_storage().nbytes())
+    except Exception:  # noqa: BLE001
+        return
+    if nbytes <= 0:
+        return
+    import bisect
+
+    dev, start = key
+    end = start + nbytes
+    starts = _STARTS.setdefault(dev, [])
+    i = bisect.bisect_left(starts, start)
+    other = None
+    if i > 0 and _EXTENT.get((dev, starts[i - 1]), 0) > start:
+        other = (dev, starts[i - 1])
+    elif i < len(starts) and starts[i] < end:
+        other = (dev, starts[i])
+    _EXTENT[key] = end
+    starts.insert(i, start)
+    if other is not None:
+        _count("life_alias")
+        _write({"kind": "types_life", "verdict": "violation",
+                "why": f"two live values share memory: a storage of {nbytes} bytes at {start:#x} overlaps another "
+                       f"at {other[1]:#x} ({_EXTENT[other] - other[1]} bytes)"})
+        _broken("attach", kernel_types.Verdict(
+            "violation", f"two live values share memory: a new value's storage ({nbytes} bytes at {start:#x}) "
+                         f"overlaps a live one at {other[1]:#x}"), stop=False)
+
+
+def _drop_extent(key):
+    if _EXTENT.pop(key, None) is None:
+        return
+    import bisect
+
+    dev, start = key
+    starts = _STARTS.get(dev, [])
+    i = bisect.bisect_left(starts, start)
+    if i < len(starts) and starts[i] == start:
+        starts.pop(i)
+
+
+def set_life(t, life):
+    """Say how long a tensor's content stays what its meaning says (the fact it already has, or an unnamed one)."""
+    f = fact_of(t)
+    if f is None:
+        attach(t, [None] * t.dim(), life=life)
+        return
+    with _LOCK:
+        for e in _FACTS.get(_storage_key(t), []):
+            if e[0] == t.data_ptr() and e[1] == tuple(t.shape) and e[2] == tuple(t.stride()) and e[3] == t.dtype:
+                e[4]["life"] = life
+                e[4]["born"] = _version_of(t)
+                return
+    attach(t, [None] * t.dim(), life=life)
+
+
+def _life_check(kernel, tensors, facts, written):
+    """Before a launch runs: a constant it writes, or a constant it reads that something changed since it was made,
+    is a violation (the value the reader gets is not the one its meaning names). Returns the reasons."""
+    bad = []
+    for k, t in tensors.items():
+        f = facts.get(k)
+        if f is None or f.get("life") != "const":
+            continue
+        if written is not None and k in written:
+            bad.append(f"the kernel writes {k}, a constant (a weight) since it was loaded")
+            continue
+        born = f.get("born")
+        now = _version_of(t)
+        if born is not None and tuple(born) != tuple(now):
+            how = "a kernel this process saw" if now[0] != born[0] else "an in-place torch operation or a copy"
+            bad.append(f"{k} is a constant (a weight), but it was written after it was loaded (by {how})")
+    return bad
+
+
+def _note_writes(tensors, written):
+    for k in (written or ()):
+        t = tensors.get(k)
+        if t is not None:
+            key = _storage_key(t)
+            _WCOUNT[key] = _WCOUNT.get(key, 0) + 1
 
 
 def _snapshot(t):
@@ -594,6 +701,13 @@ def _launch(fn, args, kwargs, grid):
                 "captured": bool(torch.cuda.is_current_stream_capturing())})
     v, out_name, inferred = hit
     _count(f"launch_{v.verdict}")
+    written = set(out_name) if out_name else None
+    life = _life_check(str(kkey[0]), tensors, facts, written)
+    _note_writes(tensors, written)
+    for why in life:
+        _count("life_violation")
+        _write({"kind": "types_life", "kernel": str(kkey[0]), "verdict": "violation", "why": why})
+        _broken(str(kkey[0]), kernel_types.Verdict("violation", why))
     if v.verdict == "violation":
         _broken(str(kkey[0]), v)
     t0 = _tick("decide", t0)
@@ -620,7 +734,7 @@ class Broken(RuntimeError):
 _REPORTED = set()
 
 
-def _broken(kernel, v):
+def _broken(kernel, v, stop=True):
     """A violation is broken: reported once per launch configuration, the run goes on - unless the policy stops
     at what is broken (ENTAIL_ON_BROKEN=stop), when the launch is refused before the kernel runs."""
     key = (kernel, v.why)
@@ -629,7 +743,7 @@ def _broken(kernel, v):
         _count("broken_reported")
         if os.environ.get("ENTAIL_QUIET") not in ("all",):
             sys.stderr.write(f"entail: broken at {kernel.rsplit('.', 1)[-1]}: {v.why}\n")
-    if os.environ.get("ENTAIL_ON_BROKEN", "report") == "stop":
+    if stop and os.environ.get("ENTAIL_ON_BROKEN", "report") == "stop":
         _count("broken_stopped")
         raise Broken(f"entail stopped a kernel launch: {kernel.rsplit('.', 1)[-1]}: {v.why}")
 

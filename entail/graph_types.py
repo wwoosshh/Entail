@@ -28,10 +28,11 @@ class Unknown(Exception):
 
 class GV:
     """A tensor value in the graph, typed by where its elements come from."""
-    __slots__ = ("names", "shape", "dtype", "kind", "serial", "pair", "groups", "packed", "applied", "basis", "src")
+    __slots__ = ("names", "shape", "dtype", "kind", "serial", "pair", "groups", "packed", "applied", "basis", "src",
+                 "life")
 
     def __init__(self, names, shape, dtype, kind="value", serial=0, pair=0, groups=None, packed=None, applied=None,
-                 basis=None, src=None):
+                 basis=None, src=None, life="value"):
         self.names = tuple(names)
         self.shape = tuple(shape)
         self.dtype = dtype
@@ -43,10 +44,11 @@ class GV:
         self.applied = dict(applied or {})
         self.basis = basis
         self.src = src
+        self.life = life
 
     def copy(self, **kw):
         out = GV(self.names, self.shape, self.dtype, self.kind, self.serial, self.pair, self.groups, self.packed,
-                 self.applied, self.basis, self.src)
+                 self.applied, self.basis, self.src, self.life)
         for k, v in kw.items():
             setattr(out, k, v)
         out.names, out.shape = tuple(out.names), tuple(out.shape)
@@ -63,7 +65,7 @@ def from_fact(f, shape, dtype, src=None):
     if f is None or len(f.get("names", ())) != len(shape):
         return GV([None] * len(shape), shape, dtype, src=src)
     return GV(f["names"], shape, dtype, f.get("kind", "value"), f.get("serial", 0), f.get("pair", 0),
-              f.get("groups"), f.get("packed"), basis=f.get("basis"), src=src)
+              f.get("groups"), f.get("packed"), basis=f.get("basis"), src=src, life=f.get("life", "value"))
 
 
 def _dims(t):
@@ -270,6 +272,7 @@ class _Walk:
         kwargs = {k: self.arg(v) for k, v in node.kwargs.items()}
         ev = node.meta.get("example_value") if hasattr(node, "meta") else None
         x = args[0] if args else None
+        self.writes_constant(node, name, args, kwargs)
         if name == "_get_data_attr":
             return x
         if name in _PASS:
@@ -410,6 +413,21 @@ class _Walk:
             self.unknown[name] += 1
             return GV([None] * ev.dim(), _dims(ev), str(ev.dtype))
         return None
+
+    def writes_constant(self, node, name, args, kwargs):
+        """An operation that writes in place into a constant (a weight): a violation, whatever it computes."""
+        targets = []
+        if node.op == "call_method" and name.endswith("_") and not name.endswith("__"):
+            targets.append(args[0] if args else None)
+        schema = getattr(node.target, "_schema", None)
+        if schema is not None:
+            for i, a in enumerate(schema.arguments):
+                ai = getattr(a, "alias_info", None)
+                if ai is not None and getattr(ai, "is_write", False):
+                    targets.append(args[i] if i < len(args) else kwargs.get(a.name))
+        for t in targets:
+            if isinstance(t, GV) and t.life == "const":
+                raise Violation(f"{name} writes in place into a constant (a weight, {t.src}) after it was loaded")
 
     def rms_norm(self, node, name, args, ev, residual):
         x, w = args[0], args[1]

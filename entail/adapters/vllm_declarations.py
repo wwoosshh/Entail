@@ -248,6 +248,23 @@ def _apply(model, snap):
             names = _matched((decl[pname]["names"], decl[pname]["shape"]), tuple(t.shape))
             if names is not None and _attach(t, names):
                 _count("weight_named")
+    _constants(model)
+
+
+def _constants(model):
+    """After loading, every parameter is a constant (nothing writes it again), except the ones vLLM updates in place
+    (data file: "mutable")."""
+    mutable = set(read_choice("mutable") or [])
+    for _mname, module in model.named_modules():
+        for pname, p in module.named_parameters(recurse=False):
+            if pname in mutable or p is None or not hasattr(p, "data_ptr"):
+                continue
+            try:
+                if p.is_cuda:
+                    kernel_check.set_life(p, "const")
+                    _count("constant")
+            except Exception:  # noqa: BLE001
+                _count("attach_failed")
 
 
 def install_loader():
