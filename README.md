@@ -488,9 +488,10 @@ ENTAIL=types python serve.py
 
 Measured with vLLM 0.30.0 and Qwen3-4B-FP8 on an RTX 4070 Ti: on the Triton FP8 path 229 of 230 launch
 configurations are proven and none is broken; on the default path (torch.compile, Marlin) 73 of 74 are, and the
-compiled graph has no violation; the generated text is the same as without entail. Generation takes 1.047x (Triton
-FP8, CUDA graphs) and 1.030x (default) the time it takes without it, the median of three alternated rotations; with
-`enforce_eager`, where every launch passes through Python, 1.53x.
+compiled graph has no violation; the generated text is the same as without entail. Generation takes 1.067x (Triton
+FP8, CUDA graphs) and 1.028x (default) the time it takes without it, the median of three alternated rotations,
+measured again on the released 2.2.0 code (the first measurement, 1.047x and 1.030x, was made before its last
+changes); with `enforce_eager`, where every launch passes through Python, 1.53x.
 
 On real bugs: of the 24 single-GPU low-level bugs the research track collected, 8 were reproduced on this machine
 and run with nothing given a meaning by hand. Of the 6 the rule was not developed on, it caught 1 before the kernel
@@ -507,6 +508,8 @@ a model, allocations without a value are filled with a mark no written value car
 it is `broken` when it is read. On sglang#26745 (a vision-language checkpoint without its vision-encoder weights:
 SGLang 0.5.20 answers `!!!!` to everything and logs nothing) it reported the 130 parameters nothing wrote when
 SGLang's own warm-up ran the vision encoder; on intact checkpoints it reported nothing and the answers were the same.
+With these checks, generation takes 1.076x (Triton FP8) and 1.037x (default) the time without entail, measured the
+same day as the 1.067x and 1.028x above; reading the parameters for the mark adds 0.1-0.5 s to loading.
 
 ## How it was measured
 

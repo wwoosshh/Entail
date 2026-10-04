@@ -17,7 +17,12 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
   takes it. On sglang#26745 (a vision-language checkpoint without its vision-encoder weights, served by SGLang
   0.5.20: every answer `!!!!`, nothing logged) it found 130 of 580 parameters at load and reported each when SGLang's
   own warm-up ran the vision encoder; on the intact checkpoint, on Qwen3-4B-FP8 (both vLLM paths) and on
-  Qwen2.5-VL-3B with vLLM it reported nothing and the answers were the same.
+  Qwen2.5-VL-3B with vLLM it reported nothing and the answers were the same. Generation takes 1.076x (Triton FP8)
+  and 1.037x (default) the time without entail, against 1.067x and 1.028x for the 2.2.0 code measured the same day.
+- **`ENTAIL=types` no longer raises and catches an exception per attached meaning** on an engine's activations
+  (inference tensors have no version counter); a storage's key uses the device's index.
+- **The 2.2.0 cost, measured again:** the released code takes 1.067x (Triton FP8) and 1.028x (default); the 1.047x
+  and 1.030x in 2.2.0's notes were measured before its last changes.
 
 ## 2.2.0
 
