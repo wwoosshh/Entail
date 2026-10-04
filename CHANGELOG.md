@@ -19,6 +19,14 @@ engines, and layer B for new code). Nothing changes for code that does not use `
   `@returns`, `tensor()`), and a traced program's bind compares an index tensor with the meaning its input declares.
   One rule per meaning, none per bug; each rule has a program it passes and one it refuses
   (`tests/test_frontend_paged.py`).
+- **A small serving core written with those types (#57).** `entail.frontend.engine`: a key/value pool in blocks,
+  the block table, continuous batching with chunked prefill, a prefix cache keyed by a chain over the token ids, a
+  CPU tier that evicted blocks are offloaded to and loaded back from, and preemption, over Qwen3. The places where a
+  count becomes another are named functions (`written`, `sampled`, `to_schedule`, `loaded`). On Qwen3-0.6B (float32,
+  GPU) and on a tiny random Qwen3 (CPU tests) it gives every prompt the tokens transformers' greedy generation gives
+  it alone, batched, with prefix hits, with offload and loads back, and with preemption. Layer B gains
+  `Program.prepare` (bind weights and pools once), `pick` (each row's last token) and a per-row attention lowering that
+  reads the row plan to the host once per step.
 
 ## 2.3.0
 
