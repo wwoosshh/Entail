@@ -499,6 +499,15 @@ the vocabulary has no word for yet, a linear-attention kernel's axis order, a pr
 the inside of a C++ kernel. In one of those runs it found a different, real out-of-bounds read (vLLM 0.19's MRoPE
 kernel reads `cos` past its rows, fixed upstream in vllm#49906). It raised no false alarm in these runs.
 
+Not yet released: the same mode also checks how long a value lives - the memory a reader reads must hold the value
+its maker wrote there. A loaded weight is a constant (a Triton launch that writes it, or a read after something
+changed it, is `broken`); a value that another value was written over through another storage is `broken` when it is
+read; and memory nothing wrote is found where a model is loaded: while vLLM's or SGLang's model loader makes and loads
+a model, allocations without a value are filled with a mark no written value carries, and a parameter still holding
+it is `broken` when it is read. On sglang#26745 (a vision-language checkpoint without its vision-encoder weights:
+SGLang 0.5.20 answers `!!!!` to everything and logs nothing) it reported the 130 parameters nothing wrote when
+SGLang's own warm-up ran the vision encoder; on intact checkpoints it reported nothing and the answers were the same.
+
 ## How it was measured
 
 For 1.0 every measurement of the development milestones was run again on the final code, on one RTX 4070 Ti.

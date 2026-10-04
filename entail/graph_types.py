@@ -536,16 +536,21 @@ def check_graph(gm, example_inputs, fact_of):
     nodes = list(gm.graph.nodes)
     placeholders = [n for n in nodes if n.op == "placeholder"]
     inputs_with_facts = 0
+    violations = []
     for i, n in enumerate(placeholders):
         t = example_inputs[i] if i < len(example_inputs) else None
         if isinstance(t, torch.Tensor):
             f = fact_of(t)
             if f is not None:
                 inputs_with_facts += 1
+                if f.get("unwritten") and n.users:
+                    # an input holding elements nothing wrote (M19 L7): whatever reads it reads no value there
+                    violations.append({"node": n.name, "op": "input", "inputs": [],
+                                       "why": f"the graph reads {n.name}, but {f['unwritten']} of its elements were "
+                                              f"never written while the model was loaded"})
             w.env[n] = from_fact(f, _dims(t), str(t.dtype), src=n.name)
         else:
             w.env[n] = None
-    violations = []
     for n in nodes:
         if n.op in ("placeholder", "output", "get_attr"):
             continue

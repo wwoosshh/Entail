@@ -1,0 +1,7 @@
+{
+  "_comment": "Where each engine makes a model and loads its weights (ROADMAP M19 L7, entail/adapters/loaders.py): module -> the base class of its model loaders. Every subclass's own load_model is wrapped; a load_model that calls another counts as one load.",
+  "loaders": {
+    "vllm.model_executor.model_loader": "BaseModelLoader",
+    "sglang.srt.model_loader.loader": "BaseModelLoader"
+  }
+}

@@ -181,6 +181,9 @@ TYPES_TARGETS = {
                                           "entail.adapters.vllm_index_meanings:install_classes"],
     "vllm.v1.worker.gpu.sample.gumbel": ["entail.adapters.vllm_index_meanings:install_functions"],
     "vllm.v1.worker.gpu.structured_outputs": ["entail.adapters.vllm_index_meanings:install_classes"],
+    # where a model is made and loaded: its parameters read for elements nothing wrote (M19 L7)
+    "vllm.model_executor.model_loader": ["entail.adapters.loaders:install"],
+    "sglang.srt.model_loader.loader": ["entail.adapters.loaders:install"],
 }
 if os.environ.get("ENTAIL", "off") == "guarantee":
     TARGETS = dict(GUARANTEE_TARGETS)

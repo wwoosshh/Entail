@@ -63,6 +63,20 @@ def main():
     assert KC.stats().get("life_alias", 0) == before + 1, KC.stats()
     print("ok two live storages over the same bytes: reported when the second gets its meaning; a separate one: no")
 
+    # another value written over a live one: a launch writes through b, whose bytes lie inside a's memory
+    assert KC._life_check("k", {"a": a}, {"a": KC.fact_of(a)}, set()) == [], "nothing written yet"
+    before_write = KC._note_writes({"b": b}, {"b"})
+    assert before_write and "other live value" in before_write[0], before_write
+    print("ok a launch about to write through b reaches a's memory: reported before it runs:", before_write[0])
+    bad = KC._life_check("k", {"a": a}, {"a": KC.fact_of(a)}, set())
+    assert bad and "another value" in bad[0], bad
+    assert KC._life_check("k", {"b": b}, {"b": KC.fact_of(b)}, set()) == [], "the writer's own value is its new one"
+    assert KC._life_check("k", {"c": c}, {"c": KC.fact_of(c)}, set()) == [], "a separate memory is untouched"
+    print("ok a launch writes through one storage over another's bytes: reading the other is a violation:", bad[0])
+    KC._note_writes({"c": c}, {"c"})
+    assert KC._life_check("k", {"c": c}, {"c": KC.fact_of(c)}, set()) == [], "a value its own launch rewrote"
+    print("ok a value written through its own storage, then read: no violation")
+
     # the compiled graph: an in-place op on a constant placeholder
     g = fx.Graph()
     x, wt = g.placeholder("x"), g.placeholder("w")
