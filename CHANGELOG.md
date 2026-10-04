@@ -4,6 +4,26 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
+## Unreleased
+
+- **One rule at every kernel launch (`ENTAIL=types`, experimental).** The GPU kernels an engine launches are checked
+  against what the values handed to them mean: values computed together pair only where their meanings agree, and
+  every output element is made once from everything its meaning covers. A Triton kernel is read from its own IR once
+  per launch configuration (cached across processes in `entail_logs/types-cache.jsonl`); vLLM's compiled graph is
+  checked once at compile time; a C++ kernel is held to what its arguments mean (vLLM's Marlin matmul so far). The
+  meanings come from what vLLM declares where it makes the values (weight and scale parameter classes and their
+  attributes, a MoE scale's granularity, the activation quantizers, the router, the worker's index tables); a
+  tensor's layout is checked even without them. A violation is `broken`, reported before the kernel runs; the run
+  goes on, or stops with `ENTAIL_ON_BROKEN=stop`. Measured with vLLM 0.30.0 and Qwen3-4B-FP8: Triton FP8 path 229 of
+  230 launch configurations proven, default path 73 of 74 and the compiled graph, no violation, the same text;
+  1.047x and 1.030x the generation time (1.53x with `enforce_eager`). Of 6 reproduced real bugs it was not developed
+  on, it caught 1 before the kernel ran (sglang#21843) and found one other real out-of-bounds read (vLLM 0.19's MRoPE
+  kernel, fixed upstream in vllm#49906); no false alarm.
+- **The semantic-guarantee research modes** (`ENTAIL=guarantee`, `ENTAIL=structure`, `ENTAIL=structure_writes`,
+  `ENTAIL=structure_inkernel`), opt-in and run alone: `guarantee` compares each block-FP8 matmul's output with a
+  reference (about 19x in an engine); the structure modes are experiments, not guarantees
+  (docs/semantic-guarantee-implementation.ko.md).
+
 ## 2.1.4
 
 Released 2026-09-30. Fixes from the field test of 2.1.3 (issues #34 to #39, found using entail from the docs
