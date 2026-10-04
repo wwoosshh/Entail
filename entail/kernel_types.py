@@ -403,6 +403,8 @@ class _Typed(KI._Run):
         self.active = np.ones(self.P, dtype=bool)   # the programs the current branch is taken by
         self.iters = ()            # the loop iterations in progress (a leaf's key tells them apart)
         self.notes = []            # what would be a violation if data sent some programs down this branch
+        self.soft = []             # what the rule could not follow (the first is the verdict's reason, if nothing
+                                   # worse is found); the evaluation goes on past it, so a later violation is seen
         self.data_depth = 0        # inside a branch or loop decided by data: stores cover what data decides
         self.pointers = {}         # argument -> [target meaning names] (a table of pointers it holds)
         self.leaf_at = {}          # a loaded index's key -> {axis name: coordinate} of the tensor it was read from
@@ -1085,6 +1087,23 @@ class _Typed(KI._Run):
             return Sym(c.key, c.basis, c.off + o)
         return c + o
 
+    def _layout_only(self, p, m, mask, shape):
+        known, by_data = _known_part(mask)
+        valid = None if known is None else _as_bool_full(known)
+        if valid is not None and valid.ndim != 1 + len(shape):
+            valid = valid.reshape((-1,) + tuple(shape))
+        if not self.active.all():
+            valid = self._active_lanes(len(shape)) & (_ones(shape) if valid is None else valid)
+        if valid is not None and not np.any(valid):
+            return
+        try:
+            self._coords_of(p.arg, p.off, valid, "a load", bounds=not by_data)
+        except _Fail as e:
+            if e.verdict == "violation":
+                raise
+        except Unmodelled:
+            pass
+
     def _bad(self, bad, why, example):
         """Lanes that break the rule: a violation - unless the branch is decided by data and only some programs
         are hit, when whether the kernel runs them is the data's (noted; the verdict becomes "possible")."""
@@ -1223,7 +1242,7 @@ class _Typed(KI._Run):
                 applied[k] = applied.get(k, 0) + v
             for s, o in ((x, y), (y, x)):
                 if s.scale_serial:
-                    if s.scale_of not in o.serials:
+                    if s.scale_of not in o.serials and not o.data_addr:
                         raise _Fail("violation", f"a value is multiplied by the scale {s.leaf} (issue "
                                                  f"{s.scale_serial}, the scale of issue {s.scale_of}) that is not "
                                                  f"its own (it derives from "
@@ -1707,7 +1726,37 @@ class _Typed(KI._Run):
 
     # -- the ops --
 
-    def _op(self, op, env):  # noqa: C901
+    def _op(self, op, env):
+        """One operation; when the rule cannot follow it (not a violation: unproven, or not modelled), the reason is
+        kept and its results become values the rule knows nothing about, and the evaluation goes on - a violation
+        further on (an address outside a tensor, say) is not hidden by an earlier step the rule could not follow."""
+        try:
+            return self._op_typed(op, env)
+        except _Fail as e:
+            if e.verdict != "unproven":
+                raise
+            self.soft.append(e.why)
+        except Unmodelled as e:
+            self.soft.append(str(e))
+        self._unfollowed(op, env)
+
+    def _unfollowed(self, op, env):
+        rtype = (op.rtype or "").strip()
+        types = KI._split_top(rtype[1:-1]) if rtype.startswith("(") and rtype.endswith(")") else [rtype]
+        if len(types) != len(op.results):
+            types = [rtype] * len(op.results)
+        ptrs = [a for a in op.operands if isinstance(env.get(a), Ptr)]
+        for name, ty in zip(op.results, types):
+            if "!tt.ptr" in ty:
+                base = env[ptrs[0]] if ptrs else None
+                env[name] = Ptr(base.arg if base is not None else "?", base.off if base is not None else None,
+                                taint="a value the rule did not follow")
+            elif any(t in KI._elem(ty) for t in ("f16", "f32", "f64", "bf16", "f8")) if ty else False:
+                env[name] = V(KI._shape(ty) or (), fn=True, data_valid=True, data_addr="a value the rule did not follow")
+            else:
+                env[name] = T("a value the rule did not follow")
+
+    def _op_typed(self, op, env):  # noqa: C901
         n = op.name
         args = [self._get(env, a) for a in op.operands]
         shape = KI._shape(op.rtype)
@@ -1776,6 +1825,11 @@ class _Typed(KI._Run):
                         self.leaf_at[self._key(op)] = {m.axes[i].name: self._abs(m, i, cs[i]) for i in cs
                                                        if i < len(m.axes) and m.axes[i].name is not None}
                 else:
+                    if m is not None and p.taint is None and p.off is not None:
+                        # an integer tensor without a meaning still has its layout: an address that is not one of
+                        # its elements (outside it, or between its elements) is a violation all the same; what the
+                        # numbers mean stays unknown (the value is left as kernel_ir reads it)
+                        self._layout_only(p, m, mask, shape or ())
                     return super()._op(op, env)
         elif n == "arith.andi" and any(isinstance(a, T) for a in args) and \
                 all(isinstance(a, (T, E, Mk)) for a in args):
@@ -2044,6 +2098,7 @@ def check_launch(ttir: str, meanings: Dict[str, Meaning], ints: Dict[str, int], 
     stores = {}
     inferred = {}
     data_notes = []
+    soft = []
     try:
         for ci, start in enumerate(range(0, total, per)):
             run = _Typed(fn, meanings, ints, KI._grid_pids((gx, gy, gz), start, min(total, start + per)), True, ci,
@@ -2052,6 +2107,7 @@ def check_launch(ttir: str, meanings: Dict[str, Meaning], ints: Dict[str, int], 
             run.run()
             checks += run.checks
             data_notes += run.notes
+            soft += run.soft
             for k, v in run.stores.items():
                 stores.setdefault(k, []).extend(v)
             for k, v in run.inferred.items():
@@ -2067,6 +2123,12 @@ def check_launch(ttir: str, meanings: Dict[str, Meaning], ints: Dict[str, int], 
         return Verdict("unproven", str(e), checks, total, time.perf_counter() - t0)
     except _Dense:
         return Verdict("unproven", "a value could not be evaluated", checks, total, time.perf_counter() - t0)
+    if soft and not data_notes:
+        return Verdict("unproven", soft[0], checks, total, time.perf_counter() - t0)
+    if soft:
+        why, example = data_notes[0]
+        return Verdict("possible", f"for some programs, if data sends them down the branch: {why}", checks, total,
+                       time.perf_counter() - t0, example)
     notes = []
     for name in outs:
         out = meanings[name]
