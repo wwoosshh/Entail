@@ -4,7 +4,10 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
-## Unreleased
+## 2.2.0
+
+Released 2026-10-04. A checker for the GPU kernels an engine launches, opt-in and experimental, and the
+research modes it grew out of. Nothing changes with `ENTAIL` unset, `load` or `debug`.
 
 - **One rule at every kernel launch (`ENTAIL=types`, experimental).** The GPU kernels an engine launches are checked
   against what the values handed to them mean: values computed together pair only where their meanings agree, and
