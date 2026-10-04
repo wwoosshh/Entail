@@ -253,8 +253,10 @@ class Program:
         return out
 
     def content_inputs(self, op: str):
-        """The program inputs (by name) that reach what the operation `op` stores (its `src`), weights left out: what a
-        key for the stored item has to cover (paged.check_identity)."""
+        """The program inputs (by name) that reach what the operation `op` stores (its `src`): what a key for the stored
+        item has to cover (paged.check_identity). Left out: weights (the program's own, not per request) and inputs
+        that say where or how much (an Index or a Count: slots, tables, rows, lengths, and the pools themselves, whose
+        contents were stored under their own keys)."""
         g = self.graph
         owner = {}
         for name, structure in g.inputs.items():
@@ -272,7 +274,8 @@ class Program:
             seen.add(s.id)
             if s.id in owner:
                 name, sym = owner[s.id]
-                if sym.type.kind != "weight":
+                addressing = any(type(f).__name__ in ("Index", "Count") for f in sym.type.facts)
+                if sym.type.kind != "weight" and not addressing:
                     found.add(name)
                 continue
             n = producer.get(s.id)
@@ -280,29 +283,56 @@ class Program:
                 stack.extend(v for v in n.inputs.values() if isinstance(v, Sym))
         return found
 
-    def bind(self, **values) -> Callable:
-        pairs = []
-        for k, s in self.graph.inputs.items():
+    def _env(self, values, names):
+        env = {}
+        for k in names:
+            s = self.graph.inputs[k]
             if not _has_sym(s):
                 continue   # a constant, fixed when the program was traced
             if k not in values:
                 raise RoleError(f"program input {k} is missing")
-            _flat(s, values[k], pairs, k)
-        env = {}
-        for sym, value, path in pairs:
-            if isinstance(sym, Sym):
-                _check_tensor(sym, value, path)
-                env[sym.id] = value
-        nodes = self.graph.nodes
-        outputs = self.graph.outputs
+            pairs = _flat(s, values[k], [], k)
+            for sym, value, path in pairs:
+                if isinstance(sym, Sym):
+                    _check_tensor(sym, value, path)
+                    env[sym.id] = value
+        return env
+
+    def _steps(self):
+        """The nodes as (run, [(role, symbol id, is a symbol)], [output ids]), made once: running is then lookups."""
+        if getattr(self, "_plan", None) is None:
+            self._plan = [(n.run, [(r, v.id, True) if isinstance(v, Sym) else (r, v, False) for r, v in n.inputs.items()],
+                           [s.id for s in n.outputs]) for n in self.graph.nodes]
+        return self._plan
+
+    def _execute(self, env):
+        for run, ins, outs in self._steps():
+            got = run(**{r: (env[v] if sym else v) for r, v, sym in ins})
+            for i, t in zip(outs, got):
+                env[i] = t
+        return _gather(self.graph.outputs, env)
+
+    def bind(self, **values) -> Callable:
+        env = self._env(values, list(self.graph.inputs))
 
         def run():
-            for n in nodes:
-                args = {r: (env[v.id] if isinstance(v, Sym) else v) for r, v in n.inputs.items()}
-                got = n.run(**args)
-                for s, t in zip(n.outputs, got):
-                    env[s.id] = t
-            return _gather(outputs, env)
+            return self._execute(dict(env))
+
+        return run
+
+    def prepare(self, **fixed) -> Callable:
+        """Binds the inputs that stay (weights, pools) once and returns run(**rest): the inputs that change from step
+        to step are checked at every call (what only their data can say), the fixed ones were checked here."""
+        unknown = set(fixed) - set(self.graph.inputs)
+        if unknown:
+            raise RoleError(f"prepare: the program has no inputs {sorted(unknown)}")
+        env_fixed = self._env(fixed, list(fixed))
+        rest = [k for k in self.graph.inputs if k not in fixed]
+
+        def run(**values):
+            env = dict(env_fixed)
+            env.update(self._env(values, rest))
+            return self._execute(env)
 
         return run
 

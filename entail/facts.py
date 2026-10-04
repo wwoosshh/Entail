@@ -624,7 +624,7 @@ class Check:
 
 # --- the execution side (v13, M21) ------------------------------------------------------------------------------
 
-INDEX_UNITS = frozenset({"slot", "block", "row"})
+INDEX_UNITS = frozenset({"slot", "block", "row", "token"})
 
 
 @dataclass(frozen=True)
@@ -638,7 +638,7 @@ class Index:
     it addresses.
 
     unit   what one number stands for (closed set): "slot" (one token's place in a pool), "block" (a run of `block`
-           slots), "row" (one sequence of a batch)
+           slots), "row" (one sequence of a batch), "token" (one token's place in a step's list of tokens)
     pool   which pool, table or batch the numbers are in: a name the program gives ("gpu", "cpu", "batch")
     block  slots per block, for a pool laid out in blocks (required for unit "block")
     """

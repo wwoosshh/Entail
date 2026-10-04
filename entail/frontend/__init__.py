@@ -36,10 +36,10 @@ from .graph import Program, T, trace
 from .ops import (ATTENTION, ATTENTION_HONOURS, LINEAR_READS, REORDERS, ROPE_TYPES, add, advance, all_reduce, argmax,
                   attend, copy, dequantize, embed, last, last_key, linear, merge_heads, reads, reorder, rms_norm,
                   rope, split_features, split_heads, swiglu, to_absolute, write)
-from .paged import check_identity, move_blocks, paged_attend, paged_write, pool_type, slots_of, wait
+from .paged import check_identity, move_blocks, paged_attend, paged_write, pick, pool_type, slots_of, wait
 
 __all__ = ["RoleError", "Program", "T", "trace", "ATTENTION", "ATTENTION_HONOURS", "LINEAR_READS", "REORDERS",
            "ROPE_TYPES", "add", "advance", "all_reduce", "argmax", "attend", "copy", "dequantize", "embed", "last",
            "last_key", "linear", "merge_heads", "reads", "reorder", "rms_norm", "rope", "split_features",
            "split_heads", "swiglu", "to_absolute", "write", "units", "check_identity", "move_blocks", "paged_attend",
-           "paged_write", "pool_type", "slots_of", "wait"]
+           "paged_write", "pick", "pool_type", "slots_of", "wait"]

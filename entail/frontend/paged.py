@@ -22,7 +22,7 @@ import torch
 
 from ..facts import Count, Index, Positions
 from .graph import T, fail, node, take
-from .ops import _frame, _sizes
+from .ops import _frame, _memo, _sizes
 
 COMPUTED = Count("computed")
 
@@ -68,6 +68,7 @@ def slots_of(*, table, rows, positions):
     rows = take(op, "rows", rows, "row_ids", dims=("tokens",))
     _index(op, "rows", rows, "row", pool=table.type.dims[0])
     positions = take(op, "positions", positions, "positions", dims=("tokens",))
+    key = ("slots_of", table.id, rows.id, positions.id)
     positions = _frame(op, "positions", positions)
     b = tix.block
     out = T(("tokens",), "int64", "slots", _sizes(rows.type)[:1], (Index("slot", tix.pool, b),))
@@ -76,7 +77,21 @@ def slots_of(*, table, rows, positions):
         blk = table[rows, torch.div(positions, b, rounding_mode="floor")].to(torch.int64)
         return (blk * b + positions % b,)
 
-    return node(op, {"table": table, "rows": rows, "positions": positions}, [out], run)[0]
+    # every layer of a step asks for the same slots: made once per program
+    return _memo(key, lambda: node(op, {"table": table, "rows": rows, "positions": positions}, [out], run)[0])
+
+
+def pick(*, x, at):
+    """The rows of x at the token places `at` (Index 'token' of x's first dim): each sequence's last token, say."""
+    op = "pick"
+    x = take(op, "x", x)
+    dim = x.type.dims[0]
+    at = take(op, "at", at, "token_index")
+    if len(at.type.dims) != 1:
+        fail(op, f"at takes one dim of token places, got {at.type.dims}")
+    _index(op, "at", at, "token", pool=dim)
+    out = x.type.but(dims=at.type.dims + x.type.dims[1:], sizes=_sizes(at.type) + _sizes(x.type)[1:])
+    return node(op, {"x": x, "at": at}, [out], lambda x, at: (x.index_select(0, at),))[0]
 
 
 def paged_write(*, into, src, at):
@@ -151,25 +166,43 @@ def paged_attend(*, query, keys, values, table, lengths, rows, at, share, scale=
     q_back = [q_to.index(i) for i in range(3)]
     k_to = [keys.type.dims.index(x) for x in ("slots", kv[0], "head_dim")]
     b = kix.block
+    plan = _row_plan(rows, lengths)
 
-    def run(query, keys, values, table, lengths, rows, at):
+    def run(query, keys, values, table, plan, at):
+        # one row at a time: its keys gathered through its table row, its tokens' queries, a causal mask by position
         q = query.permute(q_to)                                    # [T, H, D]
         k_all, v_all = keys.permute(k_to), values.permute(k_to)    # [S, KVH, D]
-        n = table.shape[1] * b
-        j = torch.arange(n, device=q.device)
-        slots = table.to(torch.int64)[:, j // b] * b + j % b        # [R, n]
-        slots = slots.clamp(min=0)
-        kt = k_all[slots][rows].repeat_interleave(group, dim=2)    # [T, n, H, D]
-        vt = v_all[slots][rows].repeat_interleave(group, dim=2)
-        allowed = (j.view(1, n) < lengths[rows].view(-1, 1)) & (j.view(1, n) <= at.view(-1, 1))   # [T, n]
-        s = torch.einsum("thd,tnhd->thn", q.float(), kt.float()) * sm
-        s = s.masked_fill(~allowed.view(allowed.shape[0], 1, n), float("-inf"))
-        o = torch.einsum("thn,tnhd->thd", torch.softmax(s, dim=-1), vt.float()).to(q.dtype)
-        return (o.permute(q_back),)
+        out = torch.empty_like(q)
+        tab = table.to(torch.int64)
+        for r, idx, n in plan:
+            j = torch.arange(n, device=q.device)
+            slots = tab[r, j // b] * b + j % b
+            k, v = k_all.index_select(0, slots), v_all.index_select(0, slots)          # [n, KVH, D]
+            sel = torch.tensor(idx, device=q.device)
+            qr = q.index_select(0, sel)                                                 # [t, H, D]
+            allowed = j.view(1, n) <= at.index_select(0, sel).view(-1, 1)               # [t, n]
+            o = torch.nn.functional.scaled_dot_product_attention(
+                qr.transpose(0, 1).unsqueeze(0), k.transpose(0, 1).unsqueeze(0), v.transpose(0, 1).unsqueeze(0),
+                attn_mask=allowed.view(1, 1, len(idx), n), scale=sm, enable_gqa=group > 1)
+            out.index_copy_(0, sel, o.squeeze(0).transpose(0, 1))
+        return (out.permute(q_back),)
 
     out = T(query.type.dims, query.type.dtype, "attended", _sizes(query.type))
-    return node(op, {"query": query, "keys": keys, "values": values, "table": table, "lengths": lengths,
-                     "rows": rows, "at": at}, [out], run, note="lowered: torch (gather by block table)")[0]
+    return node(op, {"query": query, "keys": keys, "values": values, "table": table, "plan": plan, "at": at}, [out],
+                run, note="lowered: torch (per row, keys gathered by block table)")[0]
+
+
+def _row_plan(rows, lengths):
+    """Which tokens each row has and how many keys it reads, read to the host once per step (every layer's attention
+    uses it): [(row, token places, computed keys)]."""
+    def make():
+        def run(rows, lengths):
+            row_of, lens = rows.tolist(), lengths.tolist()
+            return ([(r, [t for t, rr in enumerate(row_of) if rr == r], int(lens[r])) for r in sorted(set(row_of))],)
+
+        return node("row_plan", {"rows": rows, "lengths": lengths}, [T((), "int64", "row_plan")], run)[0]
+
+    return _memo(("row_plan", rows.id, lengths.id), make)
 
 
 def move_blocks(*, into, src, src_blocks, dst_blocks):
@@ -206,14 +239,14 @@ def move_blocks(*, into, src, src_blocks, dst_blocks):
 
 
 def wait(*, pending):
-    """The pool a block copy wrote, once the copy is done: what readers may read."""
+    """The pool a block copy wrote, once the copy is done: what readers may read. move_blocks's lowering copies on the
+    current stream (a copy between devices blocks), so a later reader is ordered after it and nothing is left to do at
+    run time; the operation is what keeps a reader from coming before it in the program."""
     op = "wait"
     pending = take(op, "pending", pending, ("pending_key", "pending_value"))
     kind = pending.type.kind[len("pending_"):]
 
     def run(pending):
-        if pending.is_cuda:
-            torch.cuda.current_stream(pending.device).synchronize()
         return (pending,)
 
     return node(op, {"pending": pending}, [pending.type.but(kind=kind)], run, written=("pending",))[0]
