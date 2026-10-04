@@ -1,0 +1,36 @@
+{
+ "_": "vLLM 0.30 (an axis named null is not named: the embedding's width is the residual stream, which the rule's per-call names (a matmul contracts \"hidden\" and makes \"feature\") do not name across layers): what vLLM itself declares about the values it makes, as the rule names it (read by entail/adapters/vllm_declarations.py). layers: a layer kind (a class in the module's MRO) -> the names of a weight's output axis (output_dim) and input axis (input_dim); the MoE layer's weights are [expert, out, in] (in, out when the parameter says is_transposed). scales: a value parameter -> the parameters that are its scales; a scale's axes follow the value's by broadcast (equal size: the same axis; a size that divides: groups; size 1: no coordinate). functions: module:function (module:Class.method) -> what its tensor arguments mean (args: name -> [axes, basis], or \"moe_weight\"), which arguments pair as value and scale (pairs), and what it returns (returns: per returned tensor [axes, basis], {\"like\": arg} for the argument's meaning, {\"scale_of\": index} for the scale of a returned value). relations and merges: how bases derive from one another, and what a flat index over two adjacent axes means.",
+ "layers": {
+  "VocabParallelEmbedding": {"out": "token_id", "in": null},
+  "ParallelLMHead": {"out": "token_id", "in": null},
+  "LinearBase": {"out": "feature", "in": "hidden"},
+  "FusedMoE": {"moe": ["expert", "feature", "hidden"], "moe_transposed": ["expert", "hidden", "feature"]}
+ },
+ "scales": {
+  "weight": ["weight_scale", "weight_scale_inv"],
+  "qweight": ["scales"],
+  "w13_weight": ["w13_weight_scale", "w13_weight_scale_inv"],
+  "w2_weight": ["w2_weight_scale", "w2_weight_scale_inv"],
+  "w13_qweight": ["w13_scales"],
+  "w2_qweight": ["w2_scales"]
+ },
+ "functions": {
+  "vllm.model_executor.layers.fused_moe.fused_moe:fused_experts_impl": {
+   "args": {"hidden_states": [["token", "hidden"], null], "w1": "moe_weight", "w2": "moe_weight",
+            "topk_ids": [["token", "k"], "expert"], "topk_weights": [["token", "k"], null]},
+   "pairs": [["w1", "w1_scale"], ["w2", "w2_scale"]]
+  },
+  "vllm.model_executor.layers.fused_moe.moe_align_block_size:moe_align_block_size": {
+   "args": {"topk_ids": [["token", "k"], "expert"]},
+   "returns": [[["slot"], "token_slot"], [["block"], "expert"], [["one"], null]]
+  },
+  "vllm.model_executor.layers.fused_moe.utils:moe_kernel_quantize_input": {
+   "returns": [{"like": "A"}, {"scale_of": 0}]
+  },
+  "vllm.model_executor.layers.fused_moe.router.fused_topk_router:fused_topk": {
+   "returns": [[["token", "k"], null], [["token", "k"], "expert"], [["token", "k"], null]]
+  }
+ },
+ "relations": [["token_slot", "//", null, "token"]],
+ "merges": [["token", "k", "token_slot"]]
+}

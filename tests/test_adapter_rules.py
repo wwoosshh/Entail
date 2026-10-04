@@ -29,7 +29,7 @@ V2 = ("transformers_adapter", "transformers_config", "sglang_adapter", "vllm_att
       "vllm_scoring", "sglang_fp8_tile", "transformers_tokenizer", "transformers_stops", "vllm_stops",
       "sglang_stops", "vllm_lora", "sglang_lora", "vllm_cache_key", "transformers_beam", "triton_launch", "vllm_pairing",
       "vllm_kernel_reference", "vllm_parse", "vllm_multimodal", "function_reference", "vllm_paths", "sglang_paths",
-      "vllm_safe", "sglang_safe", "vllm_block_fp8_guarantee", "vllm_index_meanings")
+      "vllm_safe", "sglang_safe", "vllm_block_fp8_guarantee", "vllm_index_meanings", "vllm_declarations")
 # Not yet on the v2 interface: where they move, and why they have not yet. Empty since M9.3, when the research tools
 # (fault injection, the layout ledger, a probe) left the package.
 LEGACY = {}
@@ -48,7 +48,7 @@ ALLOWED = {"load": None, "kv_contract": None, "epochs": None, "identity_contract
            # the definitions of engine functions that carry none (M19 L3): what a function computes, not a rule
            "definitions": None,
            # the one rule at every kernel launch (M19 L6): meanings attached where values are made, relations declared
-           "kernel_check": {"attach"}, "kernel_types": {"relate"},
+           "kernel_check": {"attach", "fact_of", "issue_pair"}, "kernel_types": {"relate", "merge"},
            # the guarantee profile (M19 L5.4a): its producers' issues, its gate and its graph hooks
            "guarantee": None,
            # its integrity experiment between the operations (M19 L5.4e): the live ranges a Triton launch is checked
