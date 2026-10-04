@@ -4,7 +4,10 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
-## Unreleased
+## 2.3.0
+
+Released 2026-10-04. How long a value lives, in the opt-in, experimental `ENTAIL=types`; the 2.2.0 cost measured
+again. Nothing changes with `ENTAIL` unset, `load` or `debug`.
 
 - **How long a value lives (`ENTAIL=types`, experimental).** The memory a reader reads must hold the value its maker
   wrote there. A loaded weight is a constant: a Triton launch that writes it, or a read after something changed it,

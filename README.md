@@ -48,9 +48,12 @@ checked when the main work ran there. Where to install it for
 each tool - your scripts, vLLM behind Open WebUI, ComfyUI (git, portable, Desktop), text-generation-webui, vLLM in
 Docker - is in [INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md).
 
-> **Status: 2.2.0, measured on one machine.** 2.2.0 adds an opt-in, experimental checker for the GPU kernels an
-> engine launches (`ENTAIL=types`: one rule at every launch, meanings read from what vLLM declares; see
-> [Kernel calls](#kernel-calls-one-rule-for-every-launch-entailtypes-experimental)); the other modes are as in 2.1.4.
+> **Status: 2.3.0, measured on one machine.** 2.3.0 adds to the experimental `ENTAIL=types` how long a value
+> lives: a loaded weight stays as it was loaded, a write into another live value's memory is reported, and memory
+> nothing wrote is reported where it is read (see
+> [Kernel calls](#kernel-calls-one-rule-for-every-launch-entailtypes-experimental)); the other modes are as in 2.2.0.
+> 2.2.0 added that opt-in checker for the GPU kernels an engine launches (one rule at every launch, meanings read
+> from what vLLM declares).
 > 2.1.4 fixes what the field test of 2.1.3 found (a seeded run with vLLM
 > inside a trainer samples as without entail; SGLang's KV check no longer flags a request others joined; a serving
 > app's own chat template is held to the prompt it renders; an engine's or app's own choices are named as theirs; a
@@ -500,7 +503,7 @@ the vocabulary has no word for yet, a linear-attention kernel's axis order, a pr
 the inside of a C++ kernel. In one of those runs it found a different, real out-of-bounds read (vLLM 0.19's MRoPE
 kernel reads `cos` past its rows, fixed upstream in vllm#49906). It raised no false alarm in these runs.
 
-Not yet released: the same mode also checks how long a value lives - the memory a reader reads must hold the value
+Since 2.3.0 the same mode also checks how long a value lives - the memory a reader reads must hold the value
 its maker wrote there. A loaded weight is a constant (a Triton launch that writes it, or a read after something
 changed it, is `broken`); a value that another value was written over through another storage is `broken` when it is
 read; and memory nothing wrote is found where a model is loaded: while vLLM's or SGLang's model loader makes and loads
@@ -602,6 +605,9 @@ For 1.0 every measurement of the development milestones was run again on the fin
 - **`ENTAIL=types` (experimental)** reads what vLLM 0.30 declares; on another engine (SGLang) only a tensor's layout
   is checked. It does not yet read a rotary embedding's pairing, the inside of a C++ kernel, or values that go through
   Python or the CPU. With `enforce_eager` every launch passes through Python, and generation takes 1.5x the time.
+  Its lifetime checks follow the writes of Triton launches and of torch's in-place operations, not writes inside a
+  C++ kernel or a CUDA graph replay; memory nothing wrote is found for parameters, at load, not in a kernel's output
+  at run time.
 - **Unseen bugs.** On the pre-registered replay above, 0 of 7 in-class reproduced bugs were detected. Since then
   the facts and sites it exposed have been added (the last six rows of the repairs table: the adapter config file,
   the reasoning parser's setting names, the prefix-cache key, beam reordering, a Triton launch's strides, the
