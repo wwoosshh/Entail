@@ -8,6 +8,10 @@ data: every role, format, frame, range and property is checked then, and a misma
 (trace time: where a compiled language checks at compile time). What runs afterwards is a plain function over
 tensors with no checks left in it but what only the data can say (dtype and fixed sizes, once, when bound).
 
+Experimental. It guards only code written with it, so nothing entail says about existing engines rests on it
+(LIBRARY_DESIGN.md 11, 2026-10-05). entail ships no engine: the small serving core that measured the execution-side
+types (ROADMAP M21.2) is kept with the research record, not in this package.
+
 Grown from phase0/week4/rolec.py - the Korean-named prototype that turned eight silent attention mistakes into
 refusals or impossibilities (WEEK4_NOTES.md 7.1) - in English, dividing the work as RESEARCH_PLAN.md 5.3 does: role
 markers say direction (into=, src=), conversion target (to=) and accompaniment (share=); what a value is - its
