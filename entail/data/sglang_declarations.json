@@ -1,5 +1,5 @@
 {
- "_": "SGLang 0.5.20: what SGLang itself declares about the values it makes, as the rule names it (read by entail/declarations.py through entail/adapters/sglang_declarations.py). The format is vLLM's (data/vllm_declarations.json): SGLang keeps vLLM's layer classes and weight parameter classes (output_dim, input_dim). functions: the FP8 path's activation quantizers return the quantized value and its scale made together (issue: per token, groups of group_size along hidden). per_token_group_quant_fp8 is SGLang's module-level name for sglang_per_token_group_quant_fp8 on CUDA; both are read.",
+ "_": "SGLang 0.5.20: what SGLang itself declares about the values it makes, as the rule names it (read by entail/declarations.py through entail/adapters/sglang_declarations.py). The format is vLLM's (data/vllm_declarations.json): SGLang keeps vLLM's layer classes and weight parameter classes (output_dim, input_dim). functions: the FP8 path's activation quantizers return the quantized value and its scale made together (issue: per token, groups of group_size along hidden). per_token_group_quant_fp8 is SGLang's module-level name for sglang_per_token_group_quant_fp8 on CUDA; both are read. rotations: the rotary layers (rotary_embedding/base.py RotaryEmbedding and its subclasses - MRotaryEmbedding too - keep head_size, rotary_dim and is_neox_style, and their forward takes (positions, query, key)): while one runs, the query and key it is handed mean tokens, heads and, in each head, the rotation pairs is_neox_style declares.",
  "layers": {
   "VocabParallelEmbedding": {
    "out": "token_id",
@@ -89,5 +89,23 @@
   "_v_scale",
   "_q_scale",
   "_prob_scale"
- ]
+ ],
+ "rotations": {
+  "classes": [
+   "RotaryEmbedding"
+  ],
+  "head_size": "head_size",
+  "rotary_dim": "rotary_dim",
+  "neox": "is_neox_style",
+  "values": [
+   [
+    "query",
+    1
+   ],
+   [
+    "key",
+    2
+   ]
+  ]
+ }
 }

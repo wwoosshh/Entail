@@ -62,6 +62,19 @@ ships no engine (#59).
   - On SGLang 0.5.20 with Qwen3-4B-FP8, the block-FP8 matmul's 176 launch configurations were all unproven and are
     now all proven. The output is the same as without entail, and nothing is reported broken.
   - vLLM's verdicts are what they were.
+- **`ENTAIL=types`: the rotation pairs a rotary layer declares (#67).** A rotary layer declares its head size, its
+  rotary dimension, and how it pairs features: j with j + rotary_dim/2, or 2i with 2i+1 (`is_neox_style`). While
+  the layer runs, the query and key it is handed now mean tokens, heads and, in each head, those pairs. The copies
+  the layer makes before a kernel launch are known by their shape and dtype. The rule is unchanged: a kernel that
+  combines features of two different pairs is broken. The meaning comes from one table entry per engine (vLLM's
+  `RotaryEmbeddingBase`, SGLang's `RotaryEmbedding`); nothing is written for one kernel.
+  - vLLM 0.22.0's Triton MRoPE kernel pairs j with j + rotary_dim/2 whatever the layer declares (vllm#42016). GLM-OCR
+    declares 2i with 2i+1. All 4 of that kernel's launch configurations are now reported broken before they run.
+  - vLLM 0.30.0's kernel pairs as declared, and nothing is reported broken; the output is unchanged. Its 7
+    configurations are not decided, because the check does not read `tt.split` yet.
+  - Qwen3.5 on vLLM 0.19.0 (split-wise pairs over 64 of 256 features): no pairing is reported broken.
+  - A kernel that pairs as declared is still not proven: the check decides whether every output element is stored
+    for 1-D and 2-D outputs only, and the pairs are a 4-D view.
 
 ## 2.3.0
 
