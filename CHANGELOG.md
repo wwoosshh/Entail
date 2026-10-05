@@ -45,6 +45,15 @@ ships no engine (#59).
   - A broken launch or read is a decision there (`kernel:types`, `kernel:life`).
   - At exit, one line says how many were checked and what is not read: the inside of C++ kernels and the engine's
     own Python computation. `ENTAIL_QUIET=types` keeps that line off the console.
+- **`ENTAIL=types` costs less per launch (#63).** The check a launch goes through when its configuration is already
+  decided now takes about 40 µs instead of 52-58 µs. Each tensor is read once (its storage, address, shape,
+  strides, dtype), the arguments are read in one pass, and the constexpr part of the key is made once per set of
+  values. A meaning's part of the key is made when the meaning is attached. A buffer that is given a meaning again
+  keeps its entry, so the old code's finalizer per re-attachment no longer piles up. Verdicts and keys are what
+  they were. Measured on vLLM 0.30.0 with Qwen3-4B-FP8 (fresh processes off, on, off; median of three rotations):
+  1.078x -> 1.060x with Triton FP8 and CUDA graphs, 1.047x -> 1.035x on the default path (compile, Marlin, CUDA
+  graphs). Both differences are within the spread between rotations. Eager went from 1.62x to 1.39x (one
+  rotation). The cost is still above the 1.02x the design asks for.
 
 ## 2.3.0
 

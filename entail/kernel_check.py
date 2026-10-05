@@ -43,11 +43,16 @@ def _count(k, by=1):
     _STATS[k] = _STATS.get(k, 0) + by
 
 
+_IS_COMPILING = []
+
+
 def _compiling():
     try:
-        import torch
+        if not _IS_COMPILING:
+            import torch
 
-        return bool(torch.compiler.is_compiling())
+            _IS_COMPILING.append(torch.compiler.is_compiling)
+        return bool(_IS_COMPILING[0]())
     except Exception:  # noqa: BLE001
         return False
 
@@ -69,18 +74,33 @@ def attach(t, names, kind="value", serial=0, pair=0, groups=None, sums=None, pen
     owner updates it in place - a cache, a table), "value" (made once and read). `register` keeps the storage's
     bytes for the one-memory-one-value check (left out for the outputs a launch's meaning is inferred for: torch's
     allocator never gives out the same bytes twice while both live)."""
-    key = _storage_key(t)
+    return _attach_at(t, _storage_key(t), t.data_ptr(), tuple(t.shape), tuple(t.stride()), t.dtype, names, kind,
+                      serial, pair, groups, sums, pending, basis, label, pointers, packed, life, register)
+
+
+def _attach_at(t, key, ptr, shape, stride, dtype, names, kind="value", serial=0, pair=0, groups=None, sums=None,
+               pending=(), basis=None, label=None, pointers=None, packed=None, life="value", register=True):
+    """attach, for a tensor whose storage key, address, shape, strides and dtype the caller has read already."""
     fact = {"names": list(names), "kind": kind, "serial": serial, "pair": pair,
             "groups": list(groups or [1] * len(names)), "sums": dict(sums or {}), "pending": list(pending),
             "basis": basis, "label": label, "packed": packed, "life": life, "born": _version_of(t, key), "key": key,
             "pointers": None if pointers is None else [_snapshot(x) for x in pointers]}
     if register:
         _register_extent(t, key)
-    entry = [t.data_ptr(), tuple(t.shape), tuple(t.stride()), t.dtype, fact, None]
+    sig = _sig_of(fact)
+    entry = [ptr, shape, stride, dtype, fact, None, sig]
     with _LOCK:
         lst = _FACTS.setdefault(key, [])
-        lst[:] = [e for e in lst if not (e[0] == entry[0] and e[1] == entry[1] and e[2] == entry[2]
-                                        and e[3] == entry[3])]
+        for e in lst:
+            if e[0] == ptr and e[1] == shape and e[2] == stride and e[3] == dtype:
+                ref = e[5]
+                if ref is not None and ref() is t:
+                    # the same tensor given a meaning again (a buffer an engine reuses every step): its entry and
+                    # the reference that drops it when the tensor goes stay; the meaning is the new one
+                    e[4], e[6] = fact, sig
+                    _count("attached")
+                    return fact
+        lst[:] = [e for e in lst if not (e[0] == ptr and e[1] == shape and e[2] == stride and e[3] == dtype)]
         lst.append(entry)
 
     def gone(key=key, entry=entry):
@@ -92,11 +112,16 @@ def attach(t, names, kind="value", serial=0, pair=0, groups=None, sums=None, pen
                     _FACTS.pop(key, None)
                     _drop_extent(key)
     try:
-        entry[5] = weakref.finalize(t, gone)
+        entry[5] = weakref.ref(t, lambda _ref, gone=gone: gone())
     except TypeError:
         pass
     _count("attached")
     return fact
+
+
+def _sig_of(fact):
+    """What of a meaning a launch's verdict depends on (the part of the launch key a meaning gives)."""
+    return (tuple(fact["names"]), fact["kind"], tuple(fact["groups"]), fact["pair"] != 0)
 
 
 # --- lifetime (M19 L7): one memory holds one live value; a constant is not written after it is made ---------------
@@ -221,15 +246,15 @@ def _life_check(kernel, tensors, facts, written):
     return bad
 
 
-def _note_writes(tensors, written):
+def _note_writes(tensors, written, keys=None):
     """For a launch about to run: each tensor it writes moves its storage's version, and the version of every other
     storage holding a meaning whose bytes the write's tensor spans (another value written over it). Returns the
-    reasons: a write that reaches another live value's memory."""
+    reasons: a write that reaches another live value's memory. `keys`: the tensors' storage keys, read already."""
     bad = []
     for k in (written or ()):
         t = tensors.get(k)
         if t is not None:
-            key = _storage_key(t)
+            key = keys[k] if keys is not None and k in keys else _storage_key(t)
             _WCOUNT[key] = _WCOUNT.get(key, 0) + 1
             if key in _ALIASED:
                 others = _overlapping(t, key)
@@ -284,13 +309,33 @@ def _meaning_from(shape, stride, f, kind=None):
 
 
 def fact_of(t):
-    lst = _FACTS.get(_storage_key(t))
+    return _fact_at(t, _storage_key(t), t.data_ptr(), tuple(t.shape), tuple(t.stride()), t.dtype)
+
+
+def _fact_at(t, key, ptr, shape, stride, dtype):
+    """fact_of, for a tensor whose storage key, address, shape, strides and dtype the caller has read already."""
+    lst = _FACTS.get(key)
     if not lst:
         return None
-    ptr, shape, stride, dtype = t.data_ptr(), tuple(t.shape), tuple(t.stride()), t.dtype
     for e in lst:
         if e[0] == ptr and e[1] == shape and e[2] == stride and e[3] == dtype:
             return e[4]
+    return _view_of(t, lst, ptr, shape, stride, dtype)
+
+
+def _fact_sig_at(t, key, ptr, shape, stride, dtype):
+    """(_fact_at, its part of a launch key)."""
+    lst = _FACTS.get(key)
+    if not lst:
+        return None, None
+    for e in lst:
+        if e[0] == ptr and e[1] == shape and e[2] == stride and e[3] == dtype:
+            return e[4], e[6]
+    f = _view_of(t, lst, ptr, shape, stride, dtype)
+    return f, (None if f is None else _sig_of(f))
+
+
+def _view_of(t, lst, ptr, shape, stride, dtype):
     # a view of a tensor with a meaning (a slice, a selected row or column, a transpose, a merge or a split of its
     # axes): each axis of the view that walks one axis of the tensor means what that axis means, from the
     # coordinate the view starts at; an axis that walks two merged axes means what the vocabulary says the merge
@@ -298,7 +343,7 @@ def fact_of(t):
     for e in reversed(lst):
         if e[3] != dtype or e[4].get("pointers") is not None:
             continue
-        f = _view_fact(ptr, shape, stride, t.element_size(), e)
+        f = _view_fact(ptr, tuple(shape), tuple(stride), t.element_size(), e)
         if f is not None:
             return f
     return None
@@ -685,32 +730,97 @@ def _tick(name, t0):
     return t0
 
 
+_FN = {}               # id(fn) -> (fn, parameter names, their set, constexpr names, their set, constexpr part by values,
+#                        which parameters are constexpr)
+_ESIZE = {}            # dtype -> bytes per element
+_MISSING = object()
+_HOT = {}              # torch, and the adapter's kernel key, imported once for the launch path
+
+
+def _read(fn, args, kwargs, grid, Tensor):
+    """read_launch's reading of one launch (vllm_block_fp8_guarantee.read_launch: the arguments by name, the
+    constexpr part of the kernel's key, the grid) in one pass, as (tensors, scalars, constexpr part, grid); the
+    constexpr part's text is made once per set of values."""
+    e = _FN.get(id(fn))
+    if e is None or e[0] is not fn:
+        names = [p.name for p in fn.params]
+        flags = [bool(getattr(p, "is_constexpr", False)) for p in fn.params]
+        cnames = tuple(n for n, c in zip(names, flags) if c)
+        e = _FN[id(fn)] = (fn, names, set(names), cnames, set(cnames), {}, flags)
+    _fn, names, nset, cnames, cset, by_values, flags = e
+    tensors, scalars, cvals = {}, {}, {}
+    for name, c, v in zip(names, flags, args):
+        if c:
+            cvals[name] = v
+        elif isinstance(v, Tensor):
+            tensors[name] = v
+        elif isinstance(v, (int, float)):
+            scalars[name] = float(v) if isinstance(v, float) else int(v)
+    extra = ()
+    if kwargs:
+        ex = []
+        for k, v in kwargs.items():
+            if k not in nset:
+                ex.append((k, v))
+            elif k in cset:
+                cvals[k] = v
+            elif isinstance(v, Tensor):
+                tensors[k] = v
+            elif isinstance(v, (int, float)):
+                scalars[k] = float(v) if isinstance(v, float) else int(v)
+        extra = tuple(ex)
+    try:
+        ck = (tuple([(type(v), v) for v in [cvals.get(n, _MISSING) for n in cnames]]),
+              tuple([(k, type(v), v) for k, v in extra]))
+        consts = by_values.get(ck)
+        if consts is None:
+            consts = by_values[ck] = tuple(sorted((k, repr(v)) for k, v in cvals.items())) + \
+                tuple(sorted((k, repr(v)) for k, v in extra))
+    except TypeError:                    # a constexpr value that cannot be a key: its text, as read_launch makes it
+        consts = tuple(sorted((k, repr(v)) for k, v in cvals.items())) + tuple(sorted((k, repr(v)) for k, v in extra))
+    if callable(grid):
+        meta = dict(zip(names, args))
+        meta.update(kwargs)
+        grid = grid(meta)
+    g = tuple(int(x) for x in (grid if isinstance(grid, (tuple, list)) else (grid,)))
+    return tensors, scalars, consts, g
+
+
 def _launch(fn, args, kwargs, grid):
-    import hashlib
+    if not _HOT:
+        import torch
 
-    import torch
-
-    from .adapters.vllm_block_fp8_guarantee import _kernel_key, read_launch
+        from .adapters.vllm_block_fp8_guarantee import _kernel_key
+        _HOT.update(torch=torch, Tensor=torch.Tensor, kernel_key=_kernel_key)
+    torch, Tensor, _kernel_key = _HOT["torch"], _HOT["Tensor"], _HOT["kernel_key"]
 
     t0 = time.perf_counter_ns() if _PROFILE else 0
-    values, consts, g = read_launch(fn, args, kwargs, grid)
-    tensors = {k: v for k, v in values.items() if isinstance(v, torch.Tensor)}
+    tensors, scalars, consts, g = _read(fn, args, kwargs, grid, Tensor)
     if not tensors:
         return
-    scalars = {k: (float(v) if isinstance(v, float) else int(v)) for k, v in values.items()
-               if isinstance(v, (int, float)) and not isinstance(v, torch.Tensor)}
     t0 = _tick("read_launch", t0)
-    facts = {k: fact_of(t) for k, t in tensors.items()}
+    # each tensor read once: its storage key, address, shape, strides and dtype serve the meaning, the key and the
+    # lifetime checks
+    facts, keys, rows = {}, {}, []
+    for k, t in tensors.items():
+        ptr, shape, stride, dtype = t.data_ptr(), tuple(t.shape), t.stride(), t.dtype
+        es = _ESIZE.get(dtype)
+        if es is None:
+            es = _ESIZE[dtype] = t.element_size()
+        skey = (t.get_device(), ptr - t.storage_offset() * es)
+        keys[k] = skey
+        f, fs = _fact_sig_at(t, skey, ptr, shape, stride, dtype)
+        facts[k] = f
+        rows.append((k, dtype, shape, stride, fs))
     t0 = _tick("facts", t0)
-    sig = tuple((k, str(t.dtype), tuple(t.shape), tuple(t.stride()),
-                 None if facts[k] is None else (tuple(facts[k]["names"]), facts[k]["kind"], tuple(facts[k]["groups"]),
-                                                facts[k]["pair"] != 0))
-                for k, t in tensors.items())
+    sig = tuple(rows)
     kkey = _kernel_key(fn, consts)
-    key = (kkey, sig, tuple(sorted(scalars.items())), g)
+    key = (kkey, sig, tuple(scalars.items()), g)
     hit = _VERDICTS.get(key)
     t0 = _tick("key", t0)
     if hit is None:
+        import hashlib
+
         name = str(kkey[0])
         out_name, inferred = None, None
         cached = False
@@ -789,7 +899,7 @@ def _launch(fn, args, kwargs, grid):
     t0 = _tick("decide", t0)
     written = set(out_name) if out_name else None
     life = _life_check(str(kkey[0]), tensors, facts, written)
-    life += _note_writes(tensors, written)
+    life += _note_writes(tensors, written, keys)
     for why in life:
         _count("life_violation")
         _write({"kind": "types_life", "kernel": str(kkey[0]), "verdict": "violation", "why": why})
@@ -807,8 +917,14 @@ def _launch(fn, args, kwargs, grid):
             if not any(names):
                 continue
             pending = inf.get("pending_scales") or []
-            attach(t, names, "value", _next_serial() if pending else 0, pending[0] if len(pending) == 1 else 0,
-                   sums=inf.get("sums") or {}, pending=pending, register=False)
+            row = next((r for r in rows if r[0] == name), None)
+            if row is None:
+                attach(t, names, "value", _next_serial() if pending else 0, pending[0] if len(pending) == 1 else 0,
+                       sums=inf.get("sums") or {}, pending=pending, register=False)
+            else:
+                _attach_at(t, keys[name], t.data_ptr(), row[2], row[3], row[1], names, "value",
+                           _next_serial() if pending else 0, pending[0] if len(pending) == 1 else 0,
+                           sums=inf.get("sums") or {}, pending=pending, register=False)
             _count("inferred_attached")
     _tick("attach_inferred", t0)
 
