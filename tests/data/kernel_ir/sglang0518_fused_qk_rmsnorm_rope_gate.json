@@ -1,0 +1,125 @@
+{
+ "kernel": "sglang.kernels.ops.attention.fused_qk_rmsnorm_rope_gate._fused_qk_rmsnorm_rope_gate_kernel",
+ "grid": [
+  1792,
+  20
+ ],
+ "scalars": {
+  "stride_qg_t": 10240,
+  "stride_k_t": 10240,
+  "stride_qo_t": 4096,
+  "stride_ko_t": 1024,
+  "stride_gate_t": 4096,
+  "stride_cos_t": 64
+ },
+ "tensors": {
+  "q_gate_ptr": {
+   "shape": [
+    1792,
+    8192
+   ],
+   "stride": [
+    10240,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "fact": null
+  },
+  "k_ptr": {
+   "shape": [
+    1792,
+    1024
+   ],
+   "stride": [
+    10240,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "fact": null
+  },
+  "q_out_ptr": {
+   "shape": [
+    1792,
+    4096
+   ],
+   "stride": [
+    4096,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "fact": null
+  },
+  "k_out_ptr": {
+   "shape": [
+    1792,
+    1024
+   ],
+   "stride": [
+    1024,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "fact": null
+  },
+  "gate_out_ptr": {
+   "shape": [
+    1792,
+    16,
+    256
+   ],
+   "stride": [
+    4096,
+    256,
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "fact": null
+  },
+  "q_weight_ptr": {
+   "shape": [
+    256
+   ],
+   "stride": [
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "fact": null
+  },
+  "k_weight_ptr": {
+   "shape": [
+    256
+   ],
+   "stride": [
+    1
+   ],
+   "dtype": "torch.bfloat16",
+   "fact": null
+  },
+  "cos_sin_cache_ptr": {
+   "shape": [
+    262144,
+    64
+   ],
+   "stride": [
+    64,
+    1
+   ],
+   "dtype": "torch.float32",
+   "fact": null
+  },
+  "positions_ptr": {
+   "shape": [
+    3,
+    1792
+   ],
+   "stride": [
+    2048,
+    1
+   ],
+   "dtype": "torch.int64",
+   "fact": null
+  }
+ },
+ "recorded_verdict": "the check raised AttributeError: 'T' object has no attribute 'taint'",
+ "engine": "SGLang 0.5.18"
+}

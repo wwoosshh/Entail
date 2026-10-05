@@ -1,0 +1,43 @@
+{
+ "kernel": "sglang.kernels.ops.speculative.eagle.fill_accept_out_cache_loc",
+ "grid": [
+  4
+ ],
+ "scalars": {},
+ "tensors": {
+  "accept_index": {
+   "shape": [
+    1,
+    4
+   ],
+   "stride": [
+    4,
+    1
+   ],
+   "dtype": "torch.int32",
+   "fact": null
+  },
+  "out_cache_loc": {
+   "shape": [
+    4
+   ],
+   "stride": [
+    1
+   ],
+   "dtype": "torch.int64",
+   "fact": null
+  },
+  "accept_out_cache_loc": {
+   "shape": [
+    4
+   ],
+   "stride": [
+    1
+   ],
+   "dtype": "torch.int64",
+   "fact": null
+  }
+ },
+ "recorded_verdict": "the check raised ValueError: substring not found",
+ "engine": "SGLang 0.5.18"
+}

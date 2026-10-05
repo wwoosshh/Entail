@@ -84,7 +84,8 @@ class Func:
     body: List[Op]
 
 
-_LOC = re.compile(r'\s*loc\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)')
+# a location annotation: `loc(` as a word of its own, not the end of a name (a kernel called `..._loc(`)
+_LOC = re.compile(r'\s*(?<![\w@%$.])loc\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)')
 _VAL = re.compile(r'%[A-Za-z0-9_.$#-]+')
 
 
@@ -834,6 +835,9 @@ class _Run:
                 r = self._typed(self._operands(n, [x], ws)[0], wd)
         elif n == "tt.addptr":
             p, o = args
+            if not isinstance(p, Ptr):
+                raise Unmodelled(f"an address computed from a pointer the checker does not follow "
+                                 f"({p.why if isinstance(p, T) else type(p).__name__})")
             if isinstance(o, T) or p.taint is not None:
                 r = Ptr(p.arg, p.off, taint=(o.why if isinstance(o, T) else p.taint))
             else:
