@@ -64,10 +64,19 @@ def main():
     with LT.load_window():
         model = Model()
         load(model)
+        extra = torch.empty(32)                       # a tensor the loader made and kept, not a parameter
+    versions = {n: p._version for n, p in model.named_parameters()}
     found = {name: (n, total) for name, n, total in LT.loaded(model)}
     assert found == {"block.proj": (32, 64), "block.bias": (8, 8)}, found
     print("ok after loading: the bias nothing loaded (8 of 8) and the half-loaded matrix (32 of 64) hold elements "
           "nothing wrote; loaded, initialized and made-with-a-value parameters do not:", found)
+    assert (model.block.bias == 0).all() and (model.block.proj[4:] == 0).all(), (model.block.bias, model.block.proj)
+    assert not (model.block.proj[:4] == 0).all() and not torch.isnan(model.block.proj).any()
+    assert (extra == 0).all() and LT.unwritten(extra) == 0
+    assert versions == {n: p._version for n, p in model.named_parameters()}, "zero bits are not a write after loading"
+    assert KC.fact_of(model.block.bias).get("unwritten") == 8, "the report stays"
+    print("ok then the elements nothing wrote are zero bits (not the mark), in the parameters and in the other "
+          "tensors the window marked; torch's version counters do not move; the parameters' facts keep what was found")
 
     with LT.load_window():
         m2 = Model()
@@ -82,6 +91,11 @@ def main():
         f8[:8].copy_(torch.zeros(8, 16).to(torch.float8_e4m3fn))
         assert LT.unwritten(f8) == 128
         print("ok FP8: 256 unwritten, 128 after half of it is written")
+        assert LT.zero(f8) == 128 and LT.unwritten(f8) == 0 and (f8.to(torch.float32) == 0).all()
+    assert LT.zero(m2.block.packed) == 128 and LT.unwritten(m2.block.packed) == 0
+    assert (m2.block.packed[:2] == 0).all() and (m2.block.packed[2:] == 0).all()
+    assert LT.zero(m2.block.codes) == 256 and LT.unwritten(m2.block.codes) == 0
+    print("ok zero bits for integer runs and FP8 elements as unwritten counts them")
 
     with LT.load_window():
         with LT.load_window():

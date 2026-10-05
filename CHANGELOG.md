@@ -75,6 +75,17 @@ ships no engine (#59).
   - Qwen3.5 on vLLM 0.19.0 (split-wise pairs over 64 of 256 features): no pairing is reported broken.
   - A kernel that pairs as declared is still not proven: the check decides whether every output element is stored
     for 1-D and 2-D outputs only, and the pairs are a 4-D view.
+- **`ENTAIL=types`: memory nothing wrote is set to zero once it is found (#69).**
+  - Until now the lifetime check left its mark (a NaN) in the elements nothing wrote while a model loaded. A run that
+    read them read NaN, even where that memory would have held zeros without entail, and zero is often the right
+    value.
+  - On vLLM 0.19.0, GLM-ASR's fused qkv bias has an unwritten k part. entail reported it in all 32 encoder layers,
+    and the transcript became NUL tokens.
+  - Now, once the parameters are read for the mark, every element that still holds it is set to zero bits, what a
+    fresh device allocation holds. This covers the parameters, the module buffers and the other tensors the window
+    marked that are still alive. The write goes through `.data`, so torch's version counters do not move.
+  - The reports stay. In the same GLM-ASR run, all 32 are reported, and the transcript is the one without entail
+    (the same token ids).
 
 ## 2.3.0
 
