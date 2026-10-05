@@ -226,6 +226,24 @@ _BINARY = {"operator.mul": "a multiplication", "operator.add": "an addition", "o
 _FRESH = {"torch.empty", "torch.zeros", "torch.ones", "torch.full", "torch.empty_like", "torch.zeros_like",
           "torch.ones_like", "torch.full_like", "torch.arange", "torch.tensor"}
 _DTYPES_HALF = ("torch.bfloat16", "torch.float16")
+# the weight types Marlin is told by its b_q_type argument (vLLM's ScalarType ids, as vLLM 0.30 makes them; read from
+# vllm.scalar_type when it is there): (name, bits, floating)
+_MARLIN_TYPES = {1125899907892224: ("uint4b8", 4, False), 1125899923621888: ("uint8b128", 8, False),
+                 1125899906843648: ("uint4", 4, False), 1125899906909952: ("int8", 8, False),
+                 1125899906844672: ("uint8", 8, False), 2814749767172868: ("float8_e4m3fn", 8, True),
+                 562949953487106: ("float4_e2m1f", 4, True)}
+
+
+def _marlin_type(type_id):
+    """(name, bits, floating) of the weight type a Marlin call is told, or None."""
+    if not isinstance(type_id, int):
+        return None
+    try:
+        from vllm.scalar_type import ScalarType      # the engine's own reading of its ids
+        t = ScalarType.from_id(type_id)
+        return (str(t), int(t.size_bits), bool(t.is_floating_point()))
+    except Exception:  # noqa: BLE001 - no vLLM here, or an id it does not know: the table above
+        return _MARLIN_TYPES.get(type_id)
 
 
 class _Walk:
@@ -458,25 +476,41 @@ class _Walk:
             return kwargs[key] if key in kwargs else (args[i] if i < len(args) else None)
 
         a, b, bias, s = at(0, "a"), at(2, "b_q_weight"), at(3, "b_bias"), at(4, "b_scales")
+        a_scales, wtype = at(5, "a_scales"), _marlin_type(at(9, "b_q_type_id"))
         size_m, size_n, size_k = at(10, "size_m"), at(11, "size_n"), at(12, "size_k")
         how = "the Marlin matmul"
         missing = [nm for nm, t in (("a", a), ("b_q_weight", b), ("b_scales", s)) if not isinstance(t, GV)]
         if missing:
             self.site(node, name, "unproven", f"arguments that are not tensors: {missing}")
             return None
-        # what the kernel reads: the activation in a half format, the weight packed by 8-bit Marlin (16 rows of
-        # hidden per int32 row, 4 features per int32 column), its scales in the activation's format
+        if wtype is None:
+            self.site(node, name, "unproven", f"the weight type it is told ({at(9, 'b_q_type_id')}) is not one "
+                                              f"this check knows")
+            return None
+        # what the kernel reads, by the weight type it is told: the activation in a half format (or quantized, with
+        # its own scales), the weight packed by Marlin (16 rows of hidden per int32 row, 32 / bits values per int32
+        # word along the features), its scales in the activation's format - for 4-bit floating weights in the
+        # formats of their group scales (E4M3 for NVFP4, E8M0 for MXFP4)
         self.checks += 1
-        if a.dtype not in _DTYPES_HALF:
+        wname, bits, floating = wtype
+        if a.dtype not in _DTYPES_HALF and not (isinstance(a_scales, GV) and
+                                                a.dtype in ("torch.float8_e4m3fn", "torch.int8")):
             raise Violation(f"{how} reads the activation as a half-precision value but it is {a.dtype}")
         if b.dtype != "torch.int32":
             raise Violation(f"{how} reads the packed weight as int32 words but it is {b.dtype}")
-        if s.dtype != a.dtype:
+        if floating and bits == 4:
+            if s.dtype not in ("torch.float8_e4m3fn", "torch.float8_e8m0fnu"):
+                raise Violation(f"{how} reads {wname} weights with group scales in E4M3 (NVFP4) or E8M0 (MXFP4) "
+                                f"but they are {s.dtype}")
+        elif a.dtype in _DTYPES_HALF and s.dtype != a.dtype:
             raise Violation(f"{how} reads the scales in the activation's format ({a.dtype}) but they are {s.dtype}")
-        if isinstance(bias, GV) and bias.dtype != a.dtype:
+        elif a.dtype not in _DTYPES_HALF and s.dtype not in _DTYPES_HALF:
+            raise Violation(f"{how} reads the scales in a half format (the format of its output) but they are "
+                            f"{s.dtype}")
+        if isinstance(bias, GV) and a.dtype in _DTYPES_HALF and bias.dtype != a.dtype:
             raise Violation(f"{how} reads the bias in the activation's format ({a.dtype}) but it is {bias.dtype}")
         pk = b.shape[0] * 16 if isinstance(b.shape[0], int) else None
-        pn = b.shape[1] // 4 if len(b.shape) > 1 and isinstance(b.shape[1], int) else None
+        pn = b.shape[1] * (32 // bits) // 16 if len(b.shape) > 1 and isinstance(b.shape[1], int) else None
         if isinstance(size_k, int) and pk is not None and size_k != pk:
             raise Violation(f"{how} is told size_k = {size_k} but the packed weight holds {pk} rows of hidden")
         if isinstance(size_n, int) and pn is not None and size_n != pn:

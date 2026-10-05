@@ -50,8 +50,9 @@ ALLOWED = {"load": None, "kv_contract": None, "epochs": None, "identity_contract
            "definitions": None,
            # the one rule at every kernel launch (M19 L6): meanings attached where values are made, relations declared
            "kernel_check": {"attach", "fact_of", "issue_pair", "set_life"}, "kernel_types": {"relate", "merge"},
-           # memory nothing wrote (M19 L7): the window a model is made and loaded in, and its parameters read after
-           "lifetime": {"load_window", "loaded"},
+           # memory nothing wrote (M19 L7): the window a model is made and loaded in, and its parameters read after;
+           # the window the engine assembles its model in, where reads are settled at its end (M22.2)
+           "lifetime": {"load_window", "loaded", "assembly"},
            # the guarantee profile (M19 L5.4a): its producers' issues, its gate and its graph hooks
            "guarantee": None,
            # its integrity experiment between the operations (M19 L5.4e): the live ranges a Triton launch is checked

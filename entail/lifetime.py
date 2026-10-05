@@ -14,6 +14,11 @@ values it has meanings for). This module holds the first for the values a model 
                   once; reported (broken) when they are read: when the module holding the parameter runs (a forward
                   pre-hook, inert inside compiled code), when a Triton launch is handed the tensor, or when a
                   compiled graph takes it as an input.
+  assembly()      while an engine assembles its model (its own load_model: the model and any draft model made,
+                  loaded and wired together; adapters/loaders.py), such a read is held. When the assembly ends it is
+                  reported if the model still holds the parameter, and withdrawn if the engine replaced it: the read
+                  was a trial call whose result reached nothing the model keeps (vLLM 0.22's drafter probes its
+                  embedding, then shares the target's).
 Nothing is repaired: there is no value to repair to. The mark replaces whatever the memory happened to hold, so a
 program that reads memory nothing wrote reads the mark instead of leftovers.
 Cost: one fill per allocation made in the window, one pass over the parameters when it closes (both at memory
@@ -24,9 +29,11 @@ import os
 import sys
 import threading
 import time
+import weakref
 
 _LOCK = threading.RLock()
-_STATE = {"depth": 0, "mode": None, "marked": 0, "marked_bytes": 0, "opened": None}
+_STATE = {"depth": 0, "mode": None, "marked": 0, "marked_bytes": 0, "opened": None, "assembling": 0}
+_PENDING = []          # reads held while an engine assembles its model: settled when the assembly ends
 _STATS = {}
 _SPECS = {}
 CHUNK = 1 << 26        # elements compared at once when a parameter is read for the mark (bounds the temporary)
@@ -215,8 +222,9 @@ def loaded(model):
             _count("fact_failed")
         for mname, module, pname in where:
             readers.setdefault(id(module), (module, mname, []))[2].append((pname, n, p.numel()))
+    root = weakref.ref(model)
     for module, mname, items in readers.values():
-        _hook(module, mname, items)
+        _hook(module, mname, items, root)
     _count("windows")
     _count("parameters", len(owners))
     _count("unwritten_parameters", len(found))
@@ -233,10 +241,55 @@ def loaded(model):
     return found
 
 
-def _hook(module, mname, items):
-    import torch
-
+def _report(mname, pname, n, total, note=""):
     from . import kernel_check, kernel_types
+
+    why = (f"{mname or 'the model'} runs with its parameter {pname}, but {n} of its {total} elements were "
+           f"never written while the model was loaded (no checkpoint tensor, initializer or processing gave "
+           f"them a value){note}")
+    _count("unwritten_read")
+    kernel_check._write({"kind": "types_life", "reader": mname, "parameter": pname, "verdict": "violation",
+                         "why": why})
+    kernel_check._broken(mname or "model", kernel_types.Verdict("violation", why), where=mname or "model")
+
+
+@contextlib.contextmanager
+def assembly():
+    """While open (nested ones count as one), reads of parameters nothing wrote are held; when the outermost closes,
+    each is reported if its model still holds the parameter, withdrawn if not."""
+    with _LOCK:
+        _STATE["assembling"] += 1
+    try:
+        yield
+    finally:
+        with _LOCK:
+            _STATE["assembling"] -= 1
+            last = _STATE["assembling"] == 0
+        if last:
+            _settle()
+
+
+def _settle():
+    from . import kernel_check
+
+    with _LOCK:
+        held = list(_PENDING)
+        _PENDING.clear()
+    for p_ref, root_ref, mname, pname, n, total in held:
+        p, root = p_ref(), root_ref()
+        if p is not None and root is not None and any(q is p for q in root.parameters()):
+            _report(mname, pname, n, total, "; it was read while the engine assembled the model, which still "
+                                            "holds it")
+            continue
+        _count("unwritten_read_withdrawn")
+        kernel_check._write({"kind": "types_life", "reader": mname, "parameter": pname, "verdict": "withdrawn",
+                             "why": f"{mname or 'the model'} read its parameter {pname} ({n} of {total} elements "
+                                    f"never written) while the engine assembled the model, and the engine then "
+                                    f"replaced it: the model does not hold it, so the read reached nothing it keeps"})
+
+
+def _hook(module, mname, items, root=None):
+    import torch
 
     compiling = torch.compiler.is_compiling
     state = {}
@@ -248,13 +301,14 @@ def _hook(module, mname, items):
         if h is not None:
             h.remove()
         for pname, n, total in items:
-            why = (f"{mname or 'the model'} runs with its parameter {pname}, but {n} of its {total} elements were "
-                   f"never written while the model was loaded (no checkpoint tensor, initializer or processing gave "
-                   f"them a value)")
-            _count("unwritten_read")
-            kernel_check._write({"kind": "types_life", "reader": mname, "parameter": pname, "verdict": "violation",
-                                 "why": why})
-            kernel_check._broken(mname or "model", kernel_types.Verdict("violation", why), where=mname or "model")
+            if _STATE["assembling"] and root is not None:
+                p = getattr(mod, "_parameters", {}).get(pname)
+                if p is not None:
+                    with _LOCK:
+                        _PENDING.append((weakref.ref(p), root, mname, pname, n, total))
+                    _count("unwritten_read_held")
+                    continue
+            _report(mname, pname, n, total)
         return None
 
     state["handle"] = module.register_forward_pre_hook(pre)

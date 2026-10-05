@@ -3,7 +3,9 @@ ENTAIL=types; entail/lifetime.py holds the check). Nothing here is written for o
 
   hooks        load_model of every model loader class the data file names (data/loaders.json: module -> base
                class; every subclass defined when the module has been imported is included): the model is
-               constructed, its weights loaded and processed inside it, and it returns the model
+               constructed, its weights loaded and processed inside it, and it returns the model. And the engine's
+               own assembly of its model (data/loaders.json "assembly": module -> Class.method), where a draft model
+               is loaded and wired to the target: reads of parameters nothing wrote are settled when it ends
   read_choice  the data file's rows
   handles      none: the window marks allocations and, when the outermost load_model returns, the model's
                parameters are read for elements nothing wrote; nothing is changed or decided here
@@ -38,7 +40,8 @@ def hooks():
 
 
 def read_choice(kind, obj=None):
-    """The data file's rows: kind is "loaders" (module -> the base class of its model loaders)."""
+    """The data file's rows: kind is "loaders" (module -> the base class of its model loaders) or "assembly"
+    (module -> the engine's Class.method that assembles its model)."""
     return _table().get(kind)
 
 
@@ -92,6 +95,31 @@ def install():
             _WRAPPED[(cls, "load_model")] = orig
             n += 1
     _count("installed")
+    return n
+
+
+def _make_assembly(orig):
+    @functools.wraps(orig)
+    def assemble(*a, **k):
+        with lifetime.assembly():
+            return orig(*a, **k)
+    assemble.__entail_types__ = True
+    return assemble
+
+
+def install_assembly():
+    n = 0
+    for modname, path in (read_choice("assembly") or {}).items():
+        mod = sys.modules.get(modname)
+        cls_name, _, meth = path.partition(".")
+        cls = getattr(mod, cls_name, None) if mod is not None else None
+        orig = cls.__dict__.get(meth) if cls is not None else None
+        if orig is None or getattr(orig, "__entail_types__", False) or (cls, meth) in _WRAPPED:
+            continue
+        setattr(cls, meth, _make_assembly(orig))
+        _WRAPPED[(cls, meth)] = orig
+        n += 1
+    _count("assembly_installed")
     return n
 
 

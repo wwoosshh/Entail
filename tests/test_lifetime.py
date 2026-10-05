@@ -113,6 +113,31 @@ def main():
     finally:
         os.environ.pop("ENTAIL_ON_BROKEN", None)
 
+    # a read while the engine assembles its model (M22.2): a trial call on a part the engine then replaces is
+    # withdrawn, not reported; a part the model still holds is reported when the assembly ends
+    reported = KC.stats().get("broken_reported", 0)
+    withdrawn = LT.stats().get("unwritten_read_withdrawn", 0)
+    with LT.assembly():
+        with LT.load_window():
+            m4 = Model()
+            load(m4)
+        LT.loaded(m4)
+        m4.block(x)                                   # the trial call: its result is dropped
+        assert KC.stats().get("broken_reported", 0) == reported, "held while the model is assembled"
+        m4.block = Block()                            # the engine wires another part in its place
+    assert KC.stats().get("broken_reported", 0) == reported, "a replaced part's trial read is not reported"
+    assert LT.stats().get("unwritten_read_withdrawn", 0) == withdrawn + 2, LT.stats()
+    print("ok a trial read while the engine assembles the model, of a part it then replaces: withdrawn")
+
+    with LT.assembly():
+        with LT.load_window():
+            m5 = Model()
+            load(m5)
+        LT.loaded(m5)
+        m5.block(x)
+    assert KC.stats().get("broken_reported", 0) == reported + 2, KC.stats()
+    print("ok the same read of a part the model keeps: reported when the assembly ends")
+
     # the reader: a Triton launch handed the tensor
     f = KC.fact_of(model.block.bias)
     assert f is not None and f.get("unwritten") == 8, f

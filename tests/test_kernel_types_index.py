@@ -91,6 +91,39 @@ def main():
     assert v.verdict == "violation" and "kv_slot" in v.why and "kv_block" in v.why, v
     print("ok a KV slot stored where KV block numbers belong:", v.why[:110])
 
+    # axes of size 1 (ROADMAP M22.2): vLLM 0.30's drafter with one request reads next_prefill_tokens [lookahead 1,
+    # request_state 1], strides (1, 1), at lookahead * stride + req_state_idx. Both axes have the stride 1, so the
+    # stride cannot say which axis the request slot is on; the meaning names one. The recorded launch was a false
+    # alarm in 2.3.0 (the slot put on 'lookahead').
+    v = drafter_prepare_prefill()
+    assert v.verdict == "proven", v
+    print(f"ok the drafter's prepare-prefill with one request: proven ({v.checks} pairings); a request slot read "
+          f"along the size-1 axis its meaning names")
+    v = drafter_prepare_prefill(rename={"next_prefill_tokens_ptr": ["lookahead", "batch_request"]})
+    assert v.verdict == "violation" and "request_state" in v.why, v
+    print("ok the same tensor whose axes name no request slot: violation:", v.why[:110])
+
+
+def drafter_prepare_prefill(rename=None):
+    import json
+
+    from entail import kernel_check, kernel_ir
+
+    with open(os.path.join(DATA, "vllm_speculator_prepare_prefill_inputs.json"), encoding="utf-8") as f:
+        rec = json.load(f)
+    text = ttir("vllm_speculator_prepare_prefill_inputs")
+    written = kernel_ir.written_args(text)
+    meanings = {}
+    for k, t in rec["tensors"].items():
+        fact = dict(t["fact"]) if t["fact"] is not None else None
+        if fact is not None and rename and k in rename:
+            fact["names"] = rename[k]
+        m = kernel_check._meaning_from(t["shape"], t["stride"], fact)
+        if written is not None and k in written:
+            m.kind = "output"
+        meanings[k] = m
+    return check_launch(text, meanings, rec["scalars"], tuple(rec["grid"]))
+
 
 if __name__ == "__main__":
     main()

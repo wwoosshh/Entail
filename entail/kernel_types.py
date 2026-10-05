@@ -954,6 +954,14 @@ class _Typed(KI._Run):
                         if abs(c) == st:                 # a term subtracted (end - count) addresses the same axis
                             dim = i
                             break
+                    if basis is not None and (dim is None or dim >= len(m.axes) or m.axes[dim].name != basis):
+                        # an axis of size 1 says nothing by its stride (any index along it is 0), so it can share
+                        # a stride with another axis: a number whose meaning names such an axis, with that stride,
+                        # is read along it - the address is the same either way
+                        for i, (s1, n1) in enumerate(zip(m.stride, m.shape)):
+                            if int(n1) == 1 and int(s1) == abs(c) and i < len(m.axes) and m.axes[i].name == basis:
+                                dim = i
+                                break
                     if dim is not None and kn is None and c > 0:
                         pair = self._merged_pair(m, dim, basis)
                         if pair is not None:
@@ -965,7 +973,9 @@ class _Typed(KI._Run):
                             merged_parts[inner] = ("%", k, n_in)
                             continue
                     if dim is None and not dims and m.shape:
-                        dim = 0
+                        # every axis has size 1: the axis the number's meaning names, if there is one
+                        named = [i for i, ax in enumerate(m.axes) if basis is not None and ax.name == basis]
+                        dim = named[0] if named else 0
                 if dim is None:
                     if not isinstance(c, str) and dims and not any(abs(c) % st == 0 for st, n, i in dims):
                         raise _Fail("violation", f"{what} addresses {arg} between its elements: a value read at run "
@@ -1592,7 +1602,8 @@ class _Typed(KI._Run):
             self.stores.setdefault(arg, []).append((lo[live], cnt[live], np.zeros(int(live.sum()), dtype=np.int64),
                                                     np.ones(int(live.sum()), dtype=np.int64)))
         elif len(shape) == 0:
-            x = np.broadcast_to(cs[0], (P,))
+            # a tensor of no axes (a 0-d tensor) has one element, at coordinate 0
+            x = np.broadcast_to(cs[0] if 0 in cs else np.zeros((1,), dtype=np.int64), (P,))
             self.stores.setdefault(arg, []).append((x[live], np.ones(int(live.sum()), dtype=np.int64),
                                                     np.zeros(int(live.sum()), dtype=np.int64),
                                                     np.ones(int(live.sum()), dtype=np.int64)))

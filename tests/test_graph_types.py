@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 from entail import graph_types as GT  # noqa: E402
 
 K, N, M = 2560, 128, 4
+FP8, FP4 = 2814749767172868, 562949953487106     # vLLM's ScalarType ids of float8_e4m3fn and float4_e2m1f
 
 
 def marlin_gemm(*a, **k):
@@ -32,7 +33,7 @@ rms_norm.__entail_op__ = "vllm_ir.rms_norm.default"
 
 
 def build(a_dtype=torch.bfloat16, s_dtype=None, size_k=K, size_n=N, a_transposed=False, scale_kind="scale",
-          packed_shape=None, with_norm=True):
+          packed_shape=None, with_norm=True, q_type=FP8):
     """A graph: a -> (rms_norm) -> marlin_gemm(a, w, s) -> silu -> * 2 -> output; facts on the three inputs."""
     g = fx.Graph()
     a = g.placeholder("a")
@@ -49,8 +50,8 @@ def build(a_dtype=torch.bfloat16, s_dtype=None, size_k=K, size_n=N, a_transposed
     if with_norm:
         x = g.call_function(rms_norm, (a, nw, 1e-6, None))
         x.meta["example_value"] = a_t.clone()
-    out = g.call_function(marlin_gemm, (x, None, w, None, s, None, None, None, None, 1, M, size_n, size_k, False,
-                                        True, False))
+    out = g.call_function(marlin_gemm, (x, None, w, None, s, None, None, None, None, q_type, M, size_n, size_k,
+                                        False, True, False))
     out.meta["example_value"] = torch.zeros((M, N), dtype=a_dtype)
     act = g.call_function(torch.nn.functional.silu, (out,))
     act.meta["example_value"] = out.meta["example_value"]
@@ -110,6 +111,23 @@ def main():
     v = check(packed_shape=(K // 16, N * 4 // 2))
     assert v["verdict"] == "violation" and "size_n" in v["violations"][0]["why"], v
     print("ok a packed weight holding half the features: violation:", v["violations"][0]["why"])
+
+    # the weight type the call is told decides the scales' format and the packing (M22.2: NVFP4 was a false alarm)
+    v = check(q_type=FP4, packed_shape=(K // 16, N * 2), s_dtype=torch.float8_e4m3fn)
+    assert v["verdict"] == "checked" and v["sites"]["_C.marlin_gemm"] == {"proven": 1}, v
+    print("ok NVFP4 weights (4 bits, 8 per int32 word) with E4M3 group scales: proven")
+    v = check(q_type=FP4, packed_shape=(K // 16, N * 2))
+    assert v["verdict"] == "violation" and "E4M3" in v["violations"][0]["why"], v
+    print("ok NVFP4 weights with group scales in the activation's format: violation:", v["violations"][0]["why"])
+    v = check(s_dtype=torch.float8_e4m3fn)
+    assert v["verdict"] == "violation" and "activation's format" in v["violations"][0]["why"], v
+    print("ok FP8 weights with E4M3 scales: violation:", v["violations"][0]["why"])
+    v = check(q_type=FP4, s_dtype=torch.float8_e4m3fn)
+    assert v["verdict"] == "violation" and "size_n" in v["violations"][0]["why"], v
+    print("ok NVFP4 weights packed as 8-bit ones (twice the words): violation:", v["violations"][0]["why"])
+    v = check(q_type=12345)
+    assert v["verdict"] == "checked" and v["sites"]["_C.marlin_gemm"] == {"unproven": 1}, v
+    print("ok a weight type the check does not know: unproven, not a violation")
 
     # elementwise pairing and the scale applied twice
     g = fx.Graph()

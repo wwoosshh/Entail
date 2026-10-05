@@ -184,6 +184,10 @@ TYPES_TARGETS = {
     # where a model is made and loaded: its parameters read for elements nothing wrote (M19 L7)
     "vllm.model_executor.model_loader": ["entail.adapters.loaders:install"],
     "sglang.srt.model_loader.loader": ["entail.adapters.loaders:install"],
+    # where the engine assembles its model (a draft model wired to the target): reads settled when it ends (M22.2)
+    "vllm.v1.worker.gpu_model_runner": ["entail.adapters.loaders:install_assembly"],
+    "vllm.v1.worker.gpu.model_runner": ["entail.adapters.loaders:install_assembly"],
+    "sglang.srt.model_executor.model_runner": ["entail.adapters.loaders:install_assembly"],
 }
 if os.environ.get("ENTAIL", "off") == "guarantee":
     TARGETS = dict(GUARANTEE_TARGETS)
