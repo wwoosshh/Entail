@@ -48,12 +48,17 @@ checked when the main work ran there. Where to install it for
 each tool - your scripts, vLLM behind Open WebUI, ComfyUI (git, portable, Desktop), text-generation-webui, vLLM in
 Docker - is in [INSTALL.md](https://github.com/wwoosshh/entail/blob/main/INSTALL.md).
 
-> **Status: 2.3.0, measured on one machine.** 2.3.0 adds to the experimental `ENTAIL=types` how long a value
-> lives: a loaded weight stays as it was loaded, a write into another live value's memory is reported, and memory
-> nothing wrote is reported where it is read (see
-> [Kernel calls](#kernel-calls-one-rule-for-every-launch-entailtypes-experimental)); the other modes are as in 2.2.0.
-> 2.2.0 added that opt-in checker for the GPU kernels an engine launches (one rule at every launch, meanings read
-> from what vLLM declares).
+> **Status: 2.4.0, measured on one machine.** 2.4.0 works on the experimental `ENTAIL=types` so that it can be left
+> on (see [Kernel calls](#kernel-calls-one-rule-for-every-launch-entailtypes-experimental)). 2.3.0's three false
+> alarms are fixed, and what it checked shows on `entail serve`'s Kernels node. A decided launch costs about 40 µs
+> instead of 52-58. SGLang is read the way vLLM is, and a rotary layer's own pairing is a meaning. Memory nothing
+> wrote is set to zero once it is found, so it no longer changes a run; the report stays. Measured on engine bugs
+> the project had never seen, it reported neither of the 2 this machine could reproduce before the kernel ran, and it
+> raised no false alarm in the measured runs. Image generators get the entrance checks only. The other modes are as
+> in 2.3.0.
+> 2.3.0 added how long a value lives to `ENTAIL=types`: a loaded weight stays as it was loaded, a write into another
+> live value's memory is reported, and memory nothing wrote is reported where it is read. 2.2.0 added that opt-in
+> checker for the GPU kernels an engine launches (one rule at every launch, meanings read from what vLLM declares).
 > 2.1.4 fixes what the field test of 2.1.3 found (a seeded run with vLLM
 > inside a trainer samples as without entail; SGLang's KV check no longer flags a request others joined; a serving
 > app's own chat template is held to the prompt it renders; an engine's or app's own choices are named as theirs; a
@@ -478,9 +483,11 @@ for all of them: values computed together pair only where their meanings agree, 
 once from everything its meaning covers. A Triton kernel is read from its own IR (TTIR) once per launch
 configuration, and the verdict is kept in `entail_logs/types-cache.jsonl` for later processes; vLLM's compiled graph
 is checked once, when it is compiled; a C++ kernel is held to what its arguments mean (vLLM's Marlin matmul so far -
-what happens inside a C++ kernel is not read). The meanings come from where the values are made, from what vLLM
-already declares: its weight and scale parameter classes and their attributes, a MoE scale's granularity, the
-activation quantizers, the router, the worker's index tables. Nothing in it is written for one model or one bug. A
+what happens inside a C++ kernel is not read). The meanings come from where the values are made, from what the
+engine already declares, read through one table per engine (vLLM 0.30, SGLang 0.5.20): its weight and scale
+parameter classes and their attributes, a MoE scale's granularity, the activation quantizers, the router, the
+worker's index tables, and, while a rotary layer runs, how it pairs a head's features. Nothing in it is written for
+one model or one bug. A
 tensor's layout (its bounds, where its elements are) is checked even when nothing names its axes. A launch that
 breaks the rule is reported as `broken` before the kernel runs, and the run goes on; with `ENTAIL_ON_BROKEN=stop`
 the launch is refused instead.
@@ -489,12 +496,16 @@ the launch is refused instead.
 ENTAIL=types python serve.py
 ```
 
-Measured with vLLM 0.30.0 and Qwen3-4B-FP8 on an RTX 4070 Ti: on the Triton FP8 path 229 of 230 launch
-configurations are proven and none is broken; on the default path (torch.compile, Marlin) 73 of 74 are, and the
-compiled graph has no violation; the generated text is the same as without entail. Generation takes 1.067x (Triton
-FP8, CUDA graphs) and 1.028x (default) the time it takes without it, the median of three alternated rotations,
-measured again on the released 2.2.0 code (the first measurement, 1.047x and 1.030x, was made before its last
-changes); with `enforce_eager`, where every launch passes through Python, 1.53x.
+Measured with Qwen3-4B-FP8 on an RTX 4070 Ti, the text generated is the same as without entail:
+- vLLM 0.30.0: on the Triton FP8 path 229 of 230 launch configurations are proven and none is broken; on the
+  default path (torch.compile, Marlin) 73 of 74 are, and the compiled graph has no violation.
+- SGLang 0.5.20: the block-FP8 matmul's 176 launch configurations are all proven, and none is broken.
+
+Generation takes 1.060x (Triton FP8, CUDA graphs) and 1.035x (default) the time it takes without it: fresh
+processes off, on and off, the median of three rotations. With `enforce_eager`, where every launch passes through
+Python, it takes 1.39x (one rotation). This was measured before SGLang's reading, the rotary pairing, the zero
+restore and the checker fixes were added. Those add work only while a model loads, in SGLang, or inside a rotary
+layer when it runs without CUDA graphs.
 
 On real bugs: of the 24 single-GPU low-level bugs the research track collected, 8 were reproduced on this machine
 and run with nothing given a meaning by hand. Of the 6 the rule was not developed on, it caught 1 before the kernel
@@ -502,6 +513,15 @@ ran (sglang#21843: `fused_gdn_gating` reads a strided tensor between its element
 the vocabulary has no word for yet, a linear-attention kernel's axis order, a prefix-cache key, a Python-only path,
 the inside of a C++ kernel. In one of those runs it found a different, real out-of-bounds read (vLLM 0.19's MRoPE
 kernel reads `cos` past its rows, fixed upstream in vllm#49906). It raised no false alarm in these runs.
+
+The rotary pairing now has a word. With a rotary layer's own pairing read, vLLM 0.22.0's MRoPE kernel with GLM-OCR
+(vllm#42016) is reported before it runs, 4 of 4 launch configurations, and the fixed vLLM 0.30.0 is not reported.
+The research track had already seen that bug, so this is not a detection rate.
+
+Bugs the project had never seen were measured with the code frozen (ROADMAP M22.5). Of 150 fix pull requests that
+touch kernel call sites, 18 were bugs of this class, and 2 of those could be reproduced on this machine. entail
+reported neither. Both lived where no launch shows them: in what a CUDA graph replays, and in a state the engine's
+Python did not update.
 
 Since 2.3.0 the same mode also checks how long a value lives - the memory a reader reads must hold the value
 its maker wrote there. A loaded weight is a constant (a Triton launch that writes it, or a read after something
@@ -513,6 +533,11 @@ SGLang 0.5.20 answers `!!!!` to everything and logs nothing) it reported the 130
 SGLang's own warm-up ran the vision encoder; on intact checkpoints it reported nothing and the answers were the same.
 With these checks, generation takes 1.076x (Triton FP8) and 1.037x (default) the time without entail, measured the
 same day as the 1.067x and 1.028x above; reading the parameters for the mark adds 0.1-0.5 s to loading.
+
+Since 2.4.0, once the parameters are read for the mark, the elements that still hold it are set to zero bits, what
+fresh memory holds. The mark then changes nothing a run computes, and the reports stay. On vLLM 0.19.0, GLM-ASR's
+unwritten k bias (vllm#40160) is reported in all 32 encoder layers, and the transcript is the one without entail;
+before, the mark turned it into NUL tokens.
 
 ## How it was measured
 
@@ -602,9 +627,17 @@ For 1.0 every measurement of the development milestones was run again on the fin
 
 ## Known gaps
 
-- **`ENTAIL=types` (experimental)** reads what vLLM 0.30 declares; on another engine (SGLang) only a tensor's layout
-  is checked. It does not yet read a rotary embedding's pairing, the inside of a C++ kernel, or values that go through
-  Python or the CPU. With `enforce_eager` every launch passes through Python, and generation takes 1.5x the time.
+- **`ENTAIL=types` (experimental)** reads what vLLM 0.30 and SGLang 0.5.20 declare; on other engines only a
+  tensor's layout is checked. It does not read:
+  - the inside of a C++ kernel;
+  - values that go through Python or the CPU;
+  - what a CUDA graph replays;
+  - which step a stored state belongs to.
+
+  A kernel that pairs a rotary layer's features as declared is not proven yet: only 1-D and 2-D outputs are decided,
+  and `tt.split` is not read. Image generators (diffusers, ComfyUI) are not reached at all: their kernels are C++ and
+  nothing gives their values a meaning, so they get the entrance checks only. With `enforce_eager` every launch
+  passes through Python, and generation takes about 1.4x the time.
   Its lifetime checks follow the writes of Triton launches and of torch's in-place operations, not writes inside a
   C++ kernel or a CUDA graph replay; memory nothing wrote is found for parameters, at load, not in a kernel's output
   at run time.
@@ -630,6 +663,10 @@ For 1.0 every measurement of the development milestones was run again on the fin
   adapter's module paths, a C++ kernel's input scale (Marlin), a GGUF tokenizer's declared type and cross-attention
   metadata captured in a CUDA graph. A multimodal model's vision tower is not compared for its rotary pairing (its
   reference pairs on its own terms); only the language model is.
+- **Unseen bugs at kernel call sites.** The kernel call-site checks were measured the same way, with the code frozen at
+  `fecb80d` (ROADMAP M22.5). Of 150 fix pull requests that touch kernel call sites, 18 were in class and 2 could be
+  reproduced on this machine. Both were missed, by `ENTAIL=types` and by `ENTAIL=load`, and no false alarm was
+  raised. Most of the 18 need several GPUs, ROCm, Intel XPU, a newer GPU or a model of 30B or more.
 - **Where the comparisons do not reach:** on vLLM's default path (torch.compile) custom ops are compiled and not
   compared with their definitions (the comparison runs in eager mode), and kernels called from C++ (Marlin) are not
   reached at all. SGLang's start-up path check runs only with `ENTAIL_PATHS=1`.

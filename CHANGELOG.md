@@ -4,11 +4,20 @@ Version numbers (written down with 2.0.1): the first number changes when the des
 for a release with a purpose - new features or a large scope of work - that leaves the structure as it is; the third
 for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.md](RELEASING.md) has the rule.
 
-## Unreleased
+## 2.4.0
 
-Layer B (`entail.frontend`, experimental) gains the execution side's meanings. Nothing changes for code that does not
-use `entail.frontend`. The design's structure stays as it is: entail is a library installed into existing engines and
-ships no engine (#59).
+Released 2026-10-05. The experimental kernel call-site checks (`ENTAIL=types`) can now be left on:
+- 2.3.0's false alarms are fixed;
+- what they checked shows on the platform;
+- a decided launch costs less;
+- SGLang is read the way vLLM is;
+- a rotary layer's pairing is a meaning;
+- memory nothing wrote no longer changes a run.
+
+They were measured on engine bugs the project had never seen. Of the 2 that one GPU could reproduce, they reported
+neither before the kernel ran, and raised no false alarm. Layer B (`entail.frontend`, experimental) gains the
+execution side's meanings. Nothing changes with `ENTAIL` unset, `load` or `debug`. The design's structure stays as it
+is: entail is a library installed into existing engines and ships no engine (#59).
 
 - **Layer B: the execution side's meanings as types (#55).** Vocabulary v13 adds `Index` (what an integer numbers:
   a slot, a block or a row, and in which pool, table or batch) and `Count` (what a number of tokens counts: known,
