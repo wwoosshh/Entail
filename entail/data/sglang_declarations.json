@@ -1,0 +1,93 @@
+{
+ "_": "SGLang 0.5.20: what SGLang itself declares about the values it makes, as the rule names it (read by entail/declarations.py through entail/adapters/sglang_declarations.py). The format is vLLM's (data/vllm_declarations.json): SGLang keeps vLLM's layer classes and weight parameter classes (output_dim, input_dim). functions: the FP8 path's activation quantizers return the quantized value and its scale made together (issue: per token, groups of group_size along hidden). per_token_group_quant_fp8 is SGLang's module-level name for sglang_per_token_group_quant_fp8 on CUDA; both are read.",
+ "layers": {
+  "VocabParallelEmbedding": {
+   "out": "token_id",
+   "in": null
+  },
+  "ParallelLMHead": {
+   "out": "token_id",
+   "in": null
+  },
+  "LinearBase": {
+   "out": "feature",
+   "in": "hidden"
+  },
+  "FusedMoE": {
+   "moe": [
+    "expert",
+    "feature",
+    "hidden"
+   ],
+   "moe_transposed": [
+    "expert",
+    "hidden",
+    "feature"
+   ]
+  }
+ },
+ "scales": {
+  "weight": [
+   "weight_scale",
+   "weight_scale_inv"
+  ],
+  "w13_weight": [
+   "w13_weight_scale",
+   "w13_weight_scale_inv"
+  ],
+  "w2_weight": [
+   "w2_weight_scale",
+   "w2_weight_scale_inv"
+  ]
+ },
+ "functions": {
+  "sglang.kernels.ops.quantization.fp8_kernel:per_token_group_quant_fp8": {
+   "issue": {
+    "value": 0,
+    "scale": 1,
+    "names": [
+     "token",
+     "hidden"
+    ],
+    "scale_names": [
+     "token",
+     "hidden"
+    ],
+    "scale_groups": [
+     1,
+     "group_size"
+    ]
+   }
+  },
+  "sglang.kernels.ops.quantization.fp8_kernel:sglang_per_token_group_quant_fp8": {
+   "issue": {
+    "value": 0,
+    "scale": 1,
+    "names": [
+     "token",
+     "hidden"
+    ],
+    "scale_names": [
+     "token",
+     "hidden"
+    ],
+    "scale_groups": [
+     1,
+     "group_size"
+    ]
+   }
+  }
+ },
+ "relations": [],
+ "merges": [],
+ "mutable": [
+  "k_scale",
+  "v_scale",
+  "q_scale",
+  "prob_scale",
+  "_k_scale",
+  "_v_scale",
+  "_q_scale",
+  "_prob_scale"
+ ]
+}

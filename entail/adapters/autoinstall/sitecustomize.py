@@ -183,7 +183,10 @@ TYPES_TARGETS = {
     "vllm.v1.worker.gpu.structured_outputs": ["entail.adapters.vllm_index_meanings:install_classes"],
     # where a model is made and loaded: its parameters read for elements nothing wrote (M19 L7)
     "vllm.model_executor.model_loader": ["entail.adapters.loaders:install"],
-    "sglang.srt.model_loader.loader": ["entail.adapters.loaders:install"],
+    "sglang.srt.model_loader.loader": ["entail.adapters.loaders:install",
+                                       "entail.adapters.sglang_declarations:install_loader"],
+    # what SGLang declares about its weights, scales and FP8 activations (M22.4)
+    "sglang.kernels.ops.quantization.fp8_kernel": ["entail.adapters.sglang_declarations:install_functions"],
     # where the engine assembles its model (a draft model wired to the target): reads settled when it ends (M22.2)
     "vllm.v1.worker.gpu_model_runner": ["entail.adapters.loaders:install_assembly"],
     "vllm.v1.worker.gpu.model_runner": ["entail.adapters.loaders:install_assembly"],

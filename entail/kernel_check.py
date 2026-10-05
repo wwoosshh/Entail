@@ -671,7 +671,8 @@ def _checker_version():
         # the rule, and what decides the meanings it is handed (the producers' code and their data files): a
         # verdict cached under other meanings is not one for these
         names = ["kernel_ir.py", "kernel_types.py", "kernel_check.py", "graph_types.py",
-                 os.path.join("adapters", "vllm_declarations.py"), os.path.join("adapters", "vllm_index_meanings.py")]
+                 "declarations.py", os.path.join("adapters", "vllm_declarations.py"),
+                 os.path.join("adapters", "sglang_declarations.py"), os.path.join("adapters", "vllm_index_meanings.py")]
         try:
             names += sorted(os.path.join("data", f) for f in os.listdir(os.path.join(here, "data"))
                             if f.endswith(".json"))
