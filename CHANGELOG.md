@@ -6,8 +6,9 @@ for bug fixes and small corrections of a few hundred lines or fewer. [RELEASING.
 
 ## Unreleased
 
-Work toward 3.0.0 (the design's structure changes: one vocabulary, two forms - the library attached to existing
-engines, and layer B for new code). Nothing changes for code that does not use `entail.frontend`.
+Layer B (`entail.frontend`, experimental) gains the execution side's meanings. Nothing changes for code that does not
+use `entail.frontend`. The design's structure stays as it is: entail is a library installed into existing engines and
+ships no engine (#59).
 
 - **Layer B: the execution side's meanings as types (#55).** Vocabulary v13 adds `Index` (what an integer numbers:
   a slot, a block or a row, and in which pool, table or batch) and `Count` (what a number of tokens counts: known,
@@ -19,14 +20,11 @@ engines, and layer B for new code). Nothing changes for code that does not use `
   `@returns`, `tensor()`), and a traced program's bind compares an index tensor with the meaning its input declares.
   One rule per meaning, none per bug; each rule has a program it passes and one it refuses
   (`tests/test_frontend_paged.py`).
-- **A small serving core written with those types (#57).** `entail.frontend.engine`: a key/value pool in blocks,
-  the block table, continuous batching with chunked prefill, a prefix cache keyed by a chain over the token ids, a
-  CPU tier that evicted blocks are offloaded to and loaded back from, and preemption, over Qwen3. The places where a
-  count becomes another are named functions (`written`, `sampled`, `to_schedule`, `loaded`). On Qwen3-0.6B (float32,
-  GPU) and on a tiny random Qwen3 (CPU tests) it gives every prompt the tokens transformers' greedy generation gives
-  it alone, batched, with prefix hits, with offload and loads back, and with preemption. Layer B gains
-  `Program.prepare` (bind weights and pools once), `pick` (each row's last token) and a per-row attention lowering that
-  reads the row plan to the host once per step.
+- **What a serving-core study added to layer B (#57, #59).** `Program.prepare` (bind weights and pools once), `pick`
+  (each row's last token) and a per-row attention lowering that reads the row plan to the host once per step. The
+  small serving core they were measured with (a key/value pool in blocks, continuous batching with chunked prefill, a
+  prefix cache, a CPU tier, preemption, over Qwen3; the tokens of transformers' greedy generation) was a test bed for
+  the types, not part of the package: it was taken out before any release and is kept with the research record.
 
 ## 2.3.0
 
