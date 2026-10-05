@@ -4,6 +4,9 @@ Meanings are attached where values are made and travel with them by their memory
   the activation quantizer     x_q [token, hidden] (a value), x_s [token, hidden / group] (its scale)
   the weight loader            w [feature, hidden] (a value), w_s [feature / block, hidden / block] (its scale)
   every proven launch          the output's axes, as the rule inferred them from what the kernel stored
+  a layer, while it runs       what it declares about the values it is handed (declarations.py: a rotary layer's
+                               query and key - tokens, heads, and in each head its rotation pairs), for the launches
+                               inside it, by shape and dtype
 At every Triton launch (JITFunction.run) the tensors handed to the kernel are looked up, the kernel's IR is read once
 per launch configuration (kernel, constexprs, shapes, strides, integer arguments, grid, and which arguments carry which
 meanings), and the verdict is recorded. The output of a proven launch gets the inferred meaning, so the next kernel
@@ -35,6 +38,7 @@ _VERDICTS = {}         # launch configuration key -> (Verdict, output argument n
 _STATS = {}
 _WRAPPED = {}
 _SERIAL = [0]
+_SCOPES = []           # the layers running now that declare what the values they are handed mean (scope_push)
 _LOCK = threading.RLock()
 _PATH = None
 
@@ -121,7 +125,48 @@ def _attach_at(t, key, ptr, shape, stride, dtype, names, kind="value", serial=0,
 
 def _sig_of(fact):
     """What of a meaning a launch's verdict depends on (the part of the launch key a meaning gives)."""
-    return (tuple(fact["names"]), fact["kind"], tuple(fact["groups"]), fact["pair"] != 0)
+    sig = (tuple(fact["names"]), fact["kind"], tuple(fact["groups"]), fact["pair"] != 0)
+    view = fact.get("view")
+    return sig if view is None else sig + ((tuple(view["shape"]), tuple(view["stride"])),)
+
+
+# --- a layer, while it runs: what it declares about the values it is handed (M22.4) ---------------------------------
+
+def scope_push(fact_for):
+    """A layer that declares what the values it is handed mean starts running. Until scope_pop, a tensor handed to a
+    kernel that has no meaning of its own gets fact_for(shape, stride, dtype) (None: the layer says nothing of it).
+    Eager execution shows a kernel's arguments, not the copies a layer makes of its values on the way (a contiguous
+    copy of a query), so a value is known by its shape and dtype; the meaning serves the launches inside the layer
+    and is not attached to the tensor."""
+    _SCOPES.append(fact_for)
+
+
+def scope_pop():
+    if _SCOPES:
+        _SCOPES.pop()
+
+
+def _scope_fact(shape, stride, dtype):
+    for fact_for in reversed(_SCOPES):
+        if fact_for is None:
+            continue
+        try:
+            f = fact_for(shape, stride, dtype)
+        except Exception:  # noqa: BLE001 - never the engine's problem
+            f = None
+        if f is not None:
+            return f
+    return None
+
+
+def scoped_fact(names, view_shape, view_stride):
+    """The fact a layer gives a value while it runs: axis names over a finer view of the value's memory (the same
+    elements, an axis split into named parts - a head's features into its rotation pairs)."""
+    n = len(names)
+    return {"names": list(names), "kind": "value", "serial": 0, "pair": 0, "groups": [1] * n, "sums": {},
+            "pending": [], "basis": None, "label": None, "packed": None, "life": "value", "born": None, "key": None,
+            "pointers": None, "view": {"shape": [int(x) for x in view_shape], "stride": [int(x) for x in view_stride]},
+            "scope": True}
 
 
 # --- lifetime (M19 L7): one memory holds one live value; a constant is not written after it is made ---------------
@@ -299,6 +344,9 @@ def _snapshot(t):
 
 
 def _meaning_from(shape, stride, f, kind=None):
+    view = f.get("view") if f is not None else None
+    if view is not None:               # the same memory as a finer view, whose axes the fact names
+        shape, stride = view["shape"], view["stride"]
     shape, stride = tuple(shape), tuple(stride)
     if f is None or len(f["names"]) != len(shape):
         return Meaning(tuple(Axis(None, n) for n in shape), shape, stride, kind or "value")
@@ -811,6 +859,10 @@ def _launch(fn, args, kwargs, grid):
         skey = (t.get_device(), ptr - t.storage_offset() * es)
         keys[k] = skey
         f, fs = _fact_sig_at(t, skey, ptr, shape, stride, dtype)
+        if f is None and _SCOPES:
+            f = _scope_fact(shape, stride, dtype)
+            if f is not None:
+                fs = _sig_of(f)
         facts[k] = f
         rows.append((k, dtype, shape, stride, fs))
     t0 = _tick("facts", t0)
@@ -851,7 +903,8 @@ def _launch(fn, args, kwargs, grid):
                 pointers = {}
                 # the serials in a cached configuration are those of the first launch; the rule only compares them
                 for k, t in tensors.items():
-                    m, f = meaning_of(t)
+                    f = facts[k]
+                    m = _meaning_from(t.shape, t.stride(), f)
                     if written is not None and k in written:
                         m.kind = "output"
                     meanings[k] = m
@@ -913,6 +966,8 @@ def _launch(fn, args, kwargs, grid):
             t = tensors.get(name)
             if t is None or not isinstance(inf, dict) or "coverage" in inf:
                 continue                     # a partly covered output keeps no meaning from this launch
+            if (facts.get(name) or {}).get("view") is not None:
+                continue                     # a layer said what it means (its axes are a view's, not the tensor's)
             names = [inf.get(f"axis_{i}") for i in range(t.dim())]
             names = [n if isinstance(n, str) else None for n in names]
             if not any(names):

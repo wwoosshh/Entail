@@ -13,6 +13,9 @@ the same for every engine. Nothing here is written for one model, one quantizati
                                  name, and by shape to what was declared (the same shape, or a transpose)
     .wrap_function(holder, name, spec)
                                  a function wrapped: its tensor arguments and what it returns get meanings
+    .rotations(model)            every rotary layer, while it runs, says what the query and key it is handed mean:
+                                 tokens, heads of head_size features, and in each head the rotation pairs its own
+                                 is_neox_style declares (kernel_check.scope_push)
 A tensor that already has a meaning (attached by a more specific producer) keeps it.
 
 Table (keys): layers (a layer kind - a class name in a module's MRO - -> the names of a weight's output and input
@@ -21,7 +24,9 @@ axes; a MoE layer's [expert, out, in] layout), scales (a value parameter -> its 
 arguments; returns: per returned tensor [axes, basis], {"like": arg}, {"scale_of": index}; issue: a returned value
 and its scale made together - {"value": i, "scale": j, "names": [...], "scale_names": [...], "scale_groups": [n or
 an argument's name, ...]}), relations and merges (for the rule), mutable (parameters the engine updates in place
-after loading; every other parameter is a constant).
+after loading; every other parameter is a constant), rotations (the rotary layer kinds - class names in a module's
+MRO - and the attributes that say its head size, rotary dimension and pairing, and where its forward takes the query
+and key: [[name, position], ...]).
 """
 import functools
 import inspect
@@ -182,6 +187,7 @@ class Declarations:
                 if names is not None and self.attach(t, names):
                     self._count("weight_named")
         self.constants(model)
+        self.rotations(model)
 
     def constants(self, model):
         """After loading, every parameter is a constant (nothing writes it again), except the ones the engine updates
@@ -196,6 +202,31 @@ class Declarations:
                     self._count("constant")
                 except Exception:  # noqa: BLE001
                     self._count("attach_failed")
+
+    def rotations(self, model):
+        """Every rotary layer of the model (a class the table's "rotations" names, in the module's MRO): while it runs,
+        the query and key it is handed mean tokens, heads of head_size features, and in each head the rotation pairs
+        its own is_neox_style declares (split: j with j + rotary_dim/2; interleaved: 2i with 2i+1). A kernel launched
+        inside the layer sees that meaning on the tensors of their shape and dtype (the layer's copies and outputs)."""
+        spec = self.choice("rotations")
+        if not spec:
+            return 0
+        classes = set(spec.get("classes") or [])
+        n = 0
+        for _mname, module in model.named_modules():
+            if getattr(module, "_entail_rotation", False) or \
+                    not any(c.__name__ in classes for c in type(module).__mro__):
+                continue
+            try:
+                module.register_forward_pre_hook(functools.partial(_rotation_enter, spec), with_kwargs=True)
+                module.register_forward_hook(_rotation_leave, with_kwargs=True, always_call=True)
+                module._entail_rotation = True
+                n += 1
+            except Exception:  # noqa: BLE001 - never the engine's problem
+                self._count("rotation_hook_failed")
+        if n:
+            self.stats["rotation_layers"] = self.stats.get("rotation_layers", 0) + n
+        return n
 
     def around(self, orig, model_arg=0):
         """`orig` (a function that processes a model's weights after loading, the model its argument `model_arg`)
@@ -288,6 +319,81 @@ class Declarations:
             elif isinstance(meaning, list):
                 names, basis = meaning
                 self.attach(t, list(names), basis)
+
+
+def rotation_view(shape, stride, head_size, rotary_dim, neox):
+    """(names, view shape, view strides) of a query or key of `shape` - (tokens, features) or (tokens, heads,
+    head_size) - whose heads have head_size features, the first rotary_dim of them rotated in pairs: split-wise (neox:
+    feature j with j + rotary_dim/2, the halves an unnamed axis, the pair's index "freq") or interleaved (2i with
+    2i+1). The features past rotary_dim keep the view's coordinates and are rotated by nothing. None when the shape
+    does not split so."""
+    P, rd = int(head_size), int(rotary_dim)
+    if P <= 0 or rd <= 0 or rd > P or rd % 2 or P % 2:
+        return None
+    if len(shape) == 2:
+        T, F = (int(x) for x in shape)
+        if F % P:
+            return None
+        H, st, sh, sf = F // P, int(stride[0]), P * int(stride[1]), int(stride[1])
+    elif len(shape) == 3:
+        T, H, P3 = (int(x) for x in shape)
+        if P3 != P:
+            return None
+        st, sh, sf = (int(x) for x in stride)
+    else:
+        return None
+    if neox:
+        half = rd // 2
+        if P % half:
+            return None
+        return ["token", "head", None, "freq"], (T, H, P // half, half), (st, sh, half * sf, sf)
+    return ["token", "head", "freq", None], (T, H, P // 2, 2), (st, sh, 2 * sf, sf)
+
+
+def _rotation_fact(values, head_size, rotary_dim, neox, shape, stride, dtype):
+    """The meaning, inside a rotary layer, of a tensor handed to a kernel: a query or key (a declared value's dtype,
+    its tokens and its features)."""
+    if len(shape) not in (2, 3):
+        return None
+    tokens, features = int(shape[0]), 1
+    for n in shape[1:]:
+        features *= int(n)
+    for vshape, vdtype in values:
+        vf = 1
+        for n in vshape[1:]:
+            vf *= int(n)
+        if vdtype == dtype and len(vshape) >= 2 and int(vshape[0]) == tokens and vf == features:
+            view = rotation_view(shape, stride, head_size, rotary_dim, neox)
+            return None if view is None else kernel_check.scoped_fact(*view)
+    return None
+
+
+def _rotation_enter(spec, module, args, kwargs):
+    """A rotary layer starts running: what its query and key mean, from its own attributes."""
+    if kernel_check._compiling():
+        return None
+    fact_for = None
+    try:
+        P = int(getattr(module, spec.get("head_size", "head_size")))
+        rd = int(getattr(module, spec.get("rotary_dim", "rotary_dim")))
+        neox = bool(getattr(module, spec.get("neox", "is_neox_style")))
+        values = []
+        for name, i in spec.get("values") or []:
+            t = kwargs.get(name) if name in kwargs else (args[i] if i < len(args) else None)
+            if t is not None and hasattr(t, "shape") and hasattr(t, "dtype"):
+                values.append((tuple(int(x) for x in t.shape), t.dtype))
+        if values:
+            fact_for = functools.partial(_rotation_fact, values, P, rd, neox)
+    except Exception:  # noqa: BLE001 - an attribute it does not have: it says nothing
+        fact_for = None
+    kernel_check.scope_push(fact_for)
+    return None
+
+
+def _rotation_leave(module, args, kwargs, out):
+    if not kernel_check._compiling():
+        kernel_check.scope_pop()
+    return None
 
 
 def scale_axes(value_shape, value_names, scale_shape):

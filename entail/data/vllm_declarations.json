@@ -1,5 +1,5 @@
 {
- "_": "vLLM 0.30 (an axis named null is not named: the embedding's width is the residual stream, which the rule's per-call names (a matmul contracts \"hidden\" and makes \"feature\") do not name across layers): what vLLM itself declares about the values it makes, as the rule names it (read by entail/adapters/vllm_declarations.py). layers: a layer kind (a class in the module's MRO) -> the names of a weight's output axis (output_dim) and input axis (input_dim); the MoE layer's weights are [expert, out, in] (in, out when the parameter says is_transposed). scales: a value parameter -> the parameters that are its scales; a scale's axes follow the value's by broadcast (equal size: the same axis; a size that divides: groups; size 1: no coordinate). functions: module:function (module:Class.method) -> what its tensor arguments mean (args: name -> [axes, basis], or \"moe_weight\"), which arguments pair as value and scale (pairs), and what it returns (returns: per returned tensor [axes, basis], {\"like\": arg} for the argument's meaning, {\"scale_of\": index} for the scale of a returned value). relations and merges: how bases derive from one another, and what a flat index over two adjacent axes means. mutable: the parameters vLLM updates in place after loading (everything else a layer holds after loading is a constant: written by nothing again).",
+ "_": "vLLM 0.30 (an axis named null is not named: the embedding's width is the residual stream, which the rule's per-call names (a matmul contracts \"hidden\" and makes \"feature\") do not name across layers): what vLLM itself declares about the values it makes, as the rule names it (read by entail/adapters/vllm_declarations.py). layers: a layer kind (a class in the module's MRO) -> the names of a weight's output axis (output_dim) and input axis (input_dim); the MoE layer's weights are [expert, out, in] (in, out when the parameter says is_transposed). scales: a value parameter -> the parameters that are its scales; a scale's axes follow the value's by broadcast (equal size: the same axis; a size that divides: groups; size 1: no coordinate). functions: module:function (module:Class.method) -> what its tensor arguments mean (args: name -> [axes, basis], or \"moe_weight\"), which arguments pair as value and scale (pairs), and what it returns (returns: per returned tensor [axes, basis], {\"like\": arg} for the argument's meaning, {\"scale_of\": index} for the scale of a returned value). relations and merges: how bases derive from one another, and what a flat index over two adjacent axes means. mutable: the parameters vLLM updates in place after loading (everything else a layer holds after loading is a constant: written by nothing again). rotations: the rotary layers (rotary_embedding/base.py RotaryEmbeddingBase - every rotary class but the dual-chunk and Phi-3 long-rope ones - keeps head_size, rotary_dim and is_neox_style, and its forward takes (positions, query, key)): while one runs, the query and key it is handed mean tokens, heads and, in each head, the rotation pairs is_neox_style declares.",
  "layers": {
   "VocabParallelEmbedding": {
    "out": "token_id",
@@ -178,5 +178,23 @@
   "_v_scale",
   "_q_scale",
   "_prob_scale"
- ]
+ ],
+ "rotations": {
+  "classes": [
+   "RotaryEmbeddingBase"
+  ],
+  "head_size": "head_size",
+  "rotary_dim": "rotary_dim",
+  "neox": "is_neox_style",
+  "values": [
+   [
+    "query",
+    1
+   ],
+   [
+    "key",
+    2
+   ]
+  ]
+ }
 }
