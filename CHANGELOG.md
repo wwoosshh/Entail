@@ -86,6 +86,13 @@ ships no engine (#59).
     marked that are still alive. The write goes through `.data`, so torch's version counters do not move.
   - The reports stay. In the same GLM-ASR run, all 32 are reported, and the transcript is the one without entail
     (the same token ids).
+- **`ENTAIL=types`: two inputs the checker raised on (#71).** Both were caught, so those launches were counted as
+  not decided and the runs did not change. Each now gets a verdict. Both were found on SGLang 0.5.18:
+  - A kernel whose name ends in `_loc` (`fill_accept_out_cache_loc`). The pattern that strips location annotations
+    took the name's `loc(` and the argument list after it for an annotation. `loc(` now has to be a word of its
+    own.
+  - An address computed from a pointer value the checker does not follow (`_fused_qk_rmsnorm_rope_gate_kernel`). It
+    is now not decided, with that reason, instead of an `AttributeError`.
 
 ## 2.3.0
 
