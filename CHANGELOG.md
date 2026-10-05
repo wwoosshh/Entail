@@ -54,6 +54,14 @@ ships no engine (#59).
   1.078x -> 1.060x with Triton FP8 and CUDA graphs, 1.047x -> 1.035x on the default path (compile, Marlin, CUDA
   graphs). Both differences are within the spread between rotations. Eager went from 1.62x to 1.39x (one
   rotation). The cost is still above the 1.02x the design asks for.
+- **`ENTAIL=types` reads what SGLang declares, as it reads vLLM (#65).** SGLang keeps vLLM's layer classes and weight
+  parameter classes. The reading moved into `entail/declarations.py` and is the same for every engine; each engine
+  has one table (`data/<engine>_declarations.json`) and a thin adapter that says where to read it. SGLang's reading
+  points are `DefaultModelLoader.postprocess_weights` and the FP8 activation quantizers. A table entry can say that
+  a function returns a value and its scale made together, with the group size read from the call.
+  - On SGLang 0.5.20 with Qwen3-4B-FP8, the block-FP8 matmul's 176 launch configurations were all unproven and are
+    now all proven. The output is the same as without entail, and nothing is reported broken.
+  - vLLM's verdicts are what they were.
 
 ## 2.3.0
 
