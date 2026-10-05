@@ -1,0 +1,517 @@
+{
+ "kernel": "vllm.v1.worker.gpu.spec_decode.autoregressive.speculator._prepare_prefill_inputs_kernel",
+ "grid": [
+  1
+ ],
+ "scalars": {
+  "max_num_reqs": 1
+ },
+ "tensors": {
+  "last_token_indices_ptr": {
+   "dtype": "torch.int64",
+   "shape": [
+    1
+   ],
+   "stride": [
+    1
+   ],
+   "fact": null
+  },
+  "draft_current_step_ptr": {
+   "dtype": "torch.int64",
+   "shape": [],
+   "stride": [],
+   "fact": null
+  },
+  "draft_input_ids_ptr": {
+   "dtype": "torch.int32",
+   "shape": [
+    1024
+   ],
+   "stride": [
+    1
+   ],
+   "fact": {
+    "names": [
+     "token"
+    ],
+    "kind": "index",
+    "serial": 0,
+    "pair": 0,
+    "groups": [
+     1
+    ],
+    "sums": {},
+    "pending": [],
+    "basis": "token_id",
+    "label": null,
+    "packed": null,
+    "life": "value",
+    "born": [
+     0,
+     0,
+     0
+    ],
+    "key": [
+     0,
+     38864420864
+    ],
+    "pointers": null
+   }
+  },
+  "draft_positions_ptr": {
+   "dtype": "torch.int64",
+   "shape": [
+    1024
+   ],
+   "stride": [
+    1
+   ],
+   "fact": {
+    "names": [
+     "token"
+    ],
+    "kind": "index",
+    "serial": 0,
+    "pair": 0,
+    "groups": [
+     1
+    ],
+    "sums": {},
+    "pending": [],
+    "basis": "position",
+    "label": null,
+    "packed": null,
+    "life": "value",
+    "born": [
+     0,
+     0,
+     0
+    ],
+    "key": [
+     0,
+     38864424960
+    ],
+    "pointers": null
+   }
+  },
+  "draft_query_start_loc_ptr": {
+   "dtype": "torch.int32",
+   "shape": [
+    2
+   ],
+   "stride": [
+    1
+   ],
+   "fact": {
+    "names": [
+     "batch_request_bound"
+    ],
+    "kind": "index",
+    "serial": 0,
+    "pair": 0,
+    "groups": [
+     1
+    ],
+    "sums": {},
+    "pending": [],
+    "basis": "token",
+    "label": null,
+    "packed": null,
+    "life": "value",
+    "born": [
+     0,
+     0,
+     0
+    ],
+    "key": [
+     0,
+     38864434176
+    ],
+    "pointers": null
+   }
+  },
+  "draft_seq_lens_ptr": {
+   "dtype": "torch.int32",
+   "shape": [
+    1
+   ],
+   "stride": [
+    1
+   ],
+   "fact": {
+    "names": [
+     "batch_request"
+    ],
+    "kind": "index",
+    "serial": 0,
+    "pair": 0,
+    "groups": [
+     1
+    ],
+    "sums": {},
+    "pending": [],
+    "basis": "position",
+    "label": null,
+    "packed": null,
+    "life": "value",
+    "born": [
+     0,
+     0,
+     0
+    ],
+    "key": [
+     0,
+     38864434688
+    ],
+    "pointers": null
+   }
+  },
+  "target_input_ids_ptr": {
+   "dtype": "torch.int32",
+   "shape": [
+    4
+   ],
+   "stride": [
+    1
+   ],
+   "fact": {
+    "names": [
+     "token"
+    ],
+    "kind": "index",
+    "serial": 0,
+    "pair": 0,
+    "groups": [
+     1
+    ],
+    "sums": {},
+    "pending": [],
+    "basis": "token_id",
+    "label": null,
+    "packed": null,
+    "life": "value",
+    "born": [
+     2,
+     2,
+     0
+    ],
+    "key": [
+     0,
+     38864457728
+    ],
+    "pointers": null
+   }
+  },
+  "target_positions_ptr": {
+   "dtype": "torch.int64",
+   "shape": [
+    4
+   ],
+   "stride": [
+    1
+   ],
+   "fact": {
+    "names": [
+     "token"
+    ],
+    "kind": "index",
+    "serial": 0,
+    "pair": 0,
+    "groups": [
+     1
+    ],
+    "sums": {},
+    "pending": [],
+    "basis": "position",
+    "label": null,
+    "packed": null,
+    "life": "value",
+    "born": [
+     1,
+     2,
+     0
+    ],
+    "key": [
+     0,
+     38864461824
+    ],
+    "pointers": null
+   }
+  },
+  "idx_mapping_ptr": {
+   "dtype": "torch.int64",
+   "shape": [
+    1
+   ],
+   "stride": [
+    1
+   ],
+   "fact": {
+    "names": [
+     "batch_request"
+    ],
+    "kind": "index",
+    "serial": 0,
+    "pair": 0,
+    "groups": [
+     1
+    ],
+    "sums": {},
+    "pending": [],
+    "basis": "request_state",
+    "label": null,
+    "packed": null,
+    "life": "value",
+    "born": [
+     2,
+     0,
+     0
+    ],
+    "key": [
+     0,
+     38865209344
+    ],
+    "pointers": null
+   }
+  },
+  "last_sampled_ptr": {
+   "dtype": "torch.int64",
+   "shape": [
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1
+   ],
+   "fact": {
+    "names": [
+     "request_state",
+     null
+    ],
+    "kind": "index",
+    "serial": 0,
+    "pair": 0,
+    "groups": [
+     1,
+     1
+    ],
+    "sums": {},
+    "pending": [],
+    "basis": "token_id",
+    "label": null,
+    "packed": null,
+    "life": "value",
+    "born": [
+     0,
+     0,
+     0
+    ],
+    "key": [
+     0,
+     38864456192
+    ],
+    "pointers": null
+   }
+  },
+  "next_prefill_tokens_ptr": {
+   "dtype": "torch.int32",
+   "shape": [
+    1,
+    1
+   ],
+   "stride": [
+    1,
+    1
+   ],
+   "fact": {
+    "names": [
+     "lookahead",
+     "request_state"
+    ],
+    "kind": "index",
+    "serial": 0,
+    "pair": 0,
+    "groups": [
+     1,
+     1
+    ],
+    "sums": {},
+    "pending": [],
+    "basis": "token_id",
+    "label": null,
+    "packed": null,
+    "life": "value",
+    "born": [
+     0,
+     0,
+     0
+    ],
+    "key": [
+     0,
+     38864457216
+    ],
+    "pointers": null
+   }
+  },
+  "num_sampled_ptr": {
+   "dtype": "torch.int32",
+   "shape": [
+    1
+   ],
+   "stride": [
+    1
+   ],
+   "fact": {
+    "names": [
+     "batch_request"
+    ],
+    "kind": "value",
+    "serial": 0,
+    "pair": 0,
+    "groups": [
+     1
+    ],
+    "sums": {},
+    "pending": [],
+    "basis": null,
+    "label": null,
+    "packed": null,
+    "life": "value",
+    "born": [
+     1,
+     0,
+     0
+    ],
+    "key": [
+     0,
+     38865279488
+    ],
+    "pointers": null
+   }
+  },
+  "num_rejected_ptr": {
+   "dtype": "torch.int32",
+   "shape": [
+    1
+   ],
+   "stride": [
+    1
+   ],
+   "fact": {
+    "names": [
+     "batch_request"
+    ],
+    "kind": "value",
+    "serial": 0,
+    "pair": 0,
+    "groups": [
+     1
+    ],
+    "sums": {},
+    "pending": [],
+    "basis": null,
+    "label": null,
+    "packed": null,
+    "life": "value",
+    "born": [
+     1,
+     0,
+     0
+    ],
+    "key": [
+     0,
+     38865281536
+    ],
+    "pointers": null
+   }
+  },
+  "query_start_loc_ptr": {
+   "dtype": "torch.int32",
+   "shape": [
+    2
+   ],
+   "stride": [
+    1
+   ],
+   "fact": {
+    "names": [
+     "batch_request_bound"
+    ],
+    "kind": "index",
+    "serial": 0,
+    "pair": 0,
+    "groups": [
+     1
+    ],
+    "sums": {},
+    "pending": [],
+    "basis": "token",
+    "label": null,
+    "packed": null,
+    "life": "value",
+    "born": [
+     0,
+     7,
+     0
+    ],
+    "key": [
+     0,
+     38864471040
+    ],
+    "pointers": null
+   }
+  },
+  "seq_lens_ptr": {
+   "dtype": "torch.int32",
+   "shape": [
+    1
+   ],
+   "stride": [
+    1
+   ],
+   "fact": {
+    "names": [
+     "batch_request"
+    ],
+    "kind": "index",
+    "serial": 0,
+    "pair": 0,
+    "groups": [
+     1
+    ],
+    "sums": {},
+    "pending": [],
+    "basis": "position",
+    "label": null,
+    "packed": null,
+    "life": "value",
+    "born": [
+     1,
+     6,
+     0
+    ],
+    "key": [
+     0,
+     38864471552
+    ],
+    "pointers": null
+   }
+  }
+ },
+ "recorded": {
+  "verdict": "violation",
+  "why": "a load addresses next_prefill_tokens_ptr along its axis 'lookahead' with a number that means a request_state",
+  "checks": 0,
+  "programs": 1,
+  "seconds": 0.0018,
+  "example": {
+   "program_chunk_index": 0,
+   "axis": 0,
+   "basis": "request_state"
+  },
+  "inferred": null
+ },
+ "source": "vLLM 0.30.0 V2 model runner, speculative decoding, max_num_seqs=1 (lowlevel/l7/results/unseen/vllm_43820/v2_runner)"
+}

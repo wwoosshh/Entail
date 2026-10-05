@@ -25,6 +25,26 @@ ships no engine (#59).
   small serving core they were measured with (a key/value pool in blocks, continuous batching with chunked prefill, a
   prefix cache, a CPU tier, preemption, over Qwen3; the tokens of transformers' greedy generation) was a test bed for
   the types, not part of the package: it was taken out before any release and is kept with the research record.
+- **`ENTAIL=types` (experimental): the three false alarms of 2.3.0 fixed (#61).** Each came from a rule that was too
+  narrow. None is fixed by an exception.
+  - **Marlin's weight type.** Marlin is told the weight type it reads (`b_q_type`), and the scales' format and the
+    packing now follow it. NVFP4 Marlin (4-bit floating weights with E4M3 group scales) had been reported broken,
+    because the check assumed FP8 Marlin. On Qwen3.5-4B-NVFP4 (vLLM 0.30.0) the compiled graphs now hold no
+    violation, and the output is the same as without entail.
+  - **Axes of size 1.** An axis of size 1 says nothing by its stride, so a number whose meaning names such an axis
+    is read along it. vLLM 0.30's drafter with one request had been reported broken. Its recorded launch is now
+    proven, and the same launch with a meaning that names no request slot is still a violation. A 0-d output tensor
+    no longer makes the check raise.
+  - **Reads while the engine assembles its model.** A read made while the engine assembles its model (vLLM's and
+    SGLang's own `load_model`) is settled when the assembly ends. It is reported if the model still holds the
+    parameter, and withdrawn if the engine replaced it. vLLM 0.22's Eagle3 drafter probes its embedding and then
+    takes the target's; that read is now withdrawn.
+- **What `ENTAIL=types` checked, on the platform (#61).**
+  - Every decided launch configuration and compiled graph is counted at the boundary `kernel:types` (the Kernels
+    node of `entail serve`).
+  - A broken launch or read is a decision there (`kernel:types`, `kernel:life`).
+  - At exit, one line says how many were checked and what is not read: the inside of C++ kernels and the engine's
+    own Python computation. `ENTAIL_QUIET=types` keeps that line off the console.
 
 ## 2.3.0
 

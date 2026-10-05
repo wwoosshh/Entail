@@ -3,5 +3,11 @@
   "loaders": {
     "vllm.model_executor.model_loader": "BaseModelLoader",
     "sglang.srt.model_loader.loader": "BaseModelLoader"
+  },
+  "_comment_assembly": "Where each engine assembles its model - the target and any draft model loaded and wired together (ROADMAP M22.2): module -> Class.method. A read of a parameter nothing wrote made inside it is settled when it ends: reported if the model still holds the parameter, withdrawn if the engine replaced it.",
+  "assembly": {
+    "vllm.v1.worker.gpu_model_runner": "GPUModelRunner.load_model",
+    "vllm.v1.worker.gpu.model_runner": "GPUModelRunner.load_model",
+    "sglang.srt.model_executor.model_runner": "ModelRunner.load_model"
   }
 }

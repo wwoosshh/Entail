@@ -496,6 +496,7 @@ def _graph(graph, example_inputs):
     _GRAPHS.append(v)
     _count(f"graph_{v['verdict']}")
     _write(dict(v, kind="types_graph", cached=False))
+    _tallied(BOUNDARY_TYPES, v["verdict"])
     for x in v.get("violations", []):
         _broken(f"graph.{x.get('op')}", kernel_types.Verdict("violation", x.get("why", "")))
     return v
@@ -567,6 +568,7 @@ def install_compile_cache():
                         _count(f"graph_{v.get('verdict', 'unproven')}")
                         _count("graph_from_cache")
                         _write(dict(v, kind="types_graph", cached=True))
+                        _tallied(BOUNDARY_TYPES, v.get("verdict", "unproven"))
             except Exception:  # noqa: BLE001
                 _count("graph_cache_failed")
             return orig(self, path, *args, **kwargs)
@@ -775,6 +777,7 @@ def _launch(fn, args, kwargs, grid):
             v = kernel_types.Verdict("unproven", f"the check raised {type(e).__name__}: {e}")
         hit = _VERDICTS[key] = (v, out_name, inferred)
         _count(f"verdict_{v.verdict}")
+        _tallied(BOUNDARY_TYPES, v.verdict)
         _count("verdict_from_cache" if cached else "verdict_decided")
         _write({"kind": "types_launch", "kernel": name, "grid": list(g), "scalars": scalars,
                 "tensors": {k: {"dtype": str(t.dtype), "shape": list(t.shape), "stride": list(t.stride()),
@@ -790,7 +793,7 @@ def _launch(fn, args, kwargs, grid):
     for why in life:
         _count("life_violation")
         _write({"kind": "types_life", "kernel": str(kkey[0]), "verdict": "violation", "why": why})
-        _broken(str(kkey[0]), kernel_types.Verdict("violation", why))
+        _broken(str(kkey[0]), kernel_types.Verdict("violation", why), boundary=BOUNDARY_LIFE)
     if v.verdict == "violation":
         _broken(str(kkey[0]), v)
     t0 = _tick("life", t0)
@@ -815,22 +818,102 @@ class Broken(RuntimeError):
 
 
 _REPORTED = set()
+# the boundaries the platform shows these under (data/nodes.json: "^kernel:" is the Kernels node)
+BOUNDARY_TYPES = "kernel:types"      # the rule at a kernel launch or a compiled graph
+BOUNDARY_LIFE = "kernel:life"        # memory nothing wrote, read (M19 L7)
 
 
-def _broken(kernel, v, stop=True, where=None):
+def _broken(kernel, v, stop=True, where=None, boundary=None):
     """A violation is broken: reported once per launch configuration, the run goes on - unless the policy stops
     at what is broken (ENTAIL_ON_BROKEN=stop), when the launch is refused before the kernel runs. `where` names a
-    reader that is not a kernel (a module), as it is."""
+    reader that is not a kernel (a module), as it is. The first report is also a decision in the record, at
+    `boundary` (default: kernel:life for a module reader, kernel:types for a kernel)."""
     key = (kernel, v.why)
     at = where or kernel.rsplit('.', 1)[-1]
+    stops = stop and os.environ.get("ENTAIL_ON_BROKEN", "report") == "stop"
     if key not in _REPORTED:
         _REPORTED.add(key)
         _count("broken_reported")
         if os.environ.get("ENTAIL_QUIET") not in ("all",):
             sys.stderr.write(f"entail: broken at {at}: {v.why}\n")
-    if stop and os.environ.get("ENTAIL_ON_BROKEN", "report") == "stop":
+        _decision(boundary or (BOUNDARY_LIFE if where is not None else BOUNDARY_TYPES), at, v.why, stops)
+    if stops:
         _count("broken_stopped")
         raise Broken(f"entail stopped {'a kernel launch' if where is None else 'a read'}: {at}: {v.why}")
+
+
+def _decision(boundary, consumer, why, refused=False):
+    """A broken read or launch as a decision in the record (record.write_json), counted for its boundary (tally):
+    what the platform's Kernels node shows. Never the engine's problem."""
+    try:
+        from . import record, tally
+
+        record.write_json({"pid": os.getpid(), "boundary": boundary, "consumer": consumer,
+                           "name": "Lifetime" if boundary == BOUNDARY_LIFE else "KernelMeaning",
+                           "verdict": "refused" if refused else "broken", "blocking": bool(refused),
+                           "rule": "lifetime" if boundary == BOUNDARY_LIFE else "kernel_types", "resolution": None,
+                           "handle": None, "target": None, "note": why, "lost_by": None, "declared": None,
+                           "chosen": None, "observed": None, "conflict": []})
+        if refused:
+            tally.refused(boundary)
+        else:
+            tally.broken(boundary)
+    except Exception:  # noqa: BLE001
+        _count("decision_record_failed")
+
+
+def _tallied(boundary, verdict):
+    """One decided launch configuration or compiled graph, counted for the platform: proven/checked as passed,
+    unproven/possible as not decided (skipped); a violation is counted by _decision."""
+    try:
+        from . import tally
+
+        c = tally.counts(boundary)
+        c["checks"] += 1
+        if verdict in ("proven", "checked"):
+            tally.passed(boundary, ["kernel_types"])
+        elif verdict != "violation":
+            c["skipped"] += 1
+        tally.tick(boundary)
+    except Exception:  # noqa: BLE001
+        _count("tally_failed")
+    _ended()
+
+
+_ENDED = [False]
+
+
+def _ended():
+    """Once per process: at exit, one line on what was checked and what was not read (the record, and stderr)."""
+    if _ENDED[0]:
+        return
+    _ENDED[0] = True
+    import atexit
+    atexit.register(_end_line)
+
+
+def end_text():
+    s = _STATS
+    n = sum(s.get(f"verdict_{k}", 0) for k in ("proven", "violation", "unproven", "possible"))
+    g = sum(s.get(f"graph_{k}", 0) for k in ("checked", "violation", "unproven"))
+    return (f"checked {n} kernel launch configurations ({s.get('verdict_proven', 0)} proven, "
+            f"{s.get('verdict_violation', 0)} broken, "
+            f"{s.get('verdict_unproven', 0) + s.get('verdict_possible', 0)} not decided) and {g} compiled graphs "
+            f"({s.get('graph_violation', 0)} broken); not read: the inside of C++ kernels (only what their "
+            f"arguments mean) and the engine's own Python computation")
+
+
+def _end_line():
+    try:
+        from . import record
+
+        text = end_text()
+        record.write_json({"pid": os.getpid(), "said": BOUNDARY_TYPES, "text": text})
+        if os.environ.get("ENTAIL_QUIET") not in ("all",) and \
+                "types" not in os.environ.get("ENTAIL_QUIET", "").replace(" ", "").split(","):
+            sys.stderr.write(f"entail: types: {text}\n")
+    except Exception:  # noqa: BLE001 - exiting: nothing to report to
+        pass
 
 
 def install_triton():
