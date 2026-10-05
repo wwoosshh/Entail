@@ -13,16 +13,20 @@ values it has meanings for). This module holds the first for the values a model 
                   wrote - no checkpoint tensor, no initializer and no processing gave them a value. Recorded at
                   once; reported (broken) when they are read: when the module holding the parameter runs (a forward
                   pre-hook, inert inside compiled code), when a Triton launch is handed the tensor, or when a
-                  compiled graph takes it as an input.
+                  compiled graph takes it as an input. Then every element that still holds the mark - in the
+                  parameters and in any other tensor the window marked that is still alive - is set to zero bits,
+                  what a fresh device allocation holds: the mark changes no value the run computes.
   assembly()      while an engine assembles its model (its own load_model: the model and any draft model made,
                   loaded and wired together; adapters/loaders.py), such a read is held. When the assembly ends it is
                   reported if the model still holds the parameter, and withdrawn if the engine replaced it: the read
                   was a trial call whose result reached nothing the model keeps (vLLM 0.22's drafter probes its
                   embedding, then shares the target's).
-Nothing is repaired: there is no value to repair to. The mark replaces whatever the memory happened to hold, so a
-program that reads memory nothing wrote reads the mark instead of leftovers.
-Cost: one fill per allocation made in the window, one pass over the parameters when it closes (both at memory
-speed), and a Python call per torch function called while the window is open.
+Nothing is repaired: there is no value to repair to, and the reports stay. Until 2.4.0 the mark stayed in the
+memory: a program that read memory nothing wrote read the mark (NaN), so a run that was right because that memory
+happened to hold zeros went wrong (GLM-ASR's k bias, ROADMAP M22.5). Zero bits are what the memory most often holds
+without entail.
+Cost: one fill per allocation made in the window, one pass over the parameters and the marked tensors still alive
+when it closes (both at memory speed), and a Python call per torch function called while the window is open.
 """
 import contextlib
 import os
@@ -34,6 +38,7 @@ import weakref
 _LOCK = threading.RLock()
 _STATE = {"depth": 0, "mode": None, "marked": 0, "marked_bytes": 0, "opened": None, "assembling": 0}
 _PENDING = []          # reads held while an engine assembles its model: settled when the assembly ends
+_MARKED = []           # the tensors the open window marked (weak references): set back to zero bits after loaded()
 _STATS = {}
 _SPECS = {}
 CHUNK = 1 << 26        # elements compared at once when a parameter is read for the mark (bounds the temporary)
@@ -104,6 +109,11 @@ def mark(t):
         _STATE["marked_bytes"] += t.numel() * t.element_size()
     except Exception:  # noqa: BLE001 - a tensor that cannot be marked is not checked
         _count("mark_failed")
+        return
+    try:
+        _MARKED.append(weakref.ref(t))
+    except TypeError:
+        pass
 
 
 def unwritten(t):
@@ -138,6 +148,69 @@ def unwritten(t):
     return total
 
 
+def zero(t):
+    """Set the elements of `t` that still hold the mark to zero bits, as `unwritten` counts them; returns how many.
+    Written through .data, which torch's version counter does not see: the value is the one the memory would most
+    often have held, not a write after loading."""
+    if not _plain(t) or t.device.type == "meta" or t.numel() == 0:
+        return 0
+    spec = _spec(t.dtype)
+    if spec is None:
+        return 0
+    view, value, each = spec
+    x = t.data.view(view)
+    total = 0
+    if each:
+        if x.is_contiguous() or x.dim() == 0:
+            flat = x.reshape(-1)
+            segs = (flat[i:i + CHUNK] for i in range(0, flat.numel(), CHUNK))
+        else:
+            step = max(1, CHUNK // max(1, x[0].numel()))
+            segs = (x[i:i + step] for i in range(0, x.shape[0], step))
+        for seg in segs:
+            hit = seg == value
+            total += int(hit.sum())
+            seg.masked_fill_(hit, 0)
+        return total
+    if not x.is_contiguous():
+        return 0
+    k = max(1, RUN // x.element_size())
+    flat = x.reshape(-1)
+    n = flat.numel() // k * k
+    step = max(k, CHUNK // k * k)
+    for i in range(0, n, step):
+        rows = flat[i:min(i + step, n)].view(-1, k)
+        hit = (rows == value).all(dim=1)
+        total += int(hit.sum()) * k
+        rows[hit] = 0
+    return total
+
+
+def _zeroed(t):
+    try:
+        return zero(t)
+    except Exception:  # noqa: BLE001 - a tensor that cannot be written keeps the mark
+        _count("restore_failed")
+        return 0
+
+
+def _restore(tensors=()):
+    """`tensors` (a model's parameters and buffers: a parameter is a new object over the marked tensor's memory) and
+    every tensor object the window marked that is still alive: what still holds the mark is set to zero bits."""
+    with _LOCK:
+        refs = list(_MARKED)
+        _MARKED.clear()
+    n = 0
+    seen = set()
+    for t in list(tensors) + [ref() for ref in refs]:
+        if t is None or id(t) in seen:
+            continue
+        seen.add(id(t))
+        n += _zeroed(t)
+    _count("restored_elements", n)
+    return n
+
+
 def _empties():
     import torch
 
@@ -170,6 +243,7 @@ def load_window():
         outer = _STATE["depth"] == 1
     mode = None
     if outer:
+        _restore()                       # an earlier window's marks that no loaded() read: nothing reports them
         _STATE["opened"] = time.perf_counter()
         _STATE["marked"] = _STATE["marked_bytes"] = 0
         try:
@@ -193,8 +267,11 @@ def load_window():
 def loaded(model):
     """When the outermost window has closed: the model's parameters, read for the mark. Each parameter with elements
     nothing wrote gets that on its fact, and the module holding it a pre-hook that reports it when the module runs.
-    Returns [(name, elements unwritten, elements)]."""
-    if _STATE["depth"] > 0 or model is None or not hasattr(model, "named_modules"):
+    Then what still holds the mark is set to zero bits. Returns [(name, elements unwritten, elements)]."""
+    if _STATE["depth"] > 0:
+        return []
+    if model is None or not hasattr(model, "named_modules"):
+        _restore()
         return []
     from . import kernel_check
 
@@ -205,6 +282,7 @@ def loaded(model):
             if p is not None:
                 owners.setdefault(id(p), (p, []))[1].append((mname, module, pname))
     found = []
+    holding = []
     readers = {}
     for p, where in owners.values():
         try:
@@ -214,6 +292,7 @@ def loaded(model):
             continue
         if not n:
             continue
+        holding.append(p)
         mname, _module, pname = where[0]
         found.append((f"{mname}.{pname}" if mname else pname, n, p.numel()))
         try:
@@ -225,6 +304,11 @@ def loaded(model):
     root = weakref.ref(model)
     for module, mname, items in readers.values():
         _hook(module, mname, items, root)
+    try:
+        buffers = list(model.buffers())
+    except Exception:  # noqa: BLE001
+        buffers = []
+    zeroed = _restore(holding + buffers)
     _count("windows")
     _count("parameters", len(owners))
     _count("unwritten_parameters", len(found))
@@ -232,12 +316,13 @@ def loaded(model):
     kernel_check._write({"kind": "types_life_load", "parameters": len(owners), "unwritten": len(found),
                          "examples": [{"name": n, "elements": k, "of": m} for n, k, m in found[:40]],
                          "marked": _STATE["marked"], "marked_bytes": _STATE["marked_bytes"],
+                         "zeroed": zeroed,
                          "window_seconds": None if opened is None else round(t0 - opened, 3),
                          "read_seconds": round(time.perf_counter() - t0, 3)})
     if found and "load" not in os.environ.get("ENTAIL_QUIET", "").replace(" ", "").split(","):
         sys.stderr.write(f"entail: {len(found)} of {len(owners)} parameters hold elements nothing wrote while the "
                          f"model was loaded (first: {found[0][0]}, {found[0][1]} of {found[0][2]}); each is reported "
-                         f"as broken when it is read\n")
+                         f"as broken when it is read (those elements are set to zero, as fresh memory holds)\n")
     return found
 
 
